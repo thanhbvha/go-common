@@ -7,9 +7,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thanhbvha/go-common/example1/registry"
-	"github.com/thanhbvha/go-common/example1/tasks"
-	_ "github.com/thanhbvha/go-common/example1/tasks" // Blank import to run init() and register tasks
+	"github.com/thanhbvha/go-common/example/queue/registry"
+	"github.com/thanhbvha/go-common/example/queue/tasks"
+	_ "github.com/thanhbvha/go-common/example/queue/tasks" // Blank import to run init() and register tasks
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/queue"
 	gored "github.com/thanhbvha/go-common/redis"
@@ -42,7 +42,7 @@ func main() {
 	logger.Info("Connected to Redis successfully.")
 
 	// 3. Autoload Tasks
-	// The blank import `_ "github.com/thanhbvha/go-common/example1/tasks"` at the top
+	// The blank import `_ "github.com/thanhbvha/go-common/example/queue/tasks"` at the top
 	// ensures that the init() functions in the tasks package execute
 	// and register their configurations and handlers into our central registry.
 

@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/example1/registry"
+	"github.com/thanhbvha/go-common/example/queue/registry"
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/queue"
 )
 
 func init() {
 	logger.InfoAsync("Registering ExampleJobHandler to queue")
-	
+
 	// Register the task to the central registry instead of the global queue.
 	registry.Register("example_job_type", queue.JobTypeOptions{
 		Concurrency: 10,
@@ -44,7 +44,7 @@ func ExampleJobHandler(job queue.Job) error {
 	}
 
 	jobData["createDate"] = time.Now().Unix()
-	
+
 	// Submit to the internal worker pool for DB writing
 	dbWorkerInstance.SubmitToWorkerPool(jobData)
 
@@ -129,7 +129,7 @@ func (pool *DBWorkerPool) Shutdown(timeout time.Duration) error {
 	done := make(chan bool)
 	go func() {
 		// Wait slightly for pending workers to drain the channel.
-		time.Sleep(100 * time.Millisecond) 
+		time.Sleep(100 * time.Millisecond)
 		done <- true
 	}()
 
