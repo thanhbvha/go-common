@@ -226,6 +226,87 @@ func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, er
 	return rc.HGetAll(ctx, key).Result()
 }
 
+// HDel removes one or more fields from the hash stored at key.
+func (c *Client) HDel(ctx context.Context, key string, fields ...string) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.HDel(ctx, key, fields...).Result()
+}
+
+// HExists returns whether field is an existing field in the hash stored at key.
+func (c *Client) HExists(ctx context.Context, key, field string) (bool, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return false, err
+	}
+	return rc.HExists(ctx, key, field).Result()
+}
+
+// HIncrBy increments the number stored at field in the hash stored at key by increment.
+func (c *Client) HIncrBy(ctx context.Context, key, field string, incr int64) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.HIncrBy(ctx, key, field, incr).Result()
+}
+
+// HIncrByFloat increments the float value of a hash field by the given amount.
+func (c *Client) HIncrByFloat(ctx context.Context, key, field string, incr float64) (float64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.HIncrByFloat(ctx, key, field, incr).Result()
+}
+
+// HKeys returns all field names in the hash stored at key.
+func (c *Client) HKeys(ctx context.Context, key string) ([]string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return rc.HKeys(ctx, key).Result()
+}
+
+// HVals returns all values in the hash stored at key.
+func (c *Client) HVals(ctx context.Context, key string) ([]string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return rc.HVals(ctx, key).Result()
+}
+
+// HLen returns the number of fields contained in the hash stored at key.
+func (c *Client) HLen(ctx context.Context, key string) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.HLen(ctx, key).Result()
+}
+
+// HMGet returns the values associated with the specified fields in the hash stored at key.
+func (c *Client) HMGet(ctx context.Context, key string, fields ...string) ([]interface{}, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return rc.HMGet(ctx, key, fields...).Result()
+}
+
+// HSetNX sets field in the hash stored at key to value, only if field does not yet exist.
+func (c *Client) HSetNX(ctx context.Context, key, field string, value interface{}) (bool, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return false, err
+	}
+	return rc.HSetNX(ctx, key, field, value).Result()
+}
+
 // ---- List operations ----
 
 // LPush prepends one or more values to the list stored at key.
@@ -235,6 +316,123 @@ func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) e
 		return err
 	}
 	return rc.LPush(ctx, key, values...).Err()
+}
+
+// LPushX prepends one or more values to the list stored at key, only if the list exists.
+func (c *Client) LPushX(ctx context.Context, key string, values ...interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.LPushX(ctx, key, values...).Err()
+}
+
+// RPush appends one or more values to the list stored at key.
+func (c *Client) RPush(ctx context.Context, key string, values ...interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.RPush(ctx, key, values...).Err()
+}
+
+// RPushX appends one or more values to the list stored at key, only if the list exists.
+func (c *Client) RPushX(ctx context.Context, key string, values ...interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.RPushX(ctx, key, values...).Err()
+}
+
+// LPop removes and returns the first element of the list at key.
+func (c *Client) LPop(ctx context.Context, key string) (string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return "", err
+	}
+	return rc.LPop(ctx, key).Result()
+}
+
+// LLen returns the length of the list stored at key.
+func (c *Client) LLen(ctx context.Context, key string) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.LLen(ctx, key).Result()
+}
+
+// LIndex returns the element at index in the list stored at key.
+func (c *Client) LIndex(ctx context.Context, key string, index int64) (string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return "", err
+	}
+	return rc.LIndex(ctx, key, index).Result()
+}
+
+// LSet sets the list element at index to value.
+func (c *Client) LSet(ctx context.Context, key string, index int64, value interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.LSet(ctx, key, index, value).Err()
+}
+
+// LInsert inserts value in the list stored at key either before or after the reference value pivot.
+func (c *Client) LInsert(ctx context.Context, key, op string, pivot, value interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.LInsert(ctx, key, op, pivot, value).Err()
+}
+
+// LRem removes the first count occurrences of elements equal to value from the list stored at key.
+func (c *Client) LRem(ctx context.Context, key string, count int64, value interface{}) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.LRem(ctx, key, count, value).Result()
+}
+
+// LTrim trims an existing list so that it will contain only the specified range of elements specified.
+func (c *Client) LTrim(ctx context.Context, key string, start, stop int64) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.LTrim(ctx, key, start, stop).Err()
+}
+
+// RPopLPush atomically returns and removes the last element (tail) of the list stored at source, and pushes the element at the first element (head) of the list stored at destination.
+func (c *Client) RPopLPush(ctx context.Context, source, destination string) (string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return "", err
+	}
+	return rc.RPopLPush(ctx, source, destination).Result()
+}
+
+// BLPop is a blocking list pop primitive.
+func (c *Client) BLPop(ctx context.Context, timeout time.Duration, keys ...string) ([]string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return rc.BLPop(ctx, timeout, keys...).Result()
+}
+
+// BRPop is a blocking list pop primitive.
+func (c *Client) BRPop(ctx context.Context, timeout time.Duration, keys ...string) ([]string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return rc.BRPop(ctx, timeout, keys...).Result()
 }
 
 // RPop removes and returns the last element of the list at key.
@@ -266,6 +464,33 @@ func (c *Client) SMembers(ctx context.Context, key string) ([]string, error) {
 	return rc.SMembers(ctx, key).Result()
 }
 
+// SRem removes one or more members from the set stored at key.
+func (c *Client) SRem(ctx context.Context, key string, members ...interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.SRem(ctx, key, members...).Err()
+}
+
+// SIsMember returns true if member is a member of the set stored at key.
+func (c *Client) SIsMember(ctx context.Context, key, member string) (bool, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return false, err
+	}
+	return rc.SIsMember(ctx, key, member).Result()
+}
+
+// SPop removes and returns one or more members from the set stored at key.
+func (c *Client) SPop(ctx context.Context, key string) (string, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return "", err
+	}
+	return rc.SPop(ctx, key).Result()
+}
+
 // ---- Sorted Set operations ----
 
 // ZAdd adds one or more members with scores to the sorted set at key.
@@ -284,6 +509,42 @@ func (c *Client) ZRange(ctx context.Context, key string, start, stop int64) ([]s
 		return nil, err
 	}
 	return rc.ZRange(ctx, key, start, stop).Result()
+}
+
+// ZRem removes one or more members from the sorted set at key.
+func (c *Client) ZRem(ctx context.Context, key string, members ...interface{}) error {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return err
+	}
+	return rc.ZRem(ctx, key, members...).Err()
+}
+
+// ZCard returns the number of elements in the sorted set at key.
+func (c *Client) ZCard(ctx context.Context, key string) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.ZCard(ctx, key).Result()
+}
+
+// ZScore returns the score of element in the sorted set at key.
+func (c *Client) ZScore(ctx context.Context, key, member string) (float64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.ZScore(ctx, key, member).Result()
+}
+
+// ZRank returns the rank of element in the sorted set at key.
+func (c *Client) ZRank(ctx context.Context, key, member string) (int64, error) {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return 0, err
+	}
+	return rc.ZRank(ctx, key, member).Result()
 }
 
 // ---- Pipeline / transaction ----
