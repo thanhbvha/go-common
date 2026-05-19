@@ -11,6 +11,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
 | `redis` | Redis client wrapper (single / cluster / sentinel) with health-check |
 | `queue` | Durable Redis Streams job queue — delays, retries, DLQ, reclaim |
+| `websocket` | Clustered, framework-agnostic real-time WebSocket server (Fiber / Gin / Echo) |
 
 ## Requirements
 
@@ -198,12 +199,100 @@ Enqueue ──► Redis Stream (per job type)
 
 ---
 
+## websocket
+
+A high-performance, framework-agnostic, and clustered WebSocket library with support for parallel Shard sharding, asynchronous worker pools, token-bucket rate limiting, and Redis Pub/Sub cluster routing.
+
+Includes dedicated adapters for popular Go web frameworks:
+- **Fiber Adapter (`websocket/adapter/fiber`)**
+- **Gin Adapter (`websocket/adapter/gin`)**
+- **Echo Adapter (`websocket/adapter/echo`)**
+
+### Core Concepts
+
+1. **Framework-Agnostic Core (`ws.Conn`):** All connections are abstracted through the `ws.Conn` interface, which wraps standard `gorilla/websocket` or any custom engine.
+2. **Actor-like Shard Sharding:** Connections are dynamically distributed across multiple parallel `Shard` instances using a consistent xxHash algorithm on the `userID`. Each Shard runs its own isolated message-select loop to prevent CPU lock contention.
+3. **Asynchronous Processing:** Heavy computations and event handlers are offloaded to an asynchronous Goroutine worker pool, ensuring the connection's network reader is never blocked.
+4. **Zero-Config Standalone Fallback:** If the Redis default client is not registered or unavailable, the clustered coordination engine seamlessly runs in standalone loopback mode.
+
+### Usage Example
+
+```go
+import (
+	"github.com/thanhbvha/go-common/websocket/ws"
+	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
+	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
+	wsEcho "github.com/thanhbvha/go-common/websocket/adapter/echo"
+)
+
+func main() {
+	// 1. Register Custom Event Handlers
+	ws.RegisterHandler("chat_message", func(conn *ws.Connection, msg ws.IncomingMessage) error {
+		// Process message asynchronously in worker pool
+		conn.SendJSON(ws.OutgoingMessage{
+			Type: "chat_echo",
+			Data: map[string]interface{}{"payload": string(msg.Data)},
+		})
+		return nil
+	})
+
+	// 2. Instantiate Adapters (Zero-arguments defaults fallback)
+
+	// A. Fiber Adapter Setup
+	fiberHandler := wsFiber.NewHandler()
+	fiberServer := wsFiber.NewServer(8080, fiberHandler)
+	fiberServer.SetupRoutes()
+	go fiberServer.Start()
+
+	// B. Gin Adapter Setup
+	ginHandler := wsGin.NewHandler()
+	r := gin.Default()
+	r.GET("/ws", ginHandler.HandleUpgrade)
+
+	// C. Echo Adapter Setup
+	echoHandler := wsEcho.NewHandler()
+	e := echo.New()
+	e.GET("/ws", echoHandler.HandleUpgrade)
+}
+```
+
+### Key types
+
+| Symbol | Description |
+|---|---|
+| `ws.Conn` | WebSocket connection abstraction interface |
+| `ws.Connection` | Active thread-safe client session (with read/write pumps) |
+| `ws.Shard` | Parallel communication channel (room & group routers) |
+| `ws.Manager` | Process-wide websocket registry & sharding distributor |
+| `pubsub.PubSubManager` | Redis-backed multi-node clustered message router |
+| `limiter.RateLimiter` | Generic token-bucket rate throttler |
+
+---
+
 ## Full example
 
-See [`example/main.go`](example/main.go) for a wired-up binary.
+See [`example/queue/main.go`](example/queue/main.go) for a wired-up binary.
 
 ```bash
-REDIS_HOST=localhost go run ./example/main.go
+go run ./example/queue/main.go
+```
+
+See [`example/websocket/fiber/main.go`](example/websocket/fiber/main.go) for a wired-up binary.
+
+```bash
+go run ./example/websocket/fiber/main.go
+```
+
+See [`example/websocket/gin/main.go`](example/websocket/gin/main.go) for a wired-up binary.
+
+```bash
+go run ./example/websocket/gin/main.go
+```
+
+See [`example/websocket/echo/main.go`](example/websocket/echo/main.go) for a wired-up binary.
+
+```bash
+go run ./example/websocket/echo/main.go
 ```
 
 ---
