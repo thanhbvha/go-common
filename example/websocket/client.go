@@ -314,10 +314,8 @@ func gracefulClose(c *websocket.Conn) {
 		fmt.Printf("Error sending close frame: %v\n", err)
 		return
 	}
-	select {
-	case <-time.After(1 * time.Second):
-		fmt.Println("Closing local TCP socket.")
-	}
+	<-time.After(1 * time.Second)
+	fmt.Println("Closing local TCP socket.")
 }
 
 // runPreflightChecks performs GET queries to `/health` and `/stats` endpoints.
