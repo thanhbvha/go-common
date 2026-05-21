@@ -7,11 +7,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thanhbvha/go-common/example/queue/registry"
 	"github.com/thanhbvha/go-common/example/queue/tasks"
 	_ "github.com/thanhbvha/go-common/example/queue/tasks" // Blank import to run init() and register tasks
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/queue"
+	"github.com/thanhbvha/go-common/queue/registry"
 	gored "github.com/thanhbvha/go-common/redis"
 )
 

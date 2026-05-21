@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/example/queue/registry"
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/queue"
+	"github.com/thanhbvha/go-common/queue/registry"
 )
 
 func init() {
