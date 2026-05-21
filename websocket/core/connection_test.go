@@ -1,5 +1,5 @@
-// Package ws contains the core WebSocket sharding, connection lifecycle, and manager logic.
-package ws
+// package core contains the core WebSocket sharding, connection lifecycle, and manager logic.
+package core
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ func (m *mockWriteCloser) Close() error {
 	return nil
 }
 
-// mockConn satisfies the ws.Conn interface for testing.
+// mockConn satisfies the core.Conn interface for testing.
 type mockConn struct {
 	readChan  chan []byte
 	writeChan chan []byte

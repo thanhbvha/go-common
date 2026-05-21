@@ -210,7 +210,7 @@ Includes dedicated adapters for popular Go web frameworks:
 
 ### Core Concepts
 
-1. **Framework-Agnostic Core (`ws.Conn`):** All connections are abstracted through the `ws.Conn` interface, which wraps standard `gorilla/websocket` or any custom engine.
+1. **Framework-Agnostic Core (`core.Conn`):** All connections are abstracted through the `core.Conn` interface, which wraps standard `gorilla/websocket` or any custom engine.
 2. **Actor-like Shard Sharding:** Connections are dynamically distributed across multiple parallel `Shard` instances using a consistent xxHash algorithm on the `userID`. Each Shard runs its own isolated message-select loop to prevent CPU lock contention.
 3. **Asynchronous Processing:** Heavy computations and event handlers are offloaded to an asynchronous Goroutine worker pool, ensuring the connection's network reader is never blocked.
 4. **Zero-Config Standalone Fallback:** If the Redis default client is not registered or unavailable, the clustered coordination engine seamlessly runs in standalone loopback mode.
@@ -222,16 +222,16 @@ The library utilizes a highly parallel, sharded architecture that isolates state
 graph TD
     Client[WebSocket Client] -->|1. Upgrade Request| Adapter[Framework Adapter: Fiber/Gin/Echo]
     Adapter -->|2. Authenticate & Extract UserID| Limiter[Rate & Connection Limiters]
-    Limiter -->|3. Allow| Manager[ws.Manager]
+    Limiter -->|3. Allow| Manager[core.Manager]
     Manager -->|4. xxHash sum64 UserID % maxShards| Router{Consistent Hashing}
-    Router -->|5. Route Connection| Shard[ws.Shard x]
+    Router -->|5. Route Connection| Shard[core.Shard x]
     
-    subgraph Shard Internals [ws.Shard Node Partition]
+    subgraph Shard Internals [core.Shard Node Partition]
         Shard -->|Register| activeConns["activeConns (map[*Connection]bool)"]
         Shard -->|Multi-Device Track| userSessions["userSessions (map[userID]map[*Connection]bool)"]
         Shard -->|Room Mapping| chatRooms["chatRooms (map[roomID]map[userID]map[*Connection]bool)"]
         
-        readPump[readPump Goroutine] <-->|Raw Network IO| conn[ws.Connection]
+        readPump[readPump Goroutine] <-->|Raw Network IO| conn[core.Connection]
         writePump[writePump Goroutine] <-->|Write Queue| conn
     end
 
@@ -247,10 +247,10 @@ graph TD
 ##### A. Connection Upgrade & Shard Routing
 1. A client initiates a standard WebSocket handshake at `/ws?user_id=123&token=abc`.
 2. The framework adapter (**Fiber**, **Gin**, or **Echo**) verifies the handshake, authenticates the query credentials, and checks rate limits and concurrent IP limits.
-3. The adapter extracts the logical `userID` (e.g. `user_123`) and requests a shard assignment from the **`ws.Manager`**.
+3. The adapter extracts the logical `userID` (e.g. `user_123`) and requests a shard assignment from the **`core.Manager`**.
 4. The `Manager` performs a consistent hashing routing operation:
    $$\text{ShardIndex} = \text{xxHash.Sum64String}(\text{userID}) \pmod{\text{maxShards}}$$
-5. The connection is upgrade-wrapped and registered to the corresponding **`ws.Shard`**. The shard handles multi-device management automatically inside `userSessions`.
+5. The connection is upgrade-wrapped and registered to the corresponding **`core.Shard`**. The shard handles multi-device management automatically inside `userSessions`.
 
 ##### B. Parallel Message Pump & Event Loop
 *   **`readPump` (1 per connection):** Reads raw messages from the client network socket. Upon receiving a frame, it encapsulates the bytes into an `EventMessage` and passes it to the shard's incoming message queue.
@@ -266,7 +266,7 @@ graph TD
 
 ```go
 import (
-	"github.com/thanhbvha/go-common/websocket/ws"
+	"github.com/thanhbvha/go-common/websocket/core"
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
 	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
 	wsEcho "github.com/thanhbvha/go-common/websocket/adapter/echo"
@@ -274,9 +274,9 @@ import (
 
 func main() {
 	// 1. Register Custom Event Handlers
-	ws.RegisterHandler("chat_message", func(conn *ws.Connection, msg ws.IncomingMessage) error {
+	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
 		// Process message asynchronously in worker pool
-		conn.SendJSON(ws.OutgoingMessage{
+		conn.SendJSON(core.OutgoingMessage{
 			Type: "chat_echo",
 			Data: map[string]interface{}{"payload": string(msg.Data)},
 		})
@@ -307,10 +307,10 @@ func main() {
 
 | Symbol | Description |
 |---|---|
-| `ws.Conn` | WebSocket connection abstraction interface |
-| `ws.Connection` | Active thread-safe client session (with read/write pumps) |
-| `ws.Shard` | Parallel communication channel (room & group routers) |
-| `ws.Manager` | Process-wide websocket registry & sharding distributor |
+| `core.Conn` | WebSocket connection abstraction interface |
+| `core.Connection` | Active thread-safe client session (with read/write pumps) |
+| `core.Shard` | Parallel communication channel (room & group routers) |
+| `core.Manager` | Process-wide websocket registry & sharding distributor |
 | `pubsub.PubSubManager` | Redis-backed multi-node clustered message router |
 | `limiter.RateLimiter` | Generic token-bucket rate throttler |
 

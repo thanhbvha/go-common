@@ -10,7 +10,7 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/ws"
+	"github.com/thanhbvha/go-common/websocket/core"
 )
 
 // Config holds the configuration options for the Fiber WebSocket adapter.
@@ -103,7 +103,7 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 
 		defer h.config.ConnectionLimiter.RemoveConnection(clientIP)
 
-		manager := ws.GetGlobalManager()
+		manager := core.GetGlobalManager()
 		shardID := manager.GetShardID(userID)
 
 		adapterConn := NewConnAdapter(conn)
@@ -116,7 +116,7 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 
 // HandleStats returns JSON-formatted runtime metrics of the Manager, pubsub system, and limiters.
 func (h *Handler) HandleStats(c *fiber.Ctx) error {
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	pubsubManager := pubsub.GetGlobalPubSub()
 
 	return c.JSON(fiber.Map{
@@ -134,7 +134,7 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "shard ID required"})
 	}
 
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	if shard, exists := manager.GetShard(shardID); exists {
 		return c.JSON(fiber.Map{
 			"shardID":     shardID,
@@ -148,7 +148,7 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 
 // HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
 func (h *Handler) HandleHealthCheck(c *fiber.Ctx) error {
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	stats := manager.GetStats()
 
 	return c.JSON(fiber.Map{

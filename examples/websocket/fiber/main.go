@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/redis"
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
-	"github.com/thanhbvha/go-common/websocket/ws"
+	"github.com/thanhbvha/go-common/websocket/core"
 )
 
 func main() {
@@ -54,11 +54,11 @@ func main() {
 	}
 
 	// 3. Register custom event handlers for business logic
-	ws.RegisterHandler("chat_message", func(conn *ws.Connection, msg ws.IncomingMessage) error {
+	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
 		logger.InfoAsync("Received chat message event", "userID", conn.GetUserID(), "payload", string(msg.Data))
 
 		// Echo message back to sender
-		conn.SendJSON(ws.OutgoingMessage{
+		conn.SendJSON(core.OutgoingMessage{
 			Type: "chat_echo",
 			Data: map[string]interface{}{
 				"sender":  conn.GetUserID(),
@@ -102,6 +102,6 @@ func main() {
 	}
 
 	// Terminate active manager routines and connection pools
-	ws.GetGlobalManager().Shutdown()
+	core.GetGlobalManager().Shutdown()
 	logger.InfoAsync("Service shutdown completed gracefully.")
 }

@@ -6,16 +6,16 @@ import (
 	"time"
 
 	"github.com/gofiber/websocket/v2"
-	"github.com/thanhbvha/go-common/websocket/ws"
+	"github.com/thanhbvha/go-common/websocket/core"
 )
 
-// ConnAdapter wraps a fiber websocket.Conn to satisfy the generic ws.Conn interface.
+// ConnAdapter wraps a fiber websocket.Conn to satisfy the generic core.Conn interface.
 type ConnAdapter struct {
 	conn *websocket.Conn
 }
 
 // NewConnAdapter instantiates a ConnAdapter wrapping the concrete Fiber websocket connection.
-func NewConnAdapter(conn *websocket.Conn) ws.Conn {
+func NewConnAdapter(conn *websocket.Conn) core.Conn {
 	return &ConnAdapter{conn: conn}
 }
 

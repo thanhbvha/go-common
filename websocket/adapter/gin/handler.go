@@ -11,7 +11,7 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/ws"
+	"github.com/thanhbvha/go-common/websocket/core"
 )
 
 // Config holds the configuration options for the Gin WebSocket adapter.
@@ -113,7 +113,7 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 			}
 		}()
 
-		manager := ws.GetGlobalManager()
+		manager := core.GetGlobalManager()
 		shardID := manager.GetShardID(userID)
 
 		if err := manager.HandleConnection(conn, shardID, userID, clientIP, requestID); err != nil {
@@ -124,7 +124,7 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.
 func (h *Handler) HandleStats(c *gin.Context) {
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	pubsubManager := pubsub.GetGlobalPubSub()
 
 	c.JSON(http.StatusOK, gin.H{
@@ -143,7 +143,7 @@ func (h *Handler) HandleShardManagement(c *gin.Context) {
 		return
 	}
 
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	if shard, exists := manager.GetShard(shardID); exists {
 		c.JSON(http.StatusOK, gin.H{
 			"shardID":     shardID,
@@ -158,7 +158,7 @@ func (h *Handler) HandleShardManagement(c *gin.Context) {
 
 // HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
 func (h *Handler) HandleHealthCheck(c *gin.Context) {
-	manager := ws.GetGlobalManager()
+	manager := core.GetGlobalManager()
 	stats := manager.GetStats()
 
 	c.JSON(http.StatusOK, gin.H{

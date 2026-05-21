@@ -1,5 +1,5 @@
-// Package ws contains the core WebSocket hub, connection lifecycle, and manager logic.
-package ws
+// package core contains the core WebSocket hub, connection lifecycle, and manager logic.
+package core
 
 import (
 	"context"
