@@ -205,7 +205,12 @@ func (q *Queue) resolveType(name string) jobTypeConfig {
 	if cfg, ok := q.jobTypes[name]; ok {
 		return cfg
 	}
+
 	streamKey := fmt.Sprintf("%s:default", q.cfg.StreamPrefix)
+	if name != "default" {
+		streamKey = fmt.Sprintf("%s:%s", q.cfg.StreamPrefix, name)
+	}
+
 	return jobTypeConfig{
 		Concurrency: q.cfg.DefaultWorkerCount,
 		MaxRetry:    q.cfg.DefaultMaxRetry,
