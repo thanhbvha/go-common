@@ -8,13 +8,6 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 )
 
-// UserInfo represents the minimal user details stored in a shard.
-type UserInfo struct {
-	ShardID  string `json:"shard_id"`
-	UserID   string `json:"user_id"`
-	ClientIP string `json:"client_ip"`
-}
-
 // IncomingMessage represents the envelope for incoming payloads from a client.
 type IncomingMessage struct {
 	Type string          `json:"type"`
