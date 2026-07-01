@@ -114,6 +114,9 @@ type Logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
+	InfoAsync(msg string, args ...any)
+	WarnAsync(msg string, args ...any)
+	ErrorAsync(msg string, args ...any)
 }
 
 // DefaultConfig returns a Config pre-populated with sensible production defaults.

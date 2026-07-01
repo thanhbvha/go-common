@@ -66,6 +66,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	go c.runHealthCheck()
 
 	if c.cfg.Logger != nil {
+		// Sync: startup log must complete before Connect returns.
 		c.cfg.Logger.Info("redis: connected",
 			"mode", c.modeName(),
 			"pool_size", c.cfg.PoolSize,
@@ -100,6 +101,7 @@ func (c *Client) Close() error {
 		c.rc = nil
 		c.connected = false
 		if c.cfg.Logger != nil {
+			// Sync: shutdown log must complete before Close returns.
 			c.cfg.Logger.Info("redis: connection closed")
 		}
 		return err
@@ -264,7 +266,8 @@ func (c *Client) pingWithRetry(ctx context.Context, rc goredis.UniversalClient, 
 		}
 		lastErr = err
 		if c.cfg.Logger != nil {
-			c.cfg.Logger.Warn("redis: connection attempt failed",
+			// Async: retry warnings must not block the retry sleep.
+			c.cfg.Logger.WarnAsync("redis: connection attempt failed",
 				"attempt", i+1,
 				"max", maxRetries,
 				"err", err.Error(),
@@ -305,7 +308,8 @@ func (c *Client) runHealthCheck() {
 				c.connected = false
 				c.mu.Unlock()
 				if c.cfg.Logger != nil {
-					c.cfg.Logger.Error("redis: health check failed", "err", err.Error())
+					// Async: health-check runs in background goroutine; must not block.
+					c.cfg.Logger.ErrorAsync("redis: health check failed", "err", err.Error())
 				}
 			}
 		}
