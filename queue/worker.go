@@ -22,7 +22,7 @@ func (q *Queue) workerLoop(ctx context.Context, jobType string, cfg jobTypeConfi
 	for {
 		select {
 		case <-ctx.Done():
-			q.logInfo("queue: worker shutting down",
+			q.logInfoAsync("queue: worker shutting down",
 				"worker", consumer, "stream", streamKey, "group", group)
 			return
 		default:
@@ -42,7 +42,7 @@ func (q *Queue) workerLoop(ctx context.Context, jobType string, cfg jobTypeConfi
 			if err == goredis.Nil {
 				continue
 			}
-			q.logError("queue: error reading from stream",
+			q.logErrorAsync("queue: error reading from stream",
 				"worker", consumer, "stream", streamKey, "err", err.Error())
 			select {
 			case <-ctx.Done():
@@ -69,7 +69,7 @@ func (q *Queue) workerLoop(ctx context.Context, jobType string, cfg jobTypeConfi
 				}
 
 				if err := q.executeHandler(*job, consumer); err != nil {
-					q.logError("queue: job failed",
+					q.logErrorAsync("queue: job failed",
 						"worker", consumer, "job_id", job.ID, "type", job.Type, "err", err.Error())
 					q.retryOrDLQ(ctx, *job, streamKey, cfg)
 				}
@@ -90,7 +90,7 @@ func (q *Queue) delayedDispatchLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			q.logInfo("queue: delayed dispatcher shutting down")
+			q.logInfoAsync("queue: delayed dispatcher shutting down")
 			return
 		case <-ticker.C:
 			q.processDelayedJobs(ctx)
@@ -119,7 +119,7 @@ func (q *Queue) processDelayedJobs(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			q.logError("queue: error reading delayed stream", "err", err.Error())
+			q.logErrorAsync("queue: error reading delayed stream", "err", err.Error())
 			return
 		}
 		if len(messages) == 0 {
@@ -170,7 +170,7 @@ func (q *Queue) processDelayedJobs(ctx context.Context) {
 					Approx: true,
 					Values: map[string]interface{}{"job": jobStr},
 				}); err != nil {
-					q.logError("queue: failed to dispatch delayed job", "err", err.Error())
+					q.logErrorAsync("queue: failed to dispatch delayed job", "err", err.Error())
 				}
 				q.redis.XDel(ctx, delayedKey, msg.ID) //nolint:errcheck
 			}
@@ -192,7 +192,7 @@ func (q *Queue) reclaimLoop(ctx context.Context, streamKey, group, consumer stri
 	for {
 		select {
 		case <-ctx.Done():
-			q.logInfo("queue: reclaimer shutting down",
+			q.logInfoAsync("queue: reclaimer shutting down",
 				"reclaimer", consumer, "stream", streamKey, "group", group)
 			return
 		case <-ticker.C:
@@ -227,7 +227,7 @@ func (q *Queue) processStuckJobsAutoClaim(ctx context.Context, streamKey, group,
 		Count:    q.cfg.ReclaimBatchSize,
 	})
 	if err != nil && err != goredis.Nil {
-		q.logError("queue: XAUTOCLAIM failed",
+		q.logErrorAsync("queue: XAUTOCLAIM failed",
 			"reclaimer", consumer, "stream", streamKey, "group", group, "err", err.Error())
 		return
 	}
@@ -239,7 +239,7 @@ func (q *Queue) processStuckJobsAutoClaim(ctx context.Context, streamKey, group,
 func (q *Queue) processStuckJobsXClaim(ctx context.Context, streamKey, group, consumer string) {
 	pending, err := q.redis.XPendingExt(ctx, streamKey, group, "-", "+", q.cfg.ReclaimBatchSize, 0)
 	if err != nil && err != goredis.Nil {
-		q.logError("queue: XPENDINGEXT failed",
+		q.logErrorAsync("queue: XPENDINGEXT failed",
 			"reclaimer", consumer, "stream", streamKey, "group", group, "err", err.Error())
 		return
 	}
@@ -248,7 +248,7 @@ func (q *Queue) processStuckJobsXClaim(ctx context.Context, streamKey, group, co
 	for _, entry := range pending {
 		if entry.Idle >= q.cfg.ReclaimMinIdle {
 			eligibleIDs = append(eligibleIDs, entry.ID)
-			q.logInfo("queue: reclaiming stuck job",
+			q.logInfoAsync("queue: reclaiming stuck job",
 				"reclaimer", consumer, "stream", streamKey,
 				"job_id", entry.ID, "idle", entry.Idle)
 		}
@@ -265,7 +265,7 @@ func (q *Queue) processStuckJobsXClaim(ctx context.Context, streamKey, group, co
 		Messages: eligibleIDs,
 	})
 	if err != nil {
-		q.logError("queue: XCLAIM failed",
+		q.logErrorAsync("queue: XCLAIM failed",
 			"reclaimer", consumer, "stream", streamKey, "group", group, "err", err.Error())
 		return
 	}
@@ -287,7 +287,7 @@ func (q *Queue) handleReclaimedMessages(ctx context.Context, messages []goredis.
 		cfg := q.resolveType(job.Type)
 
 		if err := q.executeHandler(*job, consumer); err != nil {
-			q.logError("queue: reclaimed job failed",
+			q.logErrorAsync("queue: reclaimed job failed",
 				"reclaimer", consumer, "job_id", job.ID, "type", job.Type, "err", err.Error())
 			q.retryOrDLQ(ctx, *job, streamKey, cfg)
 		}
@@ -306,7 +306,7 @@ func (q *Queue) dlqCleanupLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			q.logInfo("queue: DLQ cleanup shutting down")
+			q.logInfoAsync("queue: DLQ cleanup shutting down")
 			return
 		case <-ticker.C:
 			q.cleanupDLQ(ctx)
@@ -324,7 +324,7 @@ func (q *Queue) cleanupDLQ(ctx context.Context) {
 	for {
 		messages, err := q.redis.XRangeN(ctx, dlqKey, startID, "+", batchSize)
 		if err != nil {
-			q.logError("queue: error reading DLQ", "err", err.Error())
+			q.logErrorAsync("queue: error reading DLQ", "err", err.Error())
 			return
 		}
 		if len(messages) == 0 {
@@ -342,14 +342,14 @@ func (q *Queue) cleanupDLQ(ctx context.Context) {
 			}
 			if now.Sub(job.CreatedAt) > q.cfg.DLQRetention {
 				toDelete = append(toDelete, msg.ID)
-				q.logInfo("queue: removing expired DLQ entry",
+				q.logInfoAsync("queue: removing expired DLQ entry",
 					"job_id", job.ID, "created_at", job.CreatedAt.Format(time.RFC3339))
 			}
 		}
 
 		if len(toDelete) > 0 {
 			if _, err := q.redis.XDel(ctx, dlqKey, toDelete...); err != nil {
-				q.logError("queue: failed to delete DLQ entries", "err", err.Error())
+				q.logErrorAsync("queue: failed to delete DLQ entries", "err", err.Error())
 			}
 		}
 
@@ -367,14 +367,14 @@ func (q *Queue) cleanupDLQ(ctx context.Context) {
 func (q *Queue) parseJobMessage(msg goredis.XMessage, consumer, streamKey string) (*Job, bool) {
 	val, ok := msg.Values["job"]
 	if !ok {
-		q.logError("queue: message missing 'job' field",
+		q.logErrorAsync("queue: message missing 'job' field",
 			"consumer", consumer, "stream", streamKey, "msg_id", msg.ID)
 		return nil, false
 	}
 
 	var job Job
 	if err := json.Unmarshal([]byte(fmt.Sprintf("%v", val)), &job); err != nil {
-		q.logError("queue: failed to unmarshal job",
+		q.logErrorAsync("queue: failed to unmarshal job",
 			"consumer", consumer, "stream", streamKey, "msg_id", msg.ID, "err", err.Error())
 		return nil, false
 	}

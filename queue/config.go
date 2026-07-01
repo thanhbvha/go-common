@@ -38,6 +38,9 @@ type Logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
+	InfoAsync(msg string, args ...any)
+	ErrorAsync(msg string, args ...any)
+	WarnAsync(msg string, args ...any)
 }
 
 // RedisStreamer defines the minimal Redis Streams API required by Queue.

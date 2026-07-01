@@ -249,3 +249,21 @@ func (q *Queue) logError(msg string, args ...any) {
 		q.cfg.Logger.Error(msg, args...)
 	}
 }
+
+func (q *Queue) logInfoAsync(msg string, args ...any) {
+	if q.cfg.Logger != nil {
+		q.cfg.Logger.InfoAsync(msg, args...)
+	}
+}
+
+func (q *Queue) logErrorAsync(msg string, args ...any) {
+	if q.cfg.Logger != nil {
+		q.cfg.Logger.ErrorAsync(msg, args...)
+	}
+}
+
+func (q *Queue) logWarnAsync(msg string, args ...any) {
+	if q.cfg.Logger != nil {
+		q.cfg.Logger.WarnAsync(msg, args...)
+	}
+}

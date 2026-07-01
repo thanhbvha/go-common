@@ -181,7 +181,7 @@ func (q *Queue) retryOrDLQ(ctx context.Context, job Job, streamKey string, cfg j
 			Approx: true,
 			Values: map[string]interface{}{"job": jobBytes},
 		}); err == nil {
-			q.logInfo("queue: job scheduled for retry",
+			q.logInfoAsync("queue: job scheduled for retry",
 				"job_id", job.ID, "type", job.Type,
 				"retry", job.Retry, "max_retry", job.MaxRetry)
 		}
@@ -195,7 +195,7 @@ func (q *Queue) retryOrDLQ(ctx context.Context, job Job, streamKey string, cfg j
 		Approx: true,
 		Values: map[string]interface{}{"job": jobBytes},
 	}); err == nil {
-		q.logInfo("queue: job moved to DLQ",
+		q.logInfoAsync("queue: job moved to DLQ",
 			"job_id", job.ID, "type", job.Type,
 			"retry", job.Retry, "max_retry", job.MaxRetry)
 	}
@@ -209,13 +209,13 @@ func (q *Queue) ack(ctx context.Context, streamKey, group, jobType, consumer str
 	}
 	count, err := q.redis.XAck(ctx, streamKey, group, ids...)
 	if err != nil {
-		q.logError("queue: failed to acknowledge messages",
+		q.logErrorAsync("queue: failed to acknowledge messages",
 			"consumer", consumer, "stream", streamKey, "group", group,
 			"job_type", jobType, "err", err.Error())
 		return
 	}
 	if count == 0 {
-		q.logWarn("queue: no messages acknowledged (possibly already ACK'd)",
+		q.logWarnAsync("queue: no messages acknowledged (possibly already ACK'd)",
 			"consumer", consumer, "stream", streamKey, "group", group,
 			"attempted", len(ids), "job_type", jobType)
 	}
@@ -226,7 +226,7 @@ func (q *Queue) executeHandler(job Job, workerName string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in job handler: %v", r)
-			q.logError("queue: panic recovered",
+			q.logErrorAsync("queue: panic recovered",
 				"worker", workerName, "job_id", job.ID, "type", job.Type, "panic", r)
 		}
 	}()
@@ -239,7 +239,7 @@ func (q *Queue) executeHandler(job Job, workerName string) (err error) {
 		return fmt.Errorf("queue: no handler registered for job type %q", job.Type)
 	}
 
-	q.logInfo("queue: processing job",
+	q.logInfoAsync("queue: processing job",
 		"worker", workerName, "job_id", job.ID, "type", job.Type,
 		"retry", job.Retry, "max_retry", job.MaxRetry,
 		"created_at", job.CreatedAt.Format(time.RFC3339))
