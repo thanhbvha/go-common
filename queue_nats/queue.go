@@ -98,7 +98,7 @@ func (q *Queue) Start(ctx context.Context) {
 		subject := fmt.Sprintf("%s.%s", q.cfg.StreamPrefix, name)
 
 		// Create stream
-		if err := q.nats.AddStream(q.ctx, cfg.StreamName, []string{subject}, nats.WithMaxAge(cfg.MaxAge)); err != nil {
+		if err := q.nats.AddStream(q.ctx, cfg.StreamName, []string{subject}, nats.WithMaxAge(cfg.MaxAge), nats.WithRetention(nats.WorkQueuePolicy)); err != nil {
 			if !strings.Contains(err.Error(), "already exists") {
 				q.logError("queue: failed to create stream",
 					"stream", cfg.StreamName, "subject", subject, "err", err.Error())
@@ -118,7 +118,7 @@ func (q *Queue) Start(ctx context.Context) {
 	defaultCfg := q.resolveType("default")
 	defaultSubject := fmt.Sprintf("%s.default", q.cfg.StreamPrefix)
 
-	if err := q.nats.AddStream(q.ctx, defaultCfg.StreamName, []string{defaultSubject}, nats.WithMaxAge(defaultCfg.MaxAge)); err != nil {
+	if err := q.nats.AddStream(q.ctx, defaultCfg.StreamName, []string{defaultSubject}, nats.WithMaxAge(defaultCfg.MaxAge), nats.WithRetention(nats.WorkQueuePolicy)); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			q.logError("queue: failed to create default stream",
 				"stream", defaultCfg.StreamName, "subject", defaultSubject, "err", err.Error())
@@ -133,7 +133,7 @@ func (q *Queue) Start(ctx context.Context) {
 	}
 
 	// Ensure Delayed stream and consumer
-	if err := q.nats.AddStream(q.ctx, "queue_delayed", []string{q.cfg.DelayedStreamSubject}, nats.WithMaxAge(q.cfg.DefaultMaxAge)); err != nil {
+	if err := q.nats.AddStream(q.ctx, "queue_delayed", []string{q.cfg.DelayedStreamSubject}, nats.WithMaxAge(q.cfg.DefaultMaxAge), nats.WithRetention(nats.WorkQueuePolicy)); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			q.logError("queue: failed to create delayed stream", "err", err.Error())
 		}
@@ -145,7 +145,7 @@ func (q *Queue) Start(ctx context.Context) {
 	}
 
 	// Ensure DLQ stream
-	if err := q.nats.AddStream(q.ctx, q.cfg.DLQStreamName, []string{q.cfg.DLQStreamName}, nats.WithMaxAge(q.cfg.DLQRetention)); err != nil {
+	if err := q.nats.AddStream(q.ctx, q.cfg.DLQStreamName, []string{q.cfg.DLQStreamName}, nats.WithMaxAge(q.cfg.DLQRetention), nats.WithRetention(nats.WorkQueuePolicy)); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			q.logError("queue: failed to create DLQ stream", "err", err.Error())
 		}
