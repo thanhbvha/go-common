@@ -26,6 +26,12 @@ const (
 // By sharding connections across multiple Shards, we eliminate CPU lock contention
 // and leverage multi-core processors. Note that a Shard is NOT a business chat room;
 // a single Shard can host thousands of logical chat rooms (chatRooms).
+// ShardCoordinator defines the interface required by a Shard to coordinate with the cluster.
+type ShardCoordinator interface {
+	GetShardID(userID string) string
+	GetPubSubManager() pubsub.Manager
+}
+
 type Shard struct {
 	// activeConns tracks all physical WebSocket connections currently connected directly to this shard.
 	activeConns     map[*Connection]bool
@@ -51,10 +57,11 @@ type Shard struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	name            string // Shard unique identifier (e.g. "shard_0", "shard_1")
+	coordinator     ShardCoordinator
 }
 
 // NewShard creates a new Shard instance with the specified name and registers cross-node PubSub handlers.
-func NewShard(name string) *Shard {
+func NewShard(name string, coordinator ShardCoordinator) *Shard {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	shard := &Shard{
@@ -68,6 +75,7 @@ func NewShard(name string) *Shard {
 		ctx:             ctx,
 		cancel:          cancel,
 		name:            name,
+		coordinator:     coordinator,
 	}
 
 	shard.setupPubSubHandlers()
@@ -368,7 +376,7 @@ func (s *Shard) shutdown() {
 
 // setupPubSubHandlers configures event callbacks for clustered Redis synchronization.
 func (s *Shard) setupPubSubHandlers() {
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := s.coordinator.GetPubSubManager()
 
 	// Direct user notification routing
 	pubsubManager.RegisterHandler(pubsub.MessageTypeNotification, func(msg *pubsub.CrossNodeMessage) {
@@ -440,7 +448,7 @@ func (s *Shard) setupPubSubHandlers() {
 // broadcastToOtherNodes routes a broadcast payload to cluster nodes using Redis pubsub.
 // It matches signature parameters from the pubsub coordinator.
 func (s *Shard) broadcastToOtherNodes(message []byte) {
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),
 	}
@@ -451,13 +459,13 @@ func (s *Shard) broadcastToOtherNodes(message []byte) {
 
 // BroadcastUserNotification sends a cross-node message to a specific user.
 func (s *Shard) BroadcastUserNotification(userID string, message []byte) {
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),
 	}
 
 	shardID := s.name
-	userShardID := GetGlobalManager().GetShardID(userID)
+	userShardID := s.coordinator.GetShardID(userID)
 	if shardID != userShardID {
 		shardID = userShardID
 	}
@@ -469,7 +477,7 @@ func (s *Shard) BroadcastUserNotification(userID string, message []byte) {
 
 // BroadcastRoomMessage distributes a message to a specific room across different cluster nodes.
 func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),
 	}
@@ -480,7 +488,7 @@ func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
 
 // Shutdown gracefully shuts down the shard select loop and notifies peer nodes of shard termination.
 func (s *Shard) Shutdown() {
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := s.coordinator.GetPubSubManager()
 	_ = pubsubManager.NotifyShardDestroy(s.name)
 	s.cancel()
 }

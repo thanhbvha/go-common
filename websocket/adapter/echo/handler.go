@@ -25,6 +25,8 @@ type Config struct {
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
+	// PubSubAdapter specifies the pubsub backend to use ("redis" or "nats"). Defaults to "redis".
+	PubSubAdapter string
 }
 
 // Handler manages the Echo HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -64,6 +66,12 @@ func NewHandler(customConfig ...Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
+	if config.PubSubAdapter == "" {
+		config.PubSubAdapter = pubsub.AdapterRedis
+	}
+
+	// Pre-initialize the core global manager with the specified pubsub adapter
+	core.GetGlobalManager(config.PubSubAdapter)
 
 	return &Handler{config: config}
 }
@@ -124,7 +132,7 @@ func (h *Handler) HandleUpgrade(c echo.Context) error {
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.
 func (h *Handler) HandleStats(c echo.Context) error {
 	manager := core.GetGlobalManager()
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := manager.GetPubSubManager()
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"manager":      manager.GetStats(),
@@ -165,6 +173,6 @@ func (h *Handler) HandleHealthCheck(c echo.Context) error {
 		"totalShards":      stats["totalShards"],
 		"memoryLimit":      stats["maxTotalConnections"],
 		"shardLimit":       stats["maxShards"],
-		"nodeID":           pubsub.GetGlobalPubSub().GetNodeID(),
+		"nodeID":           manager.GetPubSubManager().GetNodeID(),
 	})
 }

@@ -29,7 +29,7 @@ type Manager struct {
 	cancel           context.CancelFunc
 	connectionPool   sync.Pool
 	nodeID           string
-	pubsubManager    *pubsub.PubSubManager
+	pubsubManager    pubsub.Manager
 }
 
 var (
@@ -38,18 +38,24 @@ var (
 )
 
 // GetGlobalManager returns the singleton Manager instance, bootstrapping it if necessary.
-func GetGlobalManager() *Manager {
+// It accepts an optional adapterType (e.g., pubsub.AdapterNATS) which defaults to redis.
+func GetGlobalManager(adapterType ...string) *Manager {
 	managerOnce.Do(func() {
-		globalManager = NewManager()
+		globalManager = NewManager(adapterType...)
 		go globalManager.Run()
 	})
 	return globalManager
 }
 
 // NewManager instantiates a new connection Manager and spins up standard pubsub hooks and default shard.
-func NewManager() *Manager {
+func NewManager(adapterType ...string) *Manager {
+	at := pubsub.AdapterRedis
+	if len(adapterType) > 0 && adapterType[0] != "" {
+		at = adapterType[0]
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := pubsub.GetGlobalManager(at)
 
 	m := &Manager{
 		shards: make(map[string]*Shard),
@@ -67,7 +73,7 @@ func NewManager() *Manager {
 	m.setupPubSubHandlers()
 
 	// Create and start the default shard
-	defaultShard := NewShard(defaultShardName)
+	defaultShard := NewShard(defaultShardName, m)
 	m.shards[defaultShardName] = defaultShard
 	go defaultShard.Run()
 
@@ -145,7 +151,7 @@ func (m *Manager) AddShard(shardID string) *Shard {
 		return shard
 	}
 
-	shard := NewShard(shardID)
+	shard := NewShard(shardID, m)
 	m.shards[shardID] = shard
 	go shard.Run()
 
@@ -188,6 +194,11 @@ func (m *Manager) GenerateShardID(userID string) int {
 func (m *Manager) GetShardID(userID string) string {
 	shardIndex := m.GenerateShardID(userID)
 	return fmt.Sprintf("shard-%d", shardIndex)
+}
+
+// GetPubSubManager returns the pubsub manager used by this connection manager.
+func (m *Manager) GetPubSubManager() pubsub.Manager {
+	return m.pubsubManager
 }
 
 // GetOrCreateShard resolves a Shard or creates it if it doesn't already exist.

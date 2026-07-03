@@ -22,6 +22,8 @@ type Config struct {
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
+	// PubSubAdapter specifies the pubsub backend to use ("redis" or "nats"). Defaults to "redis".
+	PubSubAdapter string
 }
 
 // Handler manages the Fiber HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -48,6 +50,12 @@ func NewHandler(config Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
+	if config.PubSubAdapter == "" {
+		config.PubSubAdapter = pubsub.AdapterRedis
+	}
+
+	// Pre-initialize the core global manager with the specified pubsub adapter
+	core.GetGlobalManager(config.PubSubAdapter)
 
 	return &Handler{config: config}
 }
@@ -117,7 +125,7 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 // HandleStats returns JSON-formatted runtime metrics of the Manager, pubsub system, and limiters.
 func (h *Handler) HandleStats(c *fiber.Ctx) error {
 	manager := core.GetGlobalManager()
-	pubsubManager := pubsub.GetGlobalPubSub()
+	pubsubManager := manager.GetPubSubManager()
 
 	return c.JSON(fiber.Map{
 		"manager":      manager.GetStats(),
@@ -158,6 +166,6 @@ func (h *Handler) HandleHealthCheck(c *fiber.Ctx) error {
 		"totalShards":      stats["totalShards"],
 		"memoryLimit":      stats["maxTotalConnections"],
 		"shardLimit":       stats["maxShards"],
-		"nodeID":           pubsub.GetGlobalPubSub().GetNodeID(),
+		"nodeID":           manager.GetPubSubManager().GetNodeID(),
 	})
 }

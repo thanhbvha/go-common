@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/nats"
 	"github.com/thanhbvha/go-common/redis"
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
 	"github.com/thanhbvha/go-common/websocket/core"
@@ -53,6 +54,21 @@ func main() {
 		logger.InfoAsync("Redis clustered pub/sub engine connected successfully")
 	}
 
+	// 2.5 Initialize process-wide default NATS client
+	natsCfg := nats.Config{
+		URLs:           []string{"nats://localhost:4222"},
+		MaxConnRetries: 1,
+		Logger:         l,
+	}
+	natsClient := nats.New(natsCfg)
+	if err := natsClient.Connect(ctx); err != nil {
+		logger.WarnAsync("NATS unavailable on localhost:4222, running WebSocket in standalone loopback mode", "error", err)
+	} else {
+		nats.SetDefault(natsClient)
+		defer nats.Close()
+		logger.InfoAsync("NATS clustered pub/sub engine connected successfully")
+	}
+
 	// 3. Register custom event handlers for business logic
 	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
 		logger.InfoAsync("Received chat message event", "userID", conn.GetUserID(), "payload", string(msg.Data))
@@ -78,6 +94,7 @@ func main() {
 			}
 			return userID, nil
 		},
+		PubSubAdapter: "nats",
 	}
 
 	// 5. Instantiate and initialize HTTP and WS routing server wrapper
