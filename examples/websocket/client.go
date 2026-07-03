@@ -14,71 +14,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/gorilla/websocket"
 )
-
-// ANSI terminal color codes for premium visual experience (defined as vars to support fallback on older Windows terminals)
-var (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorBlue   = "\033[34m"
-	colorPurple = "\033[35m"
-	colorCyan   = "\033[36m"
-	colorGray   = "\033[37m"
-	colorBold   = "\033[1m"
-)
-
-// disableColors strips ANSI color codes to support plain text outputs
-func disableColors() {
-	colorReset = ""
-	colorRed = ""
-	colorGreen = ""
-	colorYellow = ""
-	colorBlue = ""
-	colorPurple = ""
-	colorCyan = ""
-	colorGray = ""
-	colorBold = ""
-}
-
-// initTerminal configures terminal colors and enables Virtual Terminal Processing on Windows
-func initTerminal(enableColor bool) {
-	if !enableColor {
-		disableColors()
-		return
-	}
-
-	if runtime.GOOS == "windows" {
-		kernel32 := syscall.NewLazyDLL("kernel32.dll")
-		setConsoleMode := kernel32.NewProc("SetConsoleMode")
-		getConsoleMode := kernel32.NewProc("GetConsoleMode")
-
-		stdoutHandle, err := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE)
-		if err == nil {
-			var mode uint32
-			ret, _, _ := getConsoleMode.Call(uintptr(stdoutHandle), uintptr(unsafe.Pointer(&mode)))
-			if ret != 0 {
-				// ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-				const enableVTProcessing = 0x0004
-				mode |= enableVTProcessing
-				setConsoleMode.Call(uintptr(stdoutHandle), uintptr(mode))
-			} else {
-				// Fallback if GetConsoleMode fails (e.g. non-TTY redirect), disable colors
-				disableColors()
-			}
-		} else {
-			disableColors()
-		}
-	}
-}
 
 // IncomingMessage represents the envelope for incoming payloads sent to the WS server.
 type IncomingMessage struct {
@@ -107,11 +48,7 @@ func main() {
 	userFlag := flag.String("user", "", "User ID for authentication (defaults to randomized ID)")
 	interactiveFlag := flag.Bool("interactive", true, "Enable interactive mode to type messages in real time")
 	probeFlag := flag.Bool("probe", true, "Perform HTTP health & stats pre-flight checks")
-	colorFlag := flag.Bool("color", true, "Enable ANSI colors in console output")
 	flag.Parse()
-
-	// Initialize terminal colors (enables Windows VT Processing)
-	initTerminal(*colorFlag)
 
 	// Seed random generator for user ID
 	rand.Seed(time.Now().UnixNano())
@@ -120,10 +57,10 @@ func main() {
 		userID = fmt.Sprintf("client_%d", rand.Intn(9000)+1000)
 	}
 
-	fmt.Printf("%s%s=== CLUSTERED WEBSOCKET INTEGRATION TEST CLIENT ===%s\n", colorBold, colorBlue, colorReset)
-	fmt.Printf("%sTarget Host:%s %s\n", colorBold, colorReset, *hostFlag)
-	fmt.Printf("%sTarget Port:%s %d\n", colorBold, colorReset, *portFlag)
-	fmt.Printf("%sUser ID:    %s %s (Authenticated via Query Parameter)\n", colorBold, colorReset, userID)
+	fmt.Printf("=== CLUSTERED WEBSOCKET INTEGRATION TEST CLIENT ===\n")
+	fmt.Printf("Target Host: %s\n", *hostFlag)
+	fmt.Printf("Target Port: %d\n", *portFlag)
+	fmt.Printf("User ID:    %s (Authenticated via Query Parameter)\n", userID)
 	fmt.Println(strings.Repeat("-", 60))
 
 	// 1. Pre-flight checks (HTTP endpoints)
@@ -142,10 +79,10 @@ func main() {
 		RawQuery: "user_id=" + url.QueryEscape(userID),
 	}
 
-	fmt.Printf("\n%s[CONNECTING]%s Handshaking with %s...\n", colorCyan, colorReset, u.String())
+	fmt.Printf("\n[CONNECTING] Handshaking with %s...\n", u.String())
 	c, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Printf("%s[CONNECTION ERROR] Upgrade failed: %v%s\n", colorRed, err, colorReset)
+		fmt.Printf("[CONNECTION ERROR] Upgrade failed: %v\n", err)
 		if resp != nil {
 			fmt.Printf("HTTP response status: %d\n", resp.StatusCode)
 			body, _ := io.ReadAll(resp.Body)
@@ -154,7 +91,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer c.Close()
-	fmt.Printf("%s[CONNECTED]%s Established connection to WebSocket cluster node successfully!\n\n", colorGreen, colorReset)
+	fmt.Printf("[CONNECTED] Established connection to WebSocket cluster node successfully!\n\n")
 
 	done := make(chan struct{})
 
@@ -165,9 +102,9 @@ func main() {
 			_, message, err := c.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					fmt.Printf("\n%s[DISCONNECTED]%s Server initiated graceful connection close.%s\n", colorYellow, colorYellow, colorReset)
+					fmt.Printf("\n[DISCONNECTED] Server initiated graceful connection close.\n")
 				} else {
-					fmt.Printf("\n%s[DISCONNECTED]%s Connection terminated: %v%s\n", colorRed, colorRed, err, colorReset)
+					fmt.Printf("\n[DISCONNECTED] Connection terminated: %v\n", err)
 				}
 				return
 			}
@@ -175,7 +112,7 @@ func main() {
 			// Parse envelope
 			var out OutgoingMessage
 			if err := json.Unmarshal(message, &out); err != nil {
-				fmt.Printf("%s[RAW INCOMING]%s %s\n", colorGray, colorReset, string(message))
+				fmt.Printf("[RAW INCOMING] %s\n", string(message))
 				continue
 			}
 
@@ -187,27 +124,27 @@ func main() {
 				if err == nil {
 					var echo EchoPayload
 					if err := json.Unmarshal(dataBytes, &echo); err == nil {
-						fmt.Printf("\n%s[ECHO RESPONSE] %s%s\n", colorGreen, colorBold, colorReset)
-						fmt.Printf("  Sender : %s%s%s\n", colorCyan, echo.Sender, colorReset)
-						fmt.Printf("  Message: %s%s%s\n", colorBold, echo.Payload, colorReset)
-						fmt.Printf("  Time   : %s%s%s\n", colorGray, echo.SentAt.Format(time.RFC3339Nano), colorReset)
+						fmt.Printf("\n[ECHO RESPONSE]\n")
+						fmt.Printf("  Sender : %s\n", echo.Sender)
+						fmt.Printf("  Message: %s\n", echo.Payload)
+						fmt.Printf("  Time   : %s\n", echo.SentAt.Format(time.RFC3339Nano))
 						if out.RequestID != "" {
-							fmt.Printf("  Req ID : %s%s%s\n", colorGray, out.RequestID, colorReset)
+							fmt.Printf("  Req ID : %s\n", out.RequestID)
 						}
 						// Print inline prompt again if in interactive mode
 						if *interactiveFlag {
-							fmt.Print("\n" + colorCyan + "Send chat message -> " + colorReset)
+							fmt.Print("\nSend chat message -> ")
 						}
 						continue
 					}
 				}
 				// Fallback if data doesn't match EchoPayload structure exactly
-				fmt.Printf("\n%s[INCOMING EVENT]%s Type: %s%s%s, Data: %+v\n", colorGreen, colorReset, colorBold, out.Type, colorReset, out.Data)
+				fmt.Printf("\n[INCOMING EVENT] Type: %s, Data: %+v\n", out.Type, out.Data)
 			default:
-				fmt.Printf("\n%s[INCOMING EVENT]%s Type: %s%s%s, Data: %+v\n", colorGreen, colorReset, colorBold, out.Type, colorReset, out.Data)
+				fmt.Printf("\n[INCOMING EVENT] Type: %s, Data: %+v\n", out.Type, out.Data)
 			}
 			if *interactiveFlag {
-				fmt.Print("\n" + colorCyan + "Send chat message -> " + colorReset)
+				fmt.Print("\nSend chat message -> ")
 			}
 		}
 	}()
@@ -217,17 +154,20 @@ func main() {
 
 	// 4. Handle input or keep alive
 	if *interactiveFlag {
-		fmt.Printf("%s[INTERACTIVE MODE]%s Type any message below and press Enter to transmit to the server cluster.\n", colorCyan, colorReset)
-		fmt.Printf("Press %sCtrl+C%s to exit gracefully.\n\n", colorBold, colorReset)
+		fmt.Printf("[INTERACTIVE MODE] Type any message below and press Enter to transmit to the server cluster.\n")
+		fmt.Printf("Press Ctrl+C to exit gracefully.\n\n")
 
 		scanner := bufio.NewScanner(os.Stdin)
-		fmt.Print(colorCyan + "Send chat message -> " + colorReset)
+		fmt.Print("Send chat message -> ")
 
 		// Set up goroutine for stdin processing so we can interrupt it cleanly via channel selection
 		inputChan := make(chan string)
 		go func() {
 			for scanner.Scan() {
 				inputChan <- scanner.Text()
+			}
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("[INPUT ERROR] Error reading from stdin: %v\n", err)
 			}
 		}()
 
@@ -236,7 +176,7 @@ func main() {
 			case text := <-inputChan:
 				trimmed := strings.TrimSpace(text)
 				if trimmed == "" {
-					fmt.Print(colorCyan + "Send chat message -> " + colorReset)
+					fmt.Print("Send chat message -> ")
 					continue
 				}
 				if strings.ToLower(trimmed) == "/exit" || strings.ToLower(trimmed) == "/quit" {
@@ -244,10 +184,10 @@ func main() {
 					return
 				}
 				if err := sendChatMessage(c, trimmed); err != nil {
-					fmt.Printf("%s[SEND ERROR] Failed to send message: %v%s\n", colorRed, err, colorReset)
+					fmt.Printf("[SEND ERROR] Failed to send message: %v\n", err)
 				}
 			case <-interrupt:
-				fmt.Printf("\n%s[SHUTDOWN]%s Ctrl+C received, terminating session...%s\n", colorYellow, colorBold, colorReset)
+				fmt.Printf("\n[SHUTDOWN] Ctrl+C received, terminating session...\n")
 				gracefulClose(c)
 				return
 			case <-done:
@@ -268,16 +208,16 @@ func main() {
 				count++
 				msg := fmt.Sprintf("Periodic test message #%d sent at %s", count, t.Format("15:04:05"))
 				if err := sendChatMessage(c, msg); err != nil {
-					fmt.Printf("%s[SEND ERROR] Failed to send message: %v%s\n", colorRed, err, colorReset)
+					fmt.Printf("[SEND ERROR] Failed to send message: %v\n", err)
 					return
 				}
 				if count >= 5 {
-					fmt.Printf("\n%s[FINISHED]%s Completed 5 message transmissions. Closing connection.%s\n", colorGreen, colorBold, colorReset)
+					fmt.Printf("\n[FINISHED] Completed 5 message transmissions. Closing connection.\n")
 					gracefulClose(c)
 					return
 				}
 			case <-interrupt:
-				fmt.Printf("\n%s[SHUTDOWN]%s Ctrl+C received, terminating session...%s\n", colorYellow, colorBold, colorReset)
+				fmt.Printf("\n[SHUTDOWN] Ctrl+C received, terminating session...\n")
 				gracefulClose(c)
 				return
 			}
@@ -302,13 +242,13 @@ func sendChatMessage(c *websocket.Conn, content string) error {
 		return err
 	}
 
-	fmt.Printf("%s[SENDING]%s chat_message: %s%s%s\n", colorYellow, colorReset, colorBold, content, colorReset)
+	fmt.Printf("[SENDING] chat_message: %s\n", content)
 	return c.WriteMessage(websocket.TextMessage, payload)
 }
 
 // gracefulClose sends a WebSocket close control frame and waits briefly for server confirmation.
 func gracefulClose(c *websocket.Conn) {
-	fmt.Printf("%s[CLOSING]%s Sending close frame to cluster...%s\n", colorYellow, colorBold, colorReset)
+	fmt.Printf("[CLOSING] Sending close frame to cluster...\n")
 	err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Client disconnecting"))
 	if err != nil {
 		fmt.Printf("Error sending close frame: %v\n", err)
@@ -323,16 +263,16 @@ func runPreflightChecks(host string, port int) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	baseURL := fmt.Sprintf("http://%s:%d", host, port)
 
-	fmt.Printf("%s[PROBING]%s Performing pre-flight health check on %s...\n", colorPurple, colorReset, baseURL)
+	fmt.Printf("[PROBING] Performing pre-flight health check on %s...\n", baseURL)
 
 	// 1. Probe health
 	healthResp, err := client.Get(baseURL + "/health")
 	if err != nil {
-		fmt.Printf("%s  [WARNING]%s Health endpoint unreachable: %v\n", colorYellow, colorReset, err)
+		fmt.Printf("  [WARNING] Health endpoint unreachable: %v\n", err)
 	} else {
 		defer healthResp.Body.Close()
 		body, _ := io.ReadAll(healthResp.Body)
-		fmt.Printf("  %sHealth Status:%s %d %s (Body: %s)\n", colorBold, colorReset, healthResp.StatusCode, http.StatusText(healthResp.StatusCode), strings.TrimSpace(string(body)))
+		fmt.Printf("  Health Status: %d %s (Body: %s)\n", healthResp.StatusCode, http.StatusText(healthResp.StatusCode), strings.TrimSpace(string(body)))
 	}
 
 	// 2. Probe stats (Try standard endpoint and Fiber-specific API group)
@@ -345,10 +285,10 @@ func runPreflightChecks(host string, port int) {
 	}
 
 	if err != nil {
-		fmt.Printf("%s  [WARNING]%s Stats endpoint unreachable: %v\n", colorYellow, colorReset, err)
+		fmt.Printf("  [WARNING] Stats endpoint unreachable: %v\n", err)
 	} else {
 		defer statsResp.Body.Close()
 		body, _ := io.ReadAll(statsResp.Body)
-		fmt.Printf("  %sServer Stats :%s %s\n", colorBold, colorReset, strings.TrimSpace(string(body)))
+		fmt.Printf("  Server Stats : %s\n", strings.TrimSpace(string(body)))
 	}
 }
