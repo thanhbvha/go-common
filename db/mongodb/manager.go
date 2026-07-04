@@ -96,6 +96,24 @@ func Get(name ...string) *mongo.Database {
 	return db
 }
 
+// WithTransaction starts a MongoDB session and executes the given function within a transaction.
+// Ensure your Repository operations use the sessCtx provided to the callback.
+func WithTransaction(ctx context.Context, dbName string, fn func(sessCtx context.Context) error) error {
+	db := Get(dbName)
+	client := db.Client()
+
+	session, err := client.StartSession()
+	if err != nil {
+		return err
+	}
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(sessCtx context.Context) (interface{}, error) {
+		return nil, fn(sessCtx)
+	})
+	return err
+}
+
 // AddConnection dynamically adds a new MongoDB connection at runtime.
 // If the manager has not been initialized yet, it will initialize it.
 // If setAsDefault is true (or if this is the very first connection), this connection becomes the default database.

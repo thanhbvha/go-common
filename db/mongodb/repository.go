@@ -99,6 +99,25 @@ func (r *Repository[T]) UpdateOne(ctx context.Context, filter interface{}, updat
 	return r.coll.UpdateOne(ctx, filter, update)
 }
 
+// UpsertOne creates or updates a single document matching the filter.
+func (r *Repository[T]) UpsertOne(ctx context.Context, filter interface{}, update interface{}) (*mongo.UpdateResult, error) {
+	opts := options.UpdateOne().SetUpsert(true)
+	return r.coll.UpdateOne(ctx, filter, update, opts)
+}
+
+// FindOneAndUpdate updates a single document and retrieves either the original or updated document.
+func (r *Repository[T]) FindOneAndUpdate(ctx context.Context, filter interface{}, update interface{}, opts ...options.Lister[options.FindOneAndUpdateOptions]) (*T, error) {
+	var result T
+	err := r.coll.FindOneAndUpdate(ctx, filter, update, opts...).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &result, nil
+}
+
 // UpdateMany updates multiple documents matching the filter.
 func (r *Repository[T]) UpdateMany(ctx context.Context, filter interface{}, update interface{}) (*mongo.UpdateResult, error) {
 	return r.coll.UpdateMany(ctx, filter, update)
@@ -107,6 +126,19 @@ func (r *Repository[T]) UpdateMany(ctx context.Context, filter interface{}, upda
 // DeleteOne deletes a single document matching the filter.
 func (r *Repository[T]) DeleteOne(ctx context.Context, filter interface{}) (*mongo.DeleteResult, error) {
 	return r.coll.DeleteOne(ctx, filter)
+}
+
+// FindOneAndDelete deletes a single document and retrieves it.
+func (r *Repository[T]) FindOneAndDelete(ctx context.Context, filter interface{}, opts ...options.Lister[options.FindOneAndDeleteOptions]) (*T, error) {
+	var result T
+	err := r.coll.FindOneAndDelete(ctx, filter, opts...).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &result, nil
 }
 
 // DeleteMany deletes multiple documents matching the filter.

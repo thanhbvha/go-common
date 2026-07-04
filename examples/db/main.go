@@ -109,4 +109,30 @@ func main() {
 	for _, res := range rawResults {
 		fmt.Printf("  Status: %-12s | Total: %d\n", res.Status, res.Total)
 	}
+
+	// ==========================================
+	// TRANSACTION EXAMPLES
+	// ==========================================
+
+	// 7. Example 3: Dùng Transaction
+	fmt.Println("\n--- 3. Transaction: Insert with WithTx ---")
+	err = dbConn.Transaction(func(tx *gorm.DB) error {
+		// Nhân bản (clone) repo với Transaction DB
+		txRepo := patientRepo.WithTx(tx)
+		
+		err := txRepo.Insert(context.Background(), &Patient{
+			FullName: "Tx Patient",
+			Age:      20,
+			Status:   "WAITING",
+		})
+		if err != nil {
+			fmt.Println("  [Error] Insert failed, rolling back...")
+			return err
+		}
+		fmt.Println("  [Success] Inserted Tx Patient within transaction.")
+		return nil // Trả về nil sẽ tự động Commit
+	})
+	if err != nil {
+		panic(err)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Repository is a generic data access object for GORM.
@@ -21,6 +22,16 @@ func NewRepository[T any](db *gorm.DB) *Repository[T] {
 // DB returns the underlying gorm.DB for advanced usages.
 func (r *Repository[T]) DB() *gorm.DB {
 	return r.db
+}
+
+// WithTx returns a new repository instance bound to the given transaction.
+func (r *Repository[T]) WithTx(tx *gorm.DB) *Repository[T] {
+	return &Repository[T]{db: tx}
+}
+
+// WithUnscoped returns a new repository instance that bypasses soft-delete filters.
+func (r *Repository[T]) WithUnscoped() *Repository[T] {
+	return &Repository[T]{db: r.db.Unscoped()}
 }
 
 // FindByID retrieves a single record by its ID.
@@ -138,6 +149,82 @@ func (r *Repository[T]) InsertMany(ctx context.Context, models []T) error {
 	return r.db.WithContext(ctx).Create(&models).Error
 }
 
+// Upsert creates or updates a record. 
+// - If conflict occurs on conflictColumns, it updates all fields by default.
+// - If updateColumns are provided, it only updates those specific columns.
+func (r *Repository[T]) Upsert(ctx context.Context, model *T, conflictColumns []string, updateColumns ...string) error {
+	var cols []clause.Column
+	for _, c := range conflictColumns {
+		cols = append(cols, clause.Column{Name: c})
+	}
+	
+	onConflict := clause.OnConflict{
+		Columns: cols,
+	}
+
+	if len(updateColumns) > 0 {
+		onConflict.DoUpdates = clause.AssignmentColumns(updateColumns)
+	} else {
+		onConflict.UpdateAll = true
+	}
+
+	return r.db.WithContext(ctx).Clauses(onConflict).Create(model).Error
+}
+
+// UpsertIgnore creates a record but silently does nothing if a conflict occurs on conflictColumns.
+func (r *Repository[T]) UpsertIgnore(ctx context.Context, model *T, conflictColumns []string) error {
+	var cols []clause.Column
+	for _, c := range conflictColumns {
+		cols = append(cols, clause.Column{Name: c})
+	}
+	
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   cols,
+		DoNothing: true,
+	}).Create(model).Error
+}
+
+// UpsertMany creates or updates multiple records in bulk. 
+// - If conflict occurs on conflictColumns, it updates all fields by default.
+// - If updateColumns are provided, it only updates those specific columns.
+func (r *Repository[T]) UpsertMany(ctx context.Context, models []T, conflictColumns []string, updateColumns ...string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	var cols []clause.Column
+	for _, c := range conflictColumns {
+		cols = append(cols, clause.Column{Name: c})
+	}
+	
+	onConflict := clause.OnConflict{
+		Columns: cols,
+	}
+
+	if len(updateColumns) > 0 {
+		onConflict.DoUpdates = clause.AssignmentColumns(updateColumns)
+	} else {
+		onConflict.UpdateAll = true
+	}
+
+	return r.db.WithContext(ctx).Clauses(onConflict).Create(&models).Error
+}
+
+// UpsertIgnoreMany creates multiple records in bulk but silently does nothing for those that conflict on conflictColumns.
+func (r *Repository[T]) UpsertIgnoreMany(ctx context.Context, models []T, conflictColumns []string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	var cols []clause.Column
+	for _, c := range conflictColumns {
+		cols = append(cols, clause.Column{Name: c})
+	}
+	
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   cols,
+		DoNothing: true,
+	}).Create(&models).Error
+}
+
 // Update saves all fields of the model.
 func (r *Repository[T]) Update(ctx context.Context, model *T) error {
 	return r.db.WithContext(ctx).Save(model).Error
@@ -149,10 +236,16 @@ func (r *Repository[T]) UpdateColumns(ctx context.Context, id interface{}, value
 	return r.db.WithContext(ctx).Model(&model).Where("id = ?", id).Updates(values).Error
 }
 
-// Delete removes a record by ID.
+// Delete removes a record by ID (Soft delete if DeletedAt is present in model).
 func (r *Repository[T]) Delete(ctx context.Context, id interface{}) error {
 	var model T
 	return r.db.WithContext(ctx).Delete(&model, id).Error
+}
+
+// Restore removes the soft-delete marker from a record, effectively restoring it.
+func (r *Repository[T]) Restore(ctx context.Context, id interface{}) error {
+	var model T
+	return r.db.WithContext(ctx).Unscoped().Model(&model).Where("id = ?", id).Update("deleted_at", nil).Error
 }
 
 // Count returns the number of records matching the conditions.
