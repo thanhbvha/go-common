@@ -1,6 +1,7 @@
 package orm_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -83,8 +84,8 @@ func TestPaginationWithFilters(t *testing.T) {
 	// Filter age > 25 (Alice(30), Charlie(35), Diana(28) -> 3 items)
 	req := orm.PageRequest{Page: 1, Size: 10, Sorts: []string{"age desc"}}
 	
-	query := gormDB.Model(&User{}).Where("age > ?", 25)
-	resp, err := orm.ExecutePagination[User](query, req)
+	repo := orm.NewRepository[User](gormDB)
+	resp, err := repo.Paginate(context.Background(), req, "age > ?", 25)
 	if err != nil {
 		t.Fatalf("ExecutePagination failed: %v", err)
 	}
