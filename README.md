@@ -58,4 +58,4 @@ Each module contains its own detailed `README.md` with usage examples and API re
 
 ## License
 
-MIT
+This project is free and open-source software licensed under the [MIT License](LICENSE).
