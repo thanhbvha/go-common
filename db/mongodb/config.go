@@ -10,6 +10,7 @@ type Config struct {
 	MinPoolSize    uint64        `mapstructure:"min_pool_size"`
 	ConnectTimeout time.Duration `mapstructure:"connect_timeout"`
 	PingTimeout    time.Duration `mapstructure:"ping_timeout"`
+	EnableTelemetry bool         `mapstructure:"enable_telemetry"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults

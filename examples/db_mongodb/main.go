@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/thanhbvha/go-common/db/mongodb"
+	"github.com/thanhbvha/go-common/telemetry"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -20,16 +21,28 @@ func main() {
 	fmt.Println("--- MongoDB Example ---")
 	ctx := context.Background()
 
+	// 0. Khởi tạo Telemetry (Bật Tracing)
+	tel, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName:   "demo-mongodb-service",
+		EnableTracing: true,
+		Endpoint:      "localhost:4317",
+	})
+	if err == nil {
+		defer tel.Shutdown(ctx)
+	}
+
 	// 1. Config for Multiple Databases
 	cfgPrimary := mongodb.DefaultConfig()
 	cfgPrimary.URI = "mongodb://localhost:27017"
 	cfgPrimary.DBName = "primary_db"
 	cfgPrimary.PingTimeout = 2 * 1000 * 1000 * 1000
+	cfgPrimary.EnableTelemetry = true // Bật Telemetry cho kết nối này
 
 	cfgLog := mongodb.DefaultConfig()
 	cfgLog.URI = "mongodb://localhost:27017"
 	cfgLog.DBName = "log_db"
 	cfgLog.PingTimeout = 2 * 1000 * 1000 * 1000
+	cfgLog.EnableTelemetry = true // Bật Telemetry cho kết nối này
 
 	configs := map[string]mongodb.Config{
 		"primary": cfgPrimary,
@@ -39,7 +52,7 @@ func main() {
 	// 2. Initialize the Global Manager
 	// We can pass "primary" as the default. 
 	// (If we had only 1 config, we wouldn't even need to pass it).
-	err := mongodb.Init(ctx, configs, "primary")
+	err = mongodb.Init(ctx, configs, "primary")
 	if err != nil {
 		log.Printf("Failed to connect to MongoDB (make sure it is running locally): %v\n", err)
 		return

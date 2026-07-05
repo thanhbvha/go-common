@@ -6,7 +6,9 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/thanhbvha/go-common/db/orm"
+	"github.com/thanhbvha/go-common/telemetry"
 	"gorm.io/gorm"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 type Patient struct {
@@ -16,8 +18,36 @@ type Patient struct {
 	Status   string
 }
 
+type Department struct {
+	gorm.Model
+	Name string
+}
+
+type Doctor struct {
+	gorm.Model
+	Name         string
+	DepartmentID uint
+}
+
+type Visit struct {
+	gorm.Model
+	PatientID uint
+	DoctorID  uint
+	Diagnosis string
+}
+
 func main() {
 	fmt.Println("--- Database/ORM Example ---")
+
+	// 0. Khởi tạo Telemetry (Bật Tracing)
+	tel, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName:   "demo-db-service",
+		EnableTracing: true,
+		Endpoint:      "localhost:4317",
+	})
+	if err == nil {
+		defer tel.Shutdown(context.Background())
+	}
 
 	// 1. In a real app, you would load this from config using the 'config' module
 	// For this example, we'll use an in-memory SQLite connection directly
@@ -26,8 +56,13 @@ func main() {
 		panic("failed to connect to db")
 	}
 
+	// Bật Plugin Telemetry cho GORM
+	if err := dbConn.Use(tracing.NewPlugin()); err != nil {
+		fmt.Printf("Warning: failed to enable tracing: %v\n", err)
+	}
+
 	// 2. Auto-migrate schema
-	dbConn.AutoMigrate(&Patient{})
+	dbConn.AutoMigrate(&Patient{}, &Department{}, &Doctor{}, &Visit{})
 
 	// Khởi tạo Repository trước
 	patientRepo := orm.NewRepository[Patient](dbConn)
@@ -43,6 +78,23 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Seed relations using Repositories
+	deptRepo := orm.NewRepository[Department](dbConn)
+	_ = deptRepo.InsertMany(context.Background(), []Department{{Name: "Cardiology"}, {Name: "Neurology"}})
+
+	doctorRepo := orm.NewRepository[Doctor](dbConn)
+	_ = doctorRepo.InsertMany(context.Background(), []Doctor{
+		{Name: "Dr. Smith", DepartmentID: 1},
+		{Name: "Dr. Strange", DepartmentID: 2},
+	})
+
+	visitRepo := orm.NewRepository[Visit](dbConn)
+	_ = visitRepo.InsertMany(context.Background(), []Visit{
+		{PatientID: 1, DoctorID: 1, Diagnosis: "Heart burn"},
+		{PatientID: 2, DoctorID: 2, Diagnosis: "Headache"},
+		{PatientID: 3, DoctorID: 1, Diagnosis: "High blood pressure"},
+	})
 	fmt.Println("\n--- Fetching WAITING Patients (Page 1, Size 2) ---")
 
 	req := orm.PageRequest{
@@ -119,7 +171,7 @@ func main() {
 	err = dbConn.Transaction(func(tx *gorm.DB) error {
 		// Nhân bản (clone) repo với Transaction DB
 		txRepo := patientRepo.WithTx(tx)
-		
+
 		err := txRepo.Insert(context.Background(), &Patient{
 			FullName: "Tx Patient",
 			Age:      20,
@@ -134,5 +186,31 @@ func main() {
 	})
 	if err != nil {
 		panic(err)
+	}
+
+	// 8. Example 4: Complex JOIN (3-4 tables) using Aggregate
+	fmt.Println("\n--- 4. Aggregate: Complex JOIN (Patient -> Visit -> Doctor -> Department) ---")
+	type VisitDetail struct {
+		PatientName    string
+		Diagnosis      string
+		DoctorName     string
+		DepartmentName string
+	}
+	var visitDetails []VisitDetail
+
+	// Truy vấn lấy danh sách bệnh nhân đi khám thuộc khoa Cardiology
+	err = patientRepo.Aggregate(context.Background(), &visitDetails, func(db *gorm.DB) *gorm.DB {
+		return db.Select("patients.full_name as patient_name, visits.diagnosis, doctors.name as doctor_name, departments.name as department_name").
+			Joins("JOIN visits ON visits.patient_id = patients.id").
+			Joins("JOIN doctors ON doctors.id = visits.doctor_id").
+			Joins("JOIN departments ON departments.id = doctors.department_id").
+			Where("departments.name = ?", "Cardiology")
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	for _, vd := range visitDetails {
+		fmt.Printf("  Patient: %-15s | Diagnosis: %-20s | Doctor: %-15s | Dept: %s\n", vd.PatientName, vd.Diagnosis, vd.DoctorName, vd.DepartmentName)
 	}
 }

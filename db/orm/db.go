@@ -9,6 +9,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 // New initializes a new GORM database connection for PostgreSQL based on the config.
@@ -55,6 +56,12 @@ func New(cfg Config) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
 	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+
+	if cfg.EnableTelemetry {
+		if err := db.Use(tracing.NewPlugin()); err != nil {
+			log.Printf("Warning: failed to initialize GORM telemetry: %v", err)
+		}
+	}
 
 	return db, nil
 }

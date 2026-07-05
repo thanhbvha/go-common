@@ -22,6 +22,9 @@ type Config struct {
 
 	// Print SQL logs (for debugging)
 	Debug bool `mapstructure:"debug"`
+
+	// Telemetry (OTel)
+	EnableTelemetry bool `mapstructure:"enable_telemetry"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults

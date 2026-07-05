@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+	"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/v2/mongo/otelmongo"
 )
 
 // New initializes a new MongoDB client connection.
@@ -20,6 +21,10 @@ func New(ctx context.Context, cfg Config) (*mongo.Client, error) {
 		SetMaxPoolSize(cfg.MaxPoolSize).
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetConnectTimeout(cfg.ConnectTimeout)
+
+	if cfg.EnableTelemetry {
+		opts.SetMonitor(otelmongo.NewMonitor())
+	}
 
 	client, err := mongo.Connect(opts)
 	if err != nil {
