@@ -23,7 +23,9 @@ func New(ctx context.Context, cfg Config) (*mongo.Client, error) {
 		SetConnectTimeout(cfg.ConnectTimeout)
 
 	if cfg.EnableTelemetry {
-		opts.SetMonitor(otelmongo.NewMonitor())
+		opts.SetMonitor(otelmongo.NewMonitor(
+			otelmongo.WithCommandAttributeDisabled(false),
+		))
 	}
 
 	client, err := mongo.Connect(opts)
