@@ -5,6 +5,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/xerrors"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -50,7 +51,8 @@ func Telemetry(operationName string) fiber.Handler {
 			if e, ok := err.(*fiber.Error); ok {
 				statusCode = e.Code
 			} else {
-				statusCode = fiber.StatusInternalServerError
+				// Safely extracts HTTP status from xerrors, defaults to 500
+				statusCode = xerrors.HTTPStatusCode(err)
 			}
 		}
 

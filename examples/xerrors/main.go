@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/thanhbvha/go-common/errors"
+	"github.com/thanhbvha/go-common/xerrors"
 )
 
 func main() {
@@ -27,8 +27,8 @@ func main() {
 // processRequest simulates a request that fails authentication
 func processRequest(valid bool) error {
 	if !valid {
-		// Return a predefined error from the errors package
-		return errors.ErrUnauthorized
+		// Return a predefined error from the xerrors package
+		return xerrors.ErrUnauthorized
 	}
 	return nil
 }
@@ -39,17 +39,17 @@ func fetchFromDB() error {
 	dbErr := goErrors.New("connection reset by peer")
 
 	// Wrap it with our standard error
-	return errors.Wrap(dbErr, "DB_CONNECTION_FAILED", "Could not connect to the database", errors.StatusInternalServerError)
+	return xerrors.Wrap(dbErr, "DB_CONNECTION_FAILED", "Could not connect to the database", xerrors.StatusInternalServerError)
 }
 
 // logError is a helper to simulate how an HTTP framework (like Fiber or Gin)
 // would handle and log the error.
 func logError(err error) {
 	// Extract the HTTP status code to send to the client
-	httpStatus := errors.HTTPStatusCode(err)
+	httpStatus := xerrors.HTTPStatusCode(err)
 	
 	// Extract the custom code
-	code := errors.GetCode(err)
+	code := xerrors.GetCode(err)
 
 	fmt.Printf("HTTP Status sent to client: %d\n", httpStatus)
 	fmt.Printf("Error Code sent to client: %s\n", code)
@@ -57,8 +57,8 @@ func logError(err error) {
 	// Print the full error (which includes the wrapped cause for our internal logs)
 	log.Printf("Internal System Log: %v\n", err)
 	
-	// Demonstrate errors.Is
-	if errors.Is(err, errors.ErrUnauthorized) {
+	// Demonstrate xerrors.Is
+	if xerrors.Is(err, xerrors.ErrUnauthorized) {
 		fmt.Println("-> This was an unauthorized error!")
 	}
 }

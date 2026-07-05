@@ -1,4 +1,4 @@
-package errors
+package xerrors
 
 // Standard HTTP status codes, mapped from net/http for convenience without importing it
 const (
