@@ -2,7 +2,7 @@
 package core
 
 import (
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"sync"
 
 	"github.com/thanhbvha/go-common/logger"
