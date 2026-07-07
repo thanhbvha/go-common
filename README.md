@@ -19,7 +19,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
 | `web` | Web core utilities (standard response, validator, Fiber middlewares) |
-| `utils` | Go Generics toolset (slice, maps, str) and Graceful Shutdown manager |
+| `utils` | Go Generics toolset (slice, maps, str), Cryptography (AES, ChaCha20, Argon2id, Hashing), and Graceful Shutdown |
 
 ## Requirements
 
