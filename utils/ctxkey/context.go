@@ -20,6 +20,9 @@ const (
 	
 	// RequestIDKey is the context key for the unique request ID
 	RequestIDKey Key = "request_id"
+
+	// UserInfo is the context key for the authenticated user information
+	UserInfo Key = "user_info"
 )
 
 // SetUserID stores the user ID in the context
