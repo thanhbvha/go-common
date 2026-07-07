@@ -21,24 +21,42 @@ type EncryptedClaims struct {
 	jwt.RegisteredClaims
 }
 
+// EncryptedManagerOption defines a functional option for configuring EncryptedManager.
+type EncryptedManagerOption func(*EncryptedManager)
+
+// WithAAD sets the Additional Authenticated Data (AAD) for AES-GCM encryption.
+func WithAAD(aad []byte) EncryptedManagerOption {
+	return func(m *EncryptedManager) {
+		m.aad = aad
+	}
+}
+
 // EncryptedManager provides JWT generation and validation with AES-256 GCM encrypted payloads.
 // This ensures that sensitive user information cannot be read even if the token is intercepted.
 type EncryptedManager struct {
 	jwtSecret string
 	aesKey    []byte
+	aad       []byte
 }
 
 // NewEncryptedManager creates a new manager for encrypted JWTs.
 // aesKey must be exactly 32 bytes (256-bit) for AES-256 GCM.
-func NewEncryptedManager(jwtSecret string, aesKey string) (*EncryptedManager, error) {
+func NewEncryptedManager(jwtSecret string, aesKey string, opts ...EncryptedManagerOption) (*EncryptedManager, error) {
 	keyBytes := []byte(aesKey)
 	if len(keyBytes) != 32 {
 		return nil, crypt.ErrInvalidKeySize
 	}
-	return &EncryptedManager{
+	
+	m := &EncryptedManager{
 		jwtSecret: jwtSecret,
 		aesKey:    keyBytes,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	return m, nil
 }
 
 // GenerateToken encrypts the user info and signs it as a JWT.
@@ -50,7 +68,7 @@ func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration) 
 	}
 
 	// 2. Encrypt the JSON payload using AES-256 GCM
-	ciphertext, err := crypt.EncryptAESGCM(m.aesKey, userBytes, nil)
+	ciphertext, err := crypt.EncryptAESGCM(m.aesKey, userBytes, m.aad)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt payload: %w", err)
 	}
@@ -107,7 +125,7 @@ func (m *EncryptedManager) ValidateToken(tokenString string) (*UserInfo, error) 
 	}
 
 	// 3. Decrypt the payload using AES-256 GCM
-	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, nil)
+	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, m.aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
 	}

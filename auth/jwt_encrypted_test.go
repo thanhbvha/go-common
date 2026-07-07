@@ -53,3 +53,45 @@ func TestEncryptedManager(t *testing.T) {
 		t.Error("Expected error when initializing with invalid AES key size")
 	}
 }
+
+func TestEncryptedManager_WithAAD(t *testing.T) {
+	jwtSecret := "my-jwt-secret-key"
+	aesKey := "12345678901234567890123456789012"
+	aad := []byte("tenant-id-123")
+
+	manager, err := NewEncryptedManager(jwtSecret, aesKey, WithAAD(aad))
+	if err != nil {
+		t.Fatalf("Failed to create EncryptedManager with AAD: %v", err)
+	}
+
+	user := UserInfo{
+		ID: "u_aad",
+	}
+
+	token, err := manager.GenerateToken(user, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate token with AAD: %v", err)
+	}
+
+	extractedUser, err := manager.ValidateToken(token)
+	if err != nil {
+		t.Fatalf("Failed to validate token with AAD: %v", err)
+	}
+
+	if extractedUser.ID != user.ID {
+		t.Errorf("Expected ID %s, got %s", user.ID, extractedUser.ID)
+	}
+
+	// Try to validate with a manager that has a different AAD or no AAD
+	managerNoAAD, _ := NewEncryptedManager(jwtSecret, aesKey)
+	_, err = managerNoAAD.ValidateToken(token)
+	if err == nil {
+		t.Error("Expected error when validating AAD-encrypted token with no AAD")
+	}
+
+	managerWrongAAD, _ := NewEncryptedManager(jwtSecret, aesKey, WithAAD([]byte("wrong-tenant")))
+	_, err = managerWrongAAD.ValidateToken(token)
+	if err == nil {
+		t.Error("Expected error when validating AAD-encrypted token with wrong AAD")
+	}
+}
