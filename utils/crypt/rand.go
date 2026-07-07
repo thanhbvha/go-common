@@ -1,3 +1,7 @@
+// Package crypt provides modern, secure cryptographic utilities.
+//
+// It implements best-practice algorithms for symmetric encryption (AES-256 GCM, ChaCha20-Poly1305),
+// cryptographic hashing (SHA-3, BLAKE2b), and secure password hashing (Argon2id).
 package crypt
 
 import (

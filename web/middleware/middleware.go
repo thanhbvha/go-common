@@ -1,3 +1,14 @@
+// Package middleware provides standard HTTP middlewares for the Fiber web framework.
+//
+// It includes essential middlewares for production applications such as RequestID,
+// Panic Recovery, and OpenTelemetry instrumentation for incoming HTTP requests.
+//
+// Basic usage:
+//
+//	app := fiber.New()
+//	app.Use(middleware.RequestID())
+//	app.Use(middleware.Recover())
+//	app.Use(middleware.Telemetry("my-service"))
 package middleware
 
 import (

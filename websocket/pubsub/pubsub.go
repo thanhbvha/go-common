@@ -1,3 +1,7 @@
+// Package pubsub provides a distributed publish-subscribe abstraction for the WebSocket server.
+//
+// It allows multiple WebSocket nodes to form a cluster and broadcast messages across
+// the entire network. Built-in implementations include Redis (via pub/sub) and NATS (JetStream).
 package pubsub
 
 import (

@@ -1,3 +1,7 @@
+// Package slice provides generic utility functions for Go slices.
+//
+// It leverages Go 1.18+ generics to offer common slice operations like filtering,
+// mapping, checking for existence (Contains), and deduplication in a type-safe manner.
 package slice
 
 // Contains checks if a slice contains a specific item

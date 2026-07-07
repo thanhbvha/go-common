@@ -1,4 +1,7 @@
-// Package limiter provides rate limiting and connection limiting mechanisms to protect the server from abuse.
+// Package limiter provides token-bucket rate limiting tailored for WebSocket connections.
+//
+// It helps prevent abuse by limiting the number of messages a single connection
+// can send over a specific time window, protecting the server from DoS attacks.
 package limiter
 
 import (

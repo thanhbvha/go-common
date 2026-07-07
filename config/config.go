@@ -1,3 +1,23 @@
+// Package config provides a simple, structured way to load application configuration
+// from both files (like .yaml or .env) and environment variables.
+//
+// It acts as a lightweight wrapper around github.com/spf13/viper, focusing on the
+// most common use-cases: loading configuration into a strongly typed Go struct and
+// automatically mapping environment variables to struct fields.
+//
+// Basic usage:
+//
+//	type AppConfig struct {
+//		Port int    `mapstructure:"port"`
+//		DB   string `mapstructure:"db_url"`
+//	}
+//
+//	var cfg AppConfig
+//	// Loads from config.yaml and overrides with matching env variables
+//	err := config.Load(config.Options{
+//		Path:         "config.yaml",
+//		AutomaticEnv: true,
+//	}, &cfg)
 package config
 
 import (

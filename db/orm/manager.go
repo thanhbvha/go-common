@@ -1,3 +1,15 @@
+// Package orm provides a robust, production-ready PostgreSQL client using GORM.
+//
+// It includes features like multi-connection management (singleton manager),
+// connection pooling, automatic OpenTelemetry instrumentation, pagination utilities,
+// and a generic repository pattern for common CRUD operations.
+//
+// Basic usage:
+//
+//	err := orm.Init(map[string]orm.Config{
+//		"main": { Host: "localhost", DBName: "app_db", User: "postgres" },
+//	})
+//	db := orm.Get("main")
 package orm
 
 import (

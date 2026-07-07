@@ -1,3 +1,7 @@
+// Package ctxkey provides a strongly-typed mechanism for managing context keys.
+//
+// It prevents key collisions when storing values in context.Context by using
+// custom unexported types for keys, which is the recommended Go practice.
 package ctxkey
 
 import (

@@ -1,3 +1,16 @@
+// Package validator provides struct validation using github.com/go-playground/validator.
+//
+// It wraps the standard validator to provide friendly, localized (Vietnamese) error
+// messages out-of-the-box and structures the errors into a standardized JSON format.
+//
+// Basic usage:
+//
+//	type User struct {
+//		Email string `validate:"required,email"`
+//	}
+//	if errs := validator.Struct(user); len(errs) > 0 {
+//		return response.ValidationError(c, errs)
+//	}
 package validator
 
 import (

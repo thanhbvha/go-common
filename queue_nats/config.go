@@ -1,3 +1,21 @@
+// Package queue_nats implements a highly reliable, NATS JetStream-backed job queue.
+// It provides feature parity with the Redis-backed queue, including delayed execution,
+// per-type worker pools, automatic retries with exponential backoff, and a dead-letter
+// queue (DLQ) for exhausted jobs.
+//
+// Basic usage:
+//
+//	nc := nats.MustConnect(ctx, nats.DefaultConfig())
+//	cfg := queue_nats.DefaultConfig()
+//	q := queue_nats.New(nc, cfg)
+//
+//	q.RegisterJobType("email", queue_nats.JobTypeOptions{Concurrency: 4, MaxRetry: 5})
+//	q.RegisterHandler("email", func(job queue_nats.Job) error { /* … */ return nil })
+//
+//	q.Start(ctx)
+//	defer q.Stop()
+//
+//	q.Enqueue(ctx, "email", payload)
 package queue_nats
 
 import (

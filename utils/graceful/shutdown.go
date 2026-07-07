@@ -1,3 +1,8 @@
+// Package graceful provides utilities for graceful shutdown of services.
+//
+// It listens for OS signals (SIGINT, SIGTERM) and coordinates the graceful
+// shutdown of multiple registered components (like HTTP servers and DB connections)
+// with a configurable timeout to prevent data loss.
 package graceful
 
 import (
