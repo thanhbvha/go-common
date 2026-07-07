@@ -3,11 +3,13 @@ module github.com/thanhbvha/go-common
 go 1.25.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-playground/validator/v10 v10.30.3
+	github.com/go-resty/resty/v2 v2.17.2
 	github.com/goccy/go-json v0.10.6
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/gofiber/websocket/v2 v2.2.1
@@ -18,6 +20,7 @@ require (
 	github.com/labstack/echo/v4 v4.15.2
 	github.com/nats-io/nats.go v1.37.0
 	github.com/redis/go-redis/v9 v9.7.3
+	github.com/sony/gobreaker/v2 v2.4.0
 	github.com/spf13/viper v1.21.0
 	go.mongodb.org/mongo-driver/v2 v2.7.0
 	go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/v2/mongo/otelmongo v0.0.0-20260702233925-7155189f62b7
@@ -57,7 +60,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-resty/resty/v2 v2.17.2 // indirect
 	github.com/go-sql-driver/mysql v1.7.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
@@ -95,7 +97,6 @@ require (
 	github.com/savsgio/gotils v0.0.0-20230208104028-c358bd845dee // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/sony/gobreaker/v2 v2.4.0 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
@@ -112,6 +113,7 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
