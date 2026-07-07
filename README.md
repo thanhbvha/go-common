@@ -20,6 +20,11 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
 | `web` | Web core utilities (standard response, validator, Fiber middlewares) |
 | `utils` | Go Generics toolset (slice, maps, str), Cryptography (AES, ChaCha20, Argon2id, Hashing), and Graceful Shutdown |
+| `cache` | Multi-tier Caching (Ristretto Local + Redis Remote) & Redis Distributed Lock |
+| `auth` | Enterprise Authentication with Encrypted JWT (AES-GCM) and Dynamic Token Binding |
+| `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
+| `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
+| `cron` | Distributed Job Scheduler with Redis-backed Leader Election |
 
 ## Requirements
 
@@ -53,6 +58,11 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`db`](./db/README.md)
 - [`web`](./web/README.md)
 - [`utils`](./utils/README.md)
+- [`cache`](./cache/README.md)
+- [`auth`](./auth/README.md)
+- [`httpclient`](./httpclient/README.md)
+- [`ratelimit`](./ratelimit/README.md)
+- [`cron`](./cron/README.md)
 
 ---
 
