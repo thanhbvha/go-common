@@ -30,14 +30,20 @@ func FiberMiddleware(manager *Manager) fiber.Handler {
 }
 
 // FiberEncryptedMiddleware creates a Fiber middleware to protect routes using Encrypted JWT.
-func FiberEncryptedMiddleware(manager *EncryptedManager) fiber.Handler {
+// aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
+func FiberEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c *fiber.Ctx) []byte) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenString := extractTokenFromFiber(c)
 		if tokenString == "" {
 			return response.Error(c, fiber.StatusUnauthorized, "Missing or invalid Authorization header")
 		}
 
-		userInfo, err := manager.ValidateToken(tokenString)
+		var aad []byte
+		if aadExtractor != nil {
+			aad = aadExtractor(c)
+		}
+
+		userInfo, err := manager.ValidateToken(tokenString, aad)
 		if err != nil {
 			return response.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
 		}

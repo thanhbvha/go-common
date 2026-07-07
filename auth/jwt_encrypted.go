@@ -21,46 +21,29 @@ type EncryptedClaims struct {
 	jwt.RegisteredClaims
 }
 
-// EncryptedManagerOption defines a functional option for configuring EncryptedManager.
-type EncryptedManagerOption func(*EncryptedManager)
-
-// WithAAD sets the Additional Authenticated Data (AAD) for AES-GCM encryption.
-func WithAAD(aad []byte) EncryptedManagerOption {
-	return func(m *EncryptedManager) {
-		m.aad = aad
-	}
-}
-
 // EncryptedManager provides JWT generation and validation with AES-256 GCM encrypted payloads.
 // This ensures that sensitive user information cannot be read even if the token is intercepted.
 type EncryptedManager struct {
 	jwtSecret string
 	aesKey    []byte
-	aad       []byte
 }
 
 // NewEncryptedManager creates a new manager for encrypted JWTs.
 // aesKey must be exactly 32 bytes (256-bit) for AES-256 GCM.
-func NewEncryptedManager(jwtSecret string, aesKey string, opts ...EncryptedManagerOption) (*EncryptedManager, error) {
+func NewEncryptedManager(jwtSecret string, aesKey string) (*EncryptedManager, error) {
 	keyBytes := []byte(aesKey)
 	if len(keyBytes) != 32 {
 		return nil, crypt.ErrInvalidKeySize
 	}
 	
-	m := &EncryptedManager{
+	return &EncryptedManager{
 		jwtSecret: jwtSecret,
 		aesKey:    keyBytes,
-	}
-
-	for _, opt := range opts {
-		opt(m)
-	}
-
-	return m, nil
+	}, nil
 }
 
 // GenerateToken encrypts the user info and signs it as a JWT.
-func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration) (string, error) {
+func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration, aad []byte) (string, error) {
 	// 1. Serialize UserInfo to JSON
 	userBytes, err := json.Marshal(user)
 	if err != nil {
@@ -68,7 +51,7 @@ func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration) 
 	}
 
 	// 2. Encrypt the JSON payload using AES-256 GCM
-	ciphertext, err := crypt.EncryptAESGCM(m.aesKey, userBytes, m.aad)
+	ciphertext, err := crypt.EncryptAESGCM(m.aesKey, userBytes, aad)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt payload: %w", err)
 	}
@@ -97,7 +80,7 @@ func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration) 
 }
 
 // ValidateToken validates the JWT signature, decrypts the payload, and returns the UserInfo.
-func (m *EncryptedManager) ValidateToken(tokenString string) (*UserInfo, error) {
+func (m *EncryptedManager) ValidateToken(tokenString string, aad []byte) (*UserInfo, error) {
 	// 1. Parse and validate the JWT signature
 	token, err := jwt.ParseWithClaims(tokenString, &EncryptedClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -125,7 +108,7 @@ func (m *EncryptedManager) ValidateToken(tokenString string) (*UserInfo, error) 
 	}
 
 	// 3. Decrypt the payload using AES-256 GCM
-	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, m.aad)
+	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
 	}

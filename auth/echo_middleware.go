@@ -34,7 +34,8 @@ func EchoMiddleware(manager *Manager) echo.MiddlewareFunc {
 }
 
 // EchoEncryptedMiddleware creates an Echo middleware to protect routes using Encrypted JWT.
-func EchoEncryptedMiddleware(manager *EncryptedManager) echo.MiddlewareFunc {
+// aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
+func EchoEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c echo.Context) []byte) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			tokenString := extractTokenFromEcho(c)
@@ -44,7 +45,12 @@ func EchoEncryptedMiddleware(manager *EncryptedManager) echo.MiddlewareFunc {
 				})
 			}
 
-			userInfo, err := manager.ValidateToken(tokenString)
+			var aad []byte
+			if aadExtractor != nil {
+				aad = aadExtractor(c)
+			}
+
+			userInfo, err := manager.ValidateToken(tokenString, aad)
 			if err != nil {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "Invalid or expired token",

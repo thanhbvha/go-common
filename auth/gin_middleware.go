@@ -34,7 +34,8 @@ func GinMiddleware(manager *Manager) gin.HandlerFunc {
 }
 
 // GinEncryptedMiddleware creates a Gin middleware to protect routes using Encrypted JWT.
-func GinEncryptedMiddleware(manager *EncryptedManager) gin.HandlerFunc {
+// aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
+func GinEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c *gin.Context) []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := extractTokenFromGin(c)
 		if tokenString == "" {
@@ -44,7 +45,12 @@ func GinEncryptedMiddleware(manager *EncryptedManager) gin.HandlerFunc {
 			return
 		}
 
-		userInfo, err := manager.ValidateToken(tokenString)
+		var aad []byte
+		if aadExtractor != nil {
+			aad = aadExtractor(c)
+		}
+
+		userInfo, err := manager.ValidateToken(tokenString, aad)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "Invalid or expired token",

@@ -17,9 +17,8 @@ func main() {
 	// The AES key must be EXACTLY 32 bytes for AES-256 GCM!
 	jwtSecret := "super-secret-jwt-key"
 	aesKey := "12345678901234567890123456789012"
-	aad := []byte("example-tenant-id") // Example AAD for extra security
 
-	manager, err := auth.NewEncryptedManager(jwtSecret, aesKey, auth.WithAAD(aad))
+	manager, err := auth.NewEncryptedManager(jwtSecret, aesKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize auth manager: %v", err)
 	}
@@ -40,14 +39,25 @@ func main() {
 			},
 		}
 
-		// Generate an Encrypted Token valid for 24 hours
-		token, err := manager.GenerateToken(user, 24*time.Hour)
+		// AAD Binding: Generate a random Session ID to bind this token to a specific browser session
+		// In a real app, generate a random string using utils/crypt or uuid.
+		sessionID := "sess_" + fmt.Sprintf("%d", time.Now().UnixNano())
+
+		// Set the Session ID in a HttpOnly Cookie so Javascript cannot read it (protection against XSS)
+		c.Cookie(&fiber.Cookie{
+			Name:     "session_id",
+			Value:    sessionID,
+			Expires:  time.Now().Add(24 * time.Hour),
+			HTTPOnly: true,
+			Secure:   false, // set to true in production (HTTPS)
+		})
+
+		// Generate an Encrypted Token valid for 24 hours, bonded to the Session ID as AAD
+		token, err := manager.GenerateToken(user, 24*time.Hour, []byte(sessionID))
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to generate token"})
 		}
 
-		// Look at the token string - you will see that the payload is completely
-		// unreadable base64 (encrypted), not the standard base64 JSON payload of standard JWTs.
 		fmt.Println("Generated Encrypted Token:", token)
 
 		return c.JSON(fiber.Map{
@@ -58,13 +68,20 @@ func main() {
 	// 3. Protected Route Group using Middleware
 	api := app.Group("/api")
 	
-	// Apply the Fiber Encrypted Middleware
-	api.Use(auth.FiberEncryptedMiddleware(manager))
+	// Create an AAD Extractor function that reads the session_id from the Cookie
+	aadExtractor := func(c *fiber.Ctx) []byte {
+		sessionID := c.Cookies("session_id")
+		if sessionID == "" {
+			return nil
+		}
+		return []byte(sessionID)
+	}
+
+	// Apply the Fiber Encrypted Middleware with the dynamic AAD extractor
+	api.Use(auth.FiberEncryptedMiddleware(manager, aadExtractor))
 
 	api.Get("/profile", func(c *fiber.Ctx) error {
 		// The Middleware has automatically parsed, decrypted, and injected UserInfo into context!
-		
-		// Retrieve UserInfo from Context
 		val := c.Locals(string(ctxkey.UserInfo))
 		userInfo, ok := val.(*auth.UserInfo)
 		if !ok {
@@ -72,7 +89,7 @@ func main() {
 		}
 
 		return c.JSON(fiber.Map{
-			"message": "Welcome to the protected area!",
+			"message": "Welcome to the protected area! Your token is secure.",
 			"user":    userInfo,
 		})
 	})
