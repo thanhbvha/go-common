@@ -20,6 +20,7 @@ require (
 	github.com/labstack/echo/v4 v4.15.2
 	github.com/nats-io/nats.go v1.37.0
 	github.com/redis/go-redis/v9 v9.7.3
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/sony/gobreaker/v2 v2.4.0
 	github.com/spf13/viper v1.21.0
 	go.mongodb.org/mongo-driver/v2 v2.7.0
