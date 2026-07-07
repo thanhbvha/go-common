@@ -1,3 +1,6 @@
+// Package auth provides enterprise-grade authentication tools.
+// It supports standard JWT as well as Encrypted JWT (AES-256 GCM) with Dynamic AAD (Token Binding)
+// to protect against Token Theft and XSS attacks.
 package auth
 
 import (

@@ -1,3 +1,6 @@
+// Package httpclient provides a resilient HTTP client wrapper around go-resty.
+// It features automatic Retries with exponential backoff, Circuit Breaker via gobreaker,
+// and automatic OpenTelemetry W3C Trace Context propagation.
 package httpclient
 
 import (

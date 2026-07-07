@@ -1,3 +1,6 @@
+// Package ratelimit provides a distributed rate limiter backed by Redis.
+// It uses Lua scripting to ensure atomic operations (Fixed Window algorithm)
+// and comes with built-in middlewares for Fiber, Gin, and Echo.
 package ratelimit
 
 import (
