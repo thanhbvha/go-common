@@ -17,8 +17,9 @@ func main() {
 	// The AES key must be EXACTLY 32 bytes for AES-256 GCM!
 	jwtSecret := "super-secret-jwt-key"
 	aesKey := "12345678901234567890123456789012"
+	aad := []byte("example-tenant-id") // Example AAD for extra security
 
-	manager, err := auth.NewEncryptedManager(jwtSecret, aesKey)
+	manager, err := auth.NewEncryptedManager(jwtSecret, aesKey, auth.WithAAD(aad))
 	if err != nil {
 		log.Fatalf("Failed to initialize auth manager: %v", err)
 	}

@@ -2,11 +2,11 @@ package auth
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/thanhbvha/go-common/utils/crypt"
 )

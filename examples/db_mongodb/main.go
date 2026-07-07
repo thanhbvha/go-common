@@ -21,7 +21,7 @@ func main() {
 	fmt.Println("--- MongoDB Example ---")
 	ctx := context.Background()
 
-	// 0. Khởi tạo Telemetry (Bật Tracing)
+	// 0. Initialize Telemetry (Enable Tracing)
 	tel, err := telemetry.Init(ctx, telemetry.Config{
 		ServiceName:   "demo-mongodb-service",
 		EnableTracing: true,
@@ -36,13 +36,13 @@ func main() {
 	cfgPrimary.URI = "mongodb://localhost:27017"
 	cfgPrimary.DBName = "primary_db"
 	cfgPrimary.PingTimeout = 2 * 1000 * 1000 * 1000
-	cfgPrimary.EnableTelemetry = true // Bật Telemetry cho kết nối này
+	cfgPrimary.EnableTelemetry = true // Enable Telemetry for this connection
 
 	cfgLog := mongodb.DefaultConfig()
 	cfgLog.URI = "mongodb://localhost:27017"
 	cfgLog.DBName = "log_db"
 	cfgLog.PingTimeout = 2 * 1000 * 1000 * 1000
-	cfgLog.EnableTelemetry = true // Bật Telemetry cho kết nối này
+	cfgLog.EnableTelemetry = true // Enable Telemetry for this connection
 
 	configs := map[string]mongodb.Config{
 		"primary": cfgPrimary,

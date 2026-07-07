@@ -39,7 +39,7 @@ type Visit struct {
 func main() {
 	fmt.Println("--- Database/ORM Example ---")
 
-	// 0. Khởi tạo Telemetry (Bật Tracing)
+	// 0. Initialize Telemetry (Enable Tracing)
 	tel, err := telemetry.Init(context.Background(), telemetry.Config{
 		ServiceName:   "demo-db-service",
 		EnableTracing: true,
@@ -56,7 +56,7 @@ func main() {
 		panic("failed to connect to db")
 	}
 
-	// Bật Plugin Telemetry cho GORM
+	// Enable Telemetry Plugin for GORM
 	if err := dbConn.Use(tracing.NewPlugin()); err != nil {
 		fmt.Printf("Warning: failed to enable tracing: %v\n", err)
 	}
@@ -64,7 +64,7 @@ func main() {
 	// 2. Auto-migrate schema
 	dbConn.AutoMigrate(&Patient{}, &Department{}, &Doctor{}, &Visit{})
 
-	// Khởi tạo Repository trước
+	// Initialize Repository first
 	patientRepo := orm.NewRepository[Patient](dbConn)
 
 	// 3. Seed some dummy data using the Repository's InsertMany function
@@ -119,7 +119,7 @@ func main() {
 	}
 
 	// ==========================================
-	// THỐNG KÊ (STATISTICS) EXAMPLES
+	// STATISTICS EXAMPLES
 	// ==========================================
 
 	type StatusCount struct {
@@ -127,7 +127,7 @@ func main() {
 		Total  int
 	}
 
-	// 5. Example 1: Dùng Aggregate (Query Builder)
+	// 5. Example 1: Using Aggregate (Query Builder)
 	fmt.Println("\n--- 1. Aggregate: Group by Status ---")
 	var aggResults []StatusCount
 
@@ -142,11 +142,11 @@ func main() {
 		fmt.Printf("  Status: %-12s | Total: %d\n", res.Status, res.Total)
 	}
 
-	// 6. Example 2: Dùng RawQuery (Manual SQL)
+	// 6. Example 2: Using RawQuery (Manual SQL)
 	fmt.Println("\n--- 2. RawQuery: Custom SQL (Age > 30) ---")
 	var rawResults []StatusCount
 
-	// Lưu ý: Tên bảng ở đây phải viết cứng ("patients") vì ta đang dùng SQL thuần
+	// Note: Table name must be hardcoded ("patients") because we are using raw SQL
 	sqlQuery := `
 		SELECT status, count(*) as total
 		FROM patients
@@ -166,10 +166,10 @@ func main() {
 	// TRANSACTION EXAMPLES
 	// ==========================================
 
-	// 7. Example 3: Dùng Transaction
+	// 7. Example 3: Using Transaction
 	fmt.Println("\n--- 3. Transaction: Insert with WithTx ---")
 	err = dbConn.Transaction(func(tx *gorm.DB) error {
-		// Nhân bản (clone) repo với Transaction DB
+		// Clone repo with Transaction DB
 		txRepo := patientRepo.WithTx(tx)
 
 		err := txRepo.Insert(context.Background(), &Patient{
@@ -182,7 +182,7 @@ func main() {
 			return err
 		}
 		fmt.Println("  [Success] Inserted Tx Patient within transaction.")
-		return nil // Trả về nil sẽ tự động Commit
+		return nil // Returning nil will automatically Commit
 	})
 	if err != nil {
 		panic(err)
@@ -198,7 +198,7 @@ func main() {
 	}
 	var visitDetails []VisitDetail
 
-	// Truy vấn lấy danh sách bệnh nhân đi khám thuộc khoa Cardiology
+	// Query to get list of patients visiting Cardiology department
 	err = patientRepo.Aggregate(context.Background(), &visitDetails, func(db *gorm.DB) *gorm.DB {
 		return db.Select("patients.full_name as patient_name, visits.diagnosis, doctors.name as doctor_name, departments.name as department_name").
 			Joins("JOIN visits ON visits.patient_id = patients.id").
