@@ -19,6 +19,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
 | `web` | Web core utilities (standard response, validator, Fiber middlewares) |
+| `graphql` | Framework-agnostic GraphQL engine with Go 1.22+ Generic DataLoader & Telemetry |
 | `utils` | Go Generics toolset (slice, maps, str) and Graceful Shutdown manager |
 
 ## Requirements
@@ -52,6 +53,7 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`telemetry`](./telemetry/README.md)
 - [`db`](./db/README.md)
 - [`web`](./web/README.md)
+- [`graphql`](./graphql/README.md)
 - [`utils`](./utils/README.md)
 
 ---
