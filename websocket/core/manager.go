@@ -1,4 +1,8 @@
-// package core contains the core WebSocket sharding, connection lifecycle, and manager logic.
+// Package core provides the central state management and orchestration for the WebSocket server.
+//
+// It handles connection lifecycle (upgrade, register, unregister), message broadcasting,
+// sharded connection storage (to prevent lock contention), and integrates with pub/sub
+// backends for multi-node clustering.
 package core
 
 import (

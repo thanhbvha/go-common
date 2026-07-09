@@ -1,3 +1,15 @@
+// Package mongodb provides a robust, production-ready MongoDB client wrapper.
+//
+// It includes features like multi-connection management (singleton manager),
+// automatic OpenTelemetry instrumentation, pagination utilities, and a generic
+// repository pattern for common CRUD operations.
+//
+// Basic usage:
+//
+//	err := mongodb.Init(ctx, map[string]mongodb.Config{
+//		"main": { URI: "mongodb://...", DBName: "app_db" },
+//	})
+//	db := mongodb.Get("main")
 package mongodb
 
 import (

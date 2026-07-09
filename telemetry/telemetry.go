@@ -1,3 +1,21 @@
+// Package telemetry provides production-ready OpenTelemetry integration.
+//
+// It simplifies the configuration and initialization of OTLP (OpenTelemetry Protocol)
+// exporters for both distributed tracing and metrics gathering. It provides helper
+// functions to start spans, record metrics, and attach attributes.
+//
+// Basic usage:
+//
+//	tel, err := telemetry.Init(ctx, telemetry.Config{
+//		ServiceName:   "my-service",
+//		EnableTracing: true,
+//		EnableMetrics: true,
+//		Endpoint:      "localhost:4317",
+//	})
+//	defer tel.Shutdown(ctx)
+//
+//	ctx, span := telemetry.StartSpan(ctx, "HandleRequest")
+//	defer span.End()
 package telemetry
 
 import (

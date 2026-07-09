@@ -1,3 +1,14 @@
+// Package response provides a standardized JSON response structure for API endpoints.
+//
+// It ensures that all HTTP responses follow a consistent format across the application,
+// making it easier for client-side applications to parse successful data and errors.
+//
+// Basic usage:
+//
+//	func GetUser(c *fiber.Ctx) error {
+//		// ...
+//		return response.Success(c, user)
+//	}
 package response
 
 import (

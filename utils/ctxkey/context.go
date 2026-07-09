@@ -1,3 +1,7 @@
+// Package ctxkey provides a strongly-typed mechanism for managing context keys.
+//
+// It prevents key collisions when storing values in context.Context by using
+// custom unexported types for keys, which is the recommended Go practice.
 package ctxkey
 
 import (
@@ -16,6 +20,9 @@ const (
 	
 	// RequestIDKey is the context key for the unique request ID
 	RequestIDKey Key = "request_id"
+
+	// UserInfo is the context key for the authenticated user information
+	UserInfo Key = "user_info"
 )
 
 // SetUserID stores the user ID in the context

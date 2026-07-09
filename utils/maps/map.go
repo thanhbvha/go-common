@@ -1,3 +1,7 @@
+// Package maps provides generic utility functions for Go maps.
+//
+// It leverages Go 1.18+ generics to offer common map operations like getting keys,
+// values, or merging maps in a type-safe manner.
 package maps
 
 // Keys returns all keys from a map as a slice

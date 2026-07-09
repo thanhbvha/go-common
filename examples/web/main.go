@@ -48,7 +48,7 @@ func main() {
 
 		// Parse Body
 		if err := c.BodyParser(&req); err != nil {
-			return response.Error(c, fiber.StatusBadRequest, "Dữ liệu đầu vào không hợp lệ")
+			return response.Error(c, fiber.StatusBadRequest, "Invalid input data")
 		}
 
 		// Validate Body

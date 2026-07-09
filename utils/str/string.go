@@ -1,3 +1,7 @@
+// Package str provides utility functions for common string manipulation tasks.
+//
+// It includes helpers for generating random strings, converting cases, and other
+// text processing utilities often needed in web applications.
 package str
 
 import (

@@ -1,3 +1,18 @@
+// Package xerrors provides a structured error handling mechanism for HTTP applications.
+//
+// It extends the standard Go error interface by embedding HTTP status codes,
+// application-specific string codes, and error chaining (cause) capabilities.
+// This allows handlers to return rich errors that the global error handler
+// can automatically translate into correct HTTP responses.
+//
+// Basic usage:
+//
+//	if err != nil {
+//		return xerrors.Wrap(err, "DB_ERROR", "failed to query user", 500)
+//	}
+//	if user == nil {
+//		return xerrors.New("USER_NOT_FOUND", "user does not exist", 404)
+//	}
 package xerrors
 
 import (

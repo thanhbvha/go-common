@@ -1,4 +1,8 @@
-// Package pool provides memory and concurrency pools to optimize resource usage under high traffic.
+// Package pool provides memory and concurrency pooling utilities.
+//
+// It includes a Goroutine pool to limit the number of active workers processing
+// WebSocket messages, and a sync.Pool-based byte buffer pool to minimize allocations
+// and reduce GC pressure during high-throughput message broadcasting.
 package pool
 
 import (

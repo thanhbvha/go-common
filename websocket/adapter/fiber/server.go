@@ -1,4 +1,8 @@
-// Package fiber provides an adapter to bridge the Fiber web framework and our generic WebSocket core.
+// Package fiber provides a WebSocket server adapter for the Fiber web framework.
+//
+// It wraps the generic WebSocket core manager into a fully-functional, high-performance
+// HTTP server using github.com/gofiber/fiber/v2, enabling easy integration of real-time
+// capabilities into existing Fiber applications.
 package fiber
 
 import (
