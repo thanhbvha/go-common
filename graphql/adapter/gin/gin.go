@@ -7,13 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Config chứa cấu hình riêng cho Gin Adapter
+// Config contains specific configurations for the Gin Adapter
 type Config struct {
-	// ContextSetup cho phép bơm thêm dữ liệu từ Gin vào Context
+	// ContextSetup allows injecting additional data from Gin into the Context
 	ContextSetup func(ctx context.Context, c *gin.Context) context.Context
 }
 
-// NewHandler chuyển đổi chuẩn net/http.Handler thành Gin Handler
+// NewHandler converts a standard net/http.Handler into a Gin Handler
 func NewHandler(coreHandler http.Handler, cfg Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if cfg.ContextSetup != nil {
@@ -25,7 +25,7 @@ func NewHandler(coreHandler http.Handler, cfg Config) gin.HandlerFunc {
 	}
 }
 
-// PlaygroundHandler bọc chuẩn net/http.HandlerFunc thành Gin Handler
+// PlaygroundHandler wraps a standard net/http.HandlerFunc into a Gin Handler
 func PlaygroundHandler(corePlayground http.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		corePlayground.ServeHTTP(c.Writer, c.Request)

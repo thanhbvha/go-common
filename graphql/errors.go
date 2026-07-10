@@ -10,9 +10,9 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
-// ErrorPresenter format lại lỗi của GraphQL nếu nó là lỗi thuộc hệ thống xerrors
+// ErrorPresenter formats GraphQL errors if they belong to the xerrors system
 func ErrorPresenter(ctx context.Context, e error) *gqlerror.Error {
-	// Dùng bộ format mặc định để lấy path và location
+	// Use the default formatter to get path and location
 	err := graphql.DefaultErrorPresenter(ctx, e)
 
 	var customErr *xerrors.CustomError
@@ -23,11 +23,11 @@ func ErrorPresenter(ctx context.Context, e error) *gqlerror.Error {
 			err.Extensions = map[string]interface{}{}
 		}
 		
-		// Đẩy các thông tin custom ra extension cho client
+		// Push custom information out to the extension for the client
 		err.Extensions["code"] = customErr.Code
 		err.Extensions["http_status"] = customErr.HTTPStatus
 	} else {
-		// Ẩn chi tiết lỗi thật của hệ thống ra bên ngoài nếu không dùng xerrors
+		// Hide the actual system error details from the outside if not using xerrors
 		err.Message = "Internal Server Error"
 		if err.Extensions == nil {
 			err.Extensions = map[string]interface{}{}
@@ -39,8 +39,8 @@ func ErrorPresenter(ctx context.Context, e error) *gqlerror.Error {
 	return err
 }
 
-// RecoverFunc tự động bắt panic trong resolver để tránh sập server
+// RecoverFunc automatically catches panics in resolvers to prevent server crashes
 func RecoverFunc(ctx context.Context, err interface{}) error {
 	logger.Error("GraphQL Panic", "error", err)
-	return xerrors.New("INTERNAL_ERROR", "Hệ thống đang gặp sự cố, vui lòng thử lại sau.", 500)
+	return xerrors.New("INTERNAL_ERROR", "The system encountered an unexpected error, please try again later.", 500)
 }

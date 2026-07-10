@@ -8,7 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// TelemetryInterceptor tự động tạo OpenTelemetry span cho mỗi GraphQL operation
+// TelemetryInterceptor automatically creates an OpenTelemetry span for each GraphQL operation
 type TelemetryInterceptor struct{}
 
 var _ graphql.ResponseInterceptor = TelemetryInterceptor{}
@@ -38,10 +38,10 @@ func (t TelemetryInterceptor) InterceptResponse(ctx context.Context, next graphq
 		attribute.String("graphql.query", rc.RawQuery),
 	)
 
-	// Xử lý request tiếp theo
+	// Process next request
 	res := next(ctx)
 
-	// Nếu có lỗi thì record vào span
+	// Record error into span if one occurs
 	if res != nil && len(res.Errors) > 0 {
 		telemetry.RecordError(span, res.Errors)
 	}

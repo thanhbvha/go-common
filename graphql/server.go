@@ -9,22 +9,22 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler"
 )
 
-// Config chứa các cấu hình core cho GraphQL server
+// Config contains core configuration for the GraphQL server
 type Config struct {
 	EnableTelemetry bool
 }
 
-// NewServer tạo một framework-agnostic GraphQL server (net/http.Handler)
+// NewServer creates a framework-agnostic GraphQL server (net/http.Handler)
 func NewServer(es graphql.ExecutableSchema, cfg Config) *handler.Server {
 	srv := handler.NewDefaultServer(es)
 
-	// Đăng ký Error Presenter tùy chỉnh
+	// Register custom Error Presenter
 	srv.SetErrorPresenter(ErrorPresenter)
 
-	// Đăng ký tính năng Recover để tránh sập server khi panic
+	// Register Recover function to prevent server crash on panic
 	srv.SetRecoverFunc(RecoverFunc)
 
-	// Đăng ký Telemetry nếu được bật
+	// Register Telemetry if enabled
 	if cfg.EnableTelemetry {
 		srv.Use(TelemetryInterceptor{})
 	}

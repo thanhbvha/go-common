@@ -7,13 +7,13 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// Config chứa cấu hình riêng cho Echo Adapter
+// Config contains specific configurations for the Echo Adapter
 type Config struct {
-	// ContextSetup cho phép bơm thêm dữ liệu từ Echo vào Context
+	// ContextSetup allows injecting additional data from Echo into the Context
 	ContextSetup func(ctx context.Context, c echo.Context) context.Context
 }
 
-// NewHandler chuyển đổi chuẩn net/http.Handler thành Echo Handler
+// NewHandler converts a standard net/http.Handler into an Echo Handler
 func NewHandler(coreHandler http.Handler, cfg Config) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		req := c.Request()
@@ -28,7 +28,7 @@ func NewHandler(coreHandler http.Handler, cfg Config) echo.HandlerFunc {
 	}
 }
 
-// PlaygroundHandler bọc chuẩn net/http.HandlerFunc thành Echo Handler
+// PlaygroundHandler wraps a standard net/http.HandlerFunc into an Echo Handler
 func PlaygroundHandler(corePlayground http.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		corePlayground.ServeHTTP(c.Response(), c.Request())
