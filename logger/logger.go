@@ -64,7 +64,7 @@ var (
 func New(opts Options) *Logger {
 	numWorkers := opts.NumWorkers
 	if numWorkers <= 0 {
-		numWorkers = runtime.NumCPU() * 2
+		numWorkers = runtime.NumCPU() * 5
 		if numWorkers < 1 {
 			numWorkers = 1
 		}

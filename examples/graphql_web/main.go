@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/gofiber/fiber/v2"
-	fiber_logger "github.com/gofiber/fiber/v2/middleware/logger"
 
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
@@ -24,9 +23,8 @@ func main() {
 	app := fiber.New()
 
 	// Attach Fiber's Logger Middleware to track request flow and latency
-	app.Use(fiber_logger.New(fiber_logger.Config{
-		Format: "[${time}] ${status} - ${latency} ${method} ${path}\n",
-	}))
+	app.Use(common_logger.FiberRequestIDMiddleware())
+	app.Use(common_logger.FiberMiddleware())
 
 	// 1. Initialize ExecutableSchema from gqlgen
 	es := graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{}})
