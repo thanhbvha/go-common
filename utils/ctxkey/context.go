@@ -23,6 +23,9 @@ const (
 
 	// UserInfo is the context key for the authenticated user information
 	UserInfo Key = "user_info"
+
+	// DataLoaderKey is the context key for GraphQL DataLoader
+	DataLoaderKey Key = "data_loader"
 )
 
 // SetUserID stores the user ID in the context
@@ -56,4 +59,15 @@ func SetRequestID(ctx context.Context, reqID string) context.Context {
 func GetRequestID(ctx context.Context) (string, bool) {
 	val, ok := ctx.Value(RequestIDKey).(string)
 	return val, ok
+}
+
+// SetDataLoader stores any DataLoader in the context
+func SetDataLoader(ctx context.Context, loader interface{}) context.Context {
+	return context.WithValue(ctx, DataLoaderKey, loader)
+}
+
+// GetDataLoader retrieves the DataLoader from the context safely
+func GetDataLoader(ctx context.Context) (interface{}, bool) {
+	val := ctx.Value(DataLoaderKey)
+	return val, val != nil
 }

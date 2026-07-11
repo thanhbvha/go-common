@@ -4,6 +4,7 @@ Core utilities for building REST APIs. Includes standardized responses, friendly
 
 ```go
 import (
+    "github.com/thanhbvha/go-common/logger"
     "github.com/thanhbvha/go-common/web/response"
     "github.com/thanhbvha/go-common/web/validator"
     "github.com/thanhbvha/go-common/web/middleware"
@@ -16,7 +17,8 @@ app := fiber.New(fiber.Config{
 
 // Middlewares
 app.Use(middleware.Recover())
-app.Use(middleware.RequestID())
+app.Use(logger.FiberRequestIDMiddleware())
+app.Use(logger.FiberMiddleware())
 app.Use(middleware.Telemetry("HTTP Request")) // Creates a span for each request
 
 app.Post("/users", func(c *fiber.Ctx) error {

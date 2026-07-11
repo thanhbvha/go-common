@@ -53,17 +53,17 @@ func Struct(s interface{}) []*ErrorResponse {
 func getFriendlyMessage(err validator.FieldError) string {
 	switch err.Tag() {
 	case "required":
-		return fmt.Sprintf("Trường %s không được bỏ trống", err.Field())
+		return fmt.Sprintf("Field %s is required", err.Field())
 	case "email":
-		return "Email không đúng định dạng"
+		return "Invalid email format"
 	case "min":
-		return fmt.Sprintf("Trường %s phải có ít nhất %s ký tự", err.Field(), err.Param())
+		return fmt.Sprintf("Field %s must be at least %s characters long", err.Field(), err.Param())
 	case "max":
-		return fmt.Sprintf("Trường %s tối đa %s ký tự", err.Field(), err.Param())
+		return fmt.Sprintf("Field %s must be at most %s characters long", err.Field(), err.Param())
 	case "len":
-		return fmt.Sprintf("Trường %s phải có độ dài chính xác %s ký tự", err.Field(), err.Param())
+		return fmt.Sprintf("Field %s must be exactly %s characters long", err.Field(), err.Param())
 	default:
-		return fmt.Sprintf("Trường %s không hợp lệ (lỗi: %s)", err.Field(), err.Tag())
+		return fmt.Sprintf("Field %s is invalid (error: %s)", err.Field(), err.Tag())
 	}
 }
 

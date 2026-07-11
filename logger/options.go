@@ -12,6 +12,11 @@ type Options struct {
 	// Default: true. If File is nil and StdOut is false, StdOut is forced on.
 	StdOut bool
 
+	// TextFormat enables plain text logging instead of JSON logging.
+	// This is useful for local development to make logs easier to read.
+	// Default: false (JSON format).
+	TextFormat bool
+
 	// File configures optional file-based log rotation via lumberjack.
 	// Set to nil to disable file logging entirely.
 	File *FileOptions

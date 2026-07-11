@@ -14,16 +14,10 @@ package middleware
 import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/thanhbvha/go-common/telemetry"
 	"github.com/thanhbvha/go-common/xerrors"
 	"go.opentelemetry.io/otel/attribute"
 )
-
-// RequestID enables Fiber's built-in RequestID middleware
-func RequestID() fiber.Handler {
-	return requestid.New()
-}
 
 // Recover enables Fiber's built-in Recover middleware to prevent crashes on panics
 func Recover() fiber.Handler {
@@ -42,11 +36,17 @@ func Telemetry(operationName string) fiber.Handler {
 		defer span.End()
 
 		// Add basic HTTP attributes
-		telemetry.SetAttributes(span,
+		attrs := []attribute.KeyValue{
 			attribute.String("http.method", c.Method()),
 			attribute.String("http.url", c.OriginalURL()),
 			attribute.String("http.client_ip", c.IP()),
-		)
+		}
+
+		if reqID, ok := c.Locals("request_id").(string); ok {
+			attrs = append(attrs, attribute.String("http.request_id", reqID))
+		}
+
+		telemetry.SetAttributes(span, attrs...)
 
 		// Inject the new trace context back into the fiber request
 		// so that downstream handlers and DB calls can use it.

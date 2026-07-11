@@ -11,12 +11,14 @@ import (
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
 	common_graphql "github.com/thanhbvha/go-common/graphql"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
 // Author is the resolver for the author field.
 func (r *postResolver) Author(ctx context.Context, obj *model.Post) (*model.User, error) {
 	// Use DataLoader to fetch users instead of querying the DB directly (Solves N+1 issue)
-	loader := ctx.Value("userLoader").(*common_graphql.DataLoader[int, *model.User])
+	loaderVal, _ := ctxkey.GetDataLoader(ctx)
+	loader := loaderVal.(*common_graphql.DataLoader[int, *model.User])
 	return loader.Load(ctx, obj.AuthorID)
 }
 

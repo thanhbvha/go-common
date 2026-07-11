@@ -114,7 +114,12 @@ func New(opts Options) *Logger {
 		w = io.MultiWriter(writers...)
 	}
 
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: opts.Level})
+	var handler slog.Handler
+	if opts.TextFormat {
+		handler = slog.NewTextHandler(w, &slog.HandlerOptions{Level: opts.Level})
+	} else {
+		handler = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: opts.Level})
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &Logger{
@@ -305,6 +310,26 @@ func fallback(fn func(*Logger), fallbackFn func()) {
 	} else {
 		fallbackFn()
 	}
+}
+
+// InfoWithContext logs at INFO level using the default Logger, extracting request_id from ctx.
+func InfoWithContext(ctx context.Context, msg string, args ...any) {
+	fallback(func(l *Logger) { l.InfoWithContext(ctx, msg, args...) }, func() { slog.Info(msg, args...) })
+}
+
+// ErrorWithContext logs at ERROR level using the default Logger, extracting request_id from ctx.
+func ErrorWithContext(ctx context.Context, msg string, args ...any) {
+	fallback(func(l *Logger) { l.ErrorWithContext(ctx, msg, args...) }, func() { slog.Error(msg, args...) })
+}
+
+// WarnWithContext logs at WARN level using the default Logger, extracting request_id from ctx.
+func WarnWithContext(ctx context.Context, msg string, args ...any) {
+	fallback(func(l *Logger) { l.WarnWithContext(ctx, msg, args...) }, func() { slog.Warn(msg, args...) })
+}
+
+// DebugWithContext logs at DEBUG level using the default Logger, extracting request_id from ctx.
+func DebugWithContext(ctx context.Context, msg string, args ...any) {
+	fallback(func(l *Logger) { l.DebugWithContext(ctx, msg, args...) }, func() { slog.Debug(msg, args...) })
 }
 
 // Info logs at INFO level using the default Logger.

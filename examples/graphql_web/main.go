@@ -5,11 +5,16 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"time"
+
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
 	common_graphql "github.com/thanhbvha/go-common/graphql"
 	fiber_adapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
 	common_logger "github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/utils/graceful"
+	web_middleware "github.com/thanhbvha/go-common/web/middleware"
 )
 
 func main() {
@@ -20,7 +25,9 @@ func main() {
 	common_logger.SetDefault(l)
 	defer common_logger.Close()
 
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		ErrorHandler: web_middleware.ErrorHandler,
+	})
 
 	// Attach Fiber's Logger Middleware to track request flow and latency
 	app.Use(common_logger.FiberRequestIDMiddleware())
@@ -42,8 +49,8 @@ func main() {
 	// 4. Wrap the Server with Fiber Adapter
 	gqlHandler := fiber_adapter.NewHandler(coreSrv, fiber_adapter.Config{
 		ContextSetup: func(ctx context.Context, c *fiber.Ctx) context.Context {
-			// Inject userLoader into the context of each Request
-			return context.WithValue(ctx, "userLoader", userLoader)
+			// Inject userLoader into the context of each Request using typed key
+			return ctxkey.SetDataLoader(ctx, userLoader)
 		},
 	})
 
@@ -56,8 +63,19 @@ func main() {
 	app.Get("/", playgroundHandler)
 
 	// 7. Start the server
-	common_logger.Info("GraphQL Server is running at http://localhost:3000")
-	if err := app.Listen(":3000"); err != nil {
-		common_logger.Error("Server error", "err", err)
-	}
+	go func() {
+		common_logger.Info("GraphQL Server is running at http://localhost:3000")
+		if err := app.Listen(":3000"); err != nil {
+			common_logger.Error("Server error", "err", err)
+		}
+	}()
+
+	// Register Fiber shutdown
+	graceful.Register(func(ctx context.Context) error {
+		common_logger.Info("Shutting down Fiber server...")
+		return app.ShutdownWithContext(ctx)
+	})
+
+	// 8. Wait for OS signals for graceful shutdown
+	graceful.Wait(10 * time.Second)
 }

@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/telemetry"
 	"github.com/thanhbvha/go-common/utils/graceful"
 	"github.com/thanhbvha/go-common/utils/str"
@@ -21,10 +21,17 @@ type CreateUserRequest struct {
 }
 
 func main() {
+	// Initialize standard logger from go-common
+	l := logger.New(logger.Options{
+		StdOut: true,
+	})
+	logger.SetDefault(l)
+	defer logger.Close()
+
 	// 1. Initialize Telemetry
 	tel, _ := telemetry.Init(context.Background(), telemetry.Config{
 		ServiceName:   "demo-web-api",
-		EnableTracing: true,
+		EnableTracing: false,
 		Endpoint:      "localhost:4317",
 	})
 	graceful.Register(func(ctx context.Context) error {
@@ -34,12 +41,14 @@ func main() {
 
 	// 2. Initialize Fiber App
 	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
+		// DisableStartupMessage: true,
+		ErrorHandler: middleware.ErrorHandler,
 	})
 
 	// 3. Setup Middlewares
 	app.Use(middleware.Recover())
-	app.Use(middleware.RequestID())
+	app.Use(logger.FiberRequestIDMiddleware())
+	app.Use(logger.FiberMiddleware())
 	app.Use(middleware.Telemetry("HTTP Request"))
 
 	// 4. Define Routes
@@ -71,19 +80,18 @@ func main() {
 	// 5. Start Server in a goroutine
 	go func() {
 		port := ":3000"
-		fmt.Printf("Server is starting on http://localhost%s\n", port)
+		logger.Info("Server is starting", "port", port)
 		if err := app.Listen(port); err != nil {
-			log.Fatalf("Server error: %v", err)
+			logger.Error("Server error", "err", err)
 		}
 	}()
 
 	// Register Fiber shutdown
 	graceful.Register(func(ctx context.Context) error {
-		log.Println("Shutting down Fiber server...")
+		logger.Info("Shutting down Fiber server...")
 		return app.ShutdownWithContext(ctx)
 	})
 
 	// 6. Block and wait for OS signals (CTRL+C)
-	fmt.Println("Press CTRL+C to stop the server...")
 	graceful.Wait(10 * time.Second)
 }

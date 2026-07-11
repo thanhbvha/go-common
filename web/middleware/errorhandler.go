@@ -35,10 +35,17 @@ func ErrorHandler(c *fiber.Ctx, err error) error {
 		}
 	}
 
+	// Extract Request ID if available
+	requestID := ""
+	if reqID, ok := c.Locals("request_id").(string); ok {
+		requestID = reqID
+	}
+
 	// Send standard JSON response
 	return c.Status(code).JSON(fiber.Map{
-		"code":    code,         // Numeric status code
-		"status":  stringCode,   // String status code from xerrors
-		"message": message,
+		"code":       code,       // Numeric status code
+		"status":     stringCode, // String status code from xerrors
+		"message":    message,
+		"request_id": requestID,
 	})
 }
