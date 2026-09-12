@@ -146,6 +146,7 @@ func (c *Connection) readPump() {
 			buffer := pool.GetGlobalBufferPool().Get()
 
 			if c.conn == nil {
+				pool.GetGlobalBufferPool().Put(buffer)
 				logger.ErrorAsync("readPump CRITICAL: c.conn is nil before read", "userID", c.userID)
 				return
 			}

@@ -23,10 +23,14 @@ type Manager struct {
 }
 
 // NewManager creates a new JWT Manager.
-func NewManager(secretKey string) *Manager {
+// secretKey must be at least 32 characters for adequate HMAC-SHA256 security.
+func NewManager(secretKey string) (*Manager, error) {
+	if len(secretKey) < 32 {
+		return nil, ErrInvalidKey
+	}
 	return &Manager{
 		secretKey: []byte(secretKey),
-	}
+	}, nil
 }
 
 // GenerateToken creates a signed JWT for the given user information.

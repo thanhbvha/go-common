@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -65,10 +66,23 @@ func (r *redisFixedWindowLimiter) Allow(ctx context.Context, key string, cfg Con
 	}
 
 	// Lua script returns {allowed (1 or 0), remaining, ttl_in_ms}
-	vals := res.([]interface{})
-	allowed := vals[0].(int64) == 1
-	remaining := vals[1].(int64)
-	ttlMs := vals[2].(int64)
+	vals, ok := res.([]interface{})
+	if !ok || len(vals) < 3 {
+		return nil, fmt.Errorf("ratelimit: unexpected response format from Redis script")
+	}
+	allowedVal, ok := vals[0].(int64)
+	if !ok {
+		return nil, fmt.Errorf("ratelimit: unexpected type for 'allowed' field in Redis response")
+	}
+	allowed := allowedVal == 1
+	remaining, ok := vals[1].(int64)
+	if !ok {
+		return nil, fmt.Errorf("ratelimit: unexpected type for 'remaining' field in Redis response")
+	}
+	ttlMs, ok := vals[2].(int64)
+	if !ok {
+		return nil, fmt.Errorf("ratelimit: unexpected type for 'ttl' field in Redis response")
+	}
 	
 	if ttlMs < 0 {
 		ttlMs = 0

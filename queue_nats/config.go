@@ -96,6 +96,10 @@ type Config struct {
 
 	// Logger receives operational log events. Set to nil to suppress logging.
 	Logger Logger
+
+	// ShutdownTimeout is the maximum time to wait for workers to finish
+	// processing in-flight jobs during graceful shutdown. Default: 10s.
+	ShutdownTimeout time.Duration
 }
 
 // DefaultConfig returns a Config pre-populated with production-ready defaults.
@@ -113,6 +117,8 @@ func DefaultConfig() Config {
 		DLQRetention:         15 * 24 * time.Hour,
 
 		AckWait:              5 * time.Minute,
+
+		ShutdownTimeout:      10 * time.Second,
 	}
 }
 

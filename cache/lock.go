@@ -26,7 +26,9 @@ type RedisLock struct {
 func NewRedisLock(client redis.UniversalClient) *RedisLock {
 	// Generate a unique token for this lock instance
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("cache: crypto/rand unavailable: " + err.Error())
+	}
 	token := hex.EncodeToString(b)
 
 	return &RedisLock{

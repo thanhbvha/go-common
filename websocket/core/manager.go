@@ -37,17 +37,27 @@ type Manager struct {
 }
 
 var (
-	globalManager *Manager
-	managerOnce   sync.Once
+	globalManager   *Manager
+	managerOnce     sync.Once
+	initAdapterType string
 )
 
 // GetGlobalManager returns the singleton Manager instance, bootstrapping it if necessary.
 // It accepts an optional adapterType (e.g., pubsub.AdapterNATS) which defaults to redis.
 func GetGlobalManager(adapterType ...string) *Manager {
+	requested := ""
+	if len(adapterType) > 0 {
+		requested = adapterType[0]
+	}
 	managerOnce.Do(func() {
+		initAdapterType = requested
 		globalManager = NewManager(adapterType...)
 		go globalManager.Run()
 	})
+	if requested != "" && requested != initAdapterType {
+		logger.WarnAsync("GetGlobalManager: adapter type ignored, singleton already initialized",
+			"requested", requested, "active", initAdapterType)
+	}
 	return globalManager
 }
 
@@ -203,6 +213,12 @@ func (m *Manager) GetShardID(userID string) string {
 // GetPubSubManager returns the pubsub manager used by this connection manager.
 func (m *Manager) GetPubSubManager() pubsub.Manager {
 	return m.pubsubManager
+}
+
+// DecrTotalConnections decrements the total connection counter atomically.
+// Implements ShardCoordinator so Shard can update this without a concrete *Manager reference.
+func (m *Manager) DecrTotalConnections() {
+	atomic.AddInt64(&m.totalConnections, -1)
 }
 
 // GetOrCreateShard resolves a Shard or creates it if it doesn't already exist.

@@ -76,3 +76,9 @@ func (m *MemoryCache) Clear(ctx context.Context) error {
 	m.cache.Clear()
 	return nil
 }
+
+// Close releases resources held by the Ristretto cache, stopping its background goroutines.
+func (m *MemoryCache) Close() error {
+	m.cache.Close()
+	return nil
+}

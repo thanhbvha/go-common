@@ -48,3 +48,9 @@ func (r *RedisCache) Delete(ctx context.Context, key string) error {
 func (r *RedisCache) Clear(ctx context.Context) error {
 	return r.client.FlushDB(ctx).Err()
 }
+
+// Close is a no-op for RedisCache. The lifecycle of the underlying Redis client
+// is managed externally (e.g. by the redis.Client wrapper); do not close it here.
+func (r *RedisCache) Close() error {
+	return nil
+}

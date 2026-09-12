@@ -6,7 +6,10 @@ import (
 )
 
 func TestJWTManager(t *testing.T) {
-	manager := NewManager("my-super-secret-key")
+	manager, err := NewManager("my-super-secret-key-must-be-32bytes")
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
 
 	user := UserInfo{
 		ID:    "u_123",
@@ -53,9 +56,18 @@ func TestJWTManager(t *testing.T) {
 	}
 
 	// 5. Test Invalid Key
-	badManager := NewManager("wrong-key")
+	badManager, err := NewManager("wrong-key-must-also-be-32-bytes!!")
+	if err != nil {
+		t.Fatalf("Failed to create bad manager: %v", err)
+	}
 	_, err = badManager.ValidateToken(token)
 	if err == nil {
 		t.Error("Expected error when validating with wrong key")
+	}
+
+	// 6. Test short key rejection
+	_, err = NewManager("tooshort")
+	if err == nil {
+		t.Error("Expected error for short secret key")
 	}
 }

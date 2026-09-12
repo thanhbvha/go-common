@@ -5,6 +5,7 @@
 package pubsub
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,7 +38,12 @@ type CrossNodeMessage struct {
 
 // generateNodeID generates a unique identifier for this server instance in the cluster.
 func generateNodeID() string {
-	return fmt.Sprintf("node_%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000000)
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp if crypto/rand is unavailable (extremely rare)
+		return fmt.Sprintf("node_%d_%d", time.Now().Unix(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("node_%x", b)
 }
 
 // Manager defines the interface for cross-node coordination.
@@ -69,8 +75,9 @@ const (
 )
 
 var (
-	globalManager Manager
-	managerOnce   sync.Once
+	globalManager   Manager
+	managerOnce     sync.Once
+	initAdapterType string
 )
 
 // NewManager creates a new pubsub manager instance based on the provided adapter type.
@@ -89,8 +96,13 @@ func NewManager(adapterType string) Manager {
 // If it hasn't been initialized, it initializes it with the given adapterType.
 func GetGlobalManager(adapterType string) Manager {
 	managerOnce.Do(func() {
+		initAdapterType = adapterType
 		globalManager = NewManager(adapterType)
 	})
+	if adapterType != initAdapterType {
+		// Cannot log with the logger package here (import cycle risk), use fmt.
+		fmt.Printf("[pubsub] WARN: GetGlobalManager called with adapter %q but singleton was already initialized with %q — ignoring new adapter\n", adapterType, initAdapterType)
+	}
 	return globalManager
 }
 

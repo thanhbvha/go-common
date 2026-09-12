@@ -210,7 +210,8 @@ func (q *Queue) Stop() {
 	select {
 	case <-done:
 		q.logInfo("queue: all workers stopped gracefully")
-	case <-q.ctx.Done():
+	case <-time.After(q.cfg.ShutdownTimeout):
+		q.logWarn("queue: shutdown timeout reached, forcing exit")
 	}
 }
 
@@ -252,6 +253,12 @@ func (q *Queue) snapshotTypes() map[string]jobTypeConfig {
 func (q *Queue) logInfo(msg string, args ...any) {
 	if q.cfg.Logger != nil {
 		q.cfg.Logger.Info(msg, args...)
+	}
+}
+
+func (q *Queue) logWarn(msg string, args ...any) {
+	if q.cfg.Logger != nil {
+		q.cfg.Logger.Warn(msg, args...)
 	}
 }
 

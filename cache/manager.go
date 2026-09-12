@@ -36,6 +36,10 @@ type Cache interface {
 
 	// Clear completely flushes the cache.
 	Clear(ctx context.Context) error
+
+	// Close releases resources held by the cache engine (e.g. background goroutines).
+	// It must be called when the cache is no longer needed.
+	Close() error
 }
 
 // DistributedLock defines the behavior for a cluster-wide mutual exclusion lock.

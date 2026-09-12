@@ -7,7 +7,7 @@ import (
 )
 
 func TestEncryptedManager(t *testing.T) {
-	jwtSecret := "my-jwt-secret-key"
+	jwtSecret := "my-jwt-secret-key-must-be-32bytes"
 	// AES-256 key must be exactly 32 bytes
 	aesKey := "12345678901234567890123456789012" 
 
@@ -52,10 +52,16 @@ func TestEncryptedManager(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when initializing with invalid AES key size")
 	}
+
+	// 4. Test short JWT secret rejection
+	_, err = NewEncryptedManager("tooshort", aesKey)
+	if err == nil {
+		t.Error("Expected error when initializing with short jwtSecret")
+	}
 }
 
 func TestEncryptedManager_WithAAD(t *testing.T) {
-	jwtSecret := "my-jwt-secret-key"
+	jwtSecret := "my-jwt-secret-key-must-be-32bytes"
 	aesKey := "12345678901234567890123456789012"
 	aad := []byte("tenant-id-123")
 

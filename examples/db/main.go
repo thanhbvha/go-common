@@ -49,8 +49,27 @@ func main() {
 		defer tel.Shutdown(context.Background())
 	}
 
-	// 1. In a real app, you would load this from config using the 'config' module
-	// For this example, we'll use an in-memory SQLite connection directly
+	// ==========================================
+	// ORM MANAGER LIFECYCLE (Production Usage)
+	// ==========================================
+	// In a real application, you would initialize the ORM manager with config
+	// and ensure connections are gracefully closed on shutdown:
+	//
+	// err := orm.Init(map[string]orm.Config{
+	// 	"main": { Host: "localhost", DBName: "app_db", User: "postgres" },
+	// })
+	// if err == nil {
+	// 	defer orm.Close() // <--- Gracefully closes all DB connection pools
+	// }
+	//
+	// // You can also dynamically add new connections at runtime:
+	// err = orm.AddConnection("analytics", orm.Config{ Host: "localhost", DBName: "analytics_db" }, false)
+	// 
+	// dbConn := orm.Get("main")
+	// analyticsDB := orm.Get("analytics")
+
+	// 1. For this out-of-the-box example, we'll use an in-memory SQLite connection
+	// directly instead of the postgres-backed orm.Init().
 	dbConn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect to db")

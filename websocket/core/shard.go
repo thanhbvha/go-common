@@ -30,6 +30,9 @@ const (
 type ShardCoordinator interface {
 	GetShardID(userID string) string
 	GetPubSubManager() pubsub.Manager
+	// DecrTotalConnections decrements the manager-level connection counter.
+	// Exposed via interface so Shard doesn't need a concrete *Manager reference.
+	DecrTotalConnections()
 }
 
 type Shard struct {
@@ -56,8 +59,8 @@ type Shard struct {
 	connectionCount int64
 	ctx             context.Context
 	cancel          context.CancelFunc
-	name            string // Shard unique identifier (e.g. "shard_0", "shard_1")
-	coordinator     ShardCoordinator
+	name        string // Shard unique identifier (e.g. "shard_0", "shard_1")
+	coordinator ShardCoordinator
 }
 
 // NewShard creates a new Shard instance with the specified name and registers cross-node PubSub handlers.
@@ -72,10 +75,10 @@ func NewShard(name string, coordinator ShardCoordinator) *Shard {
 		incomingMessage: make(chan *EventMessage, incomingMessageSize),
 		register:        make(chan *Connection, registerChannelSize),
 		unregister:      make(chan *Connection, registerChannelSize),
-		ctx:             ctx,
-		cancel:          cancel,
-		name:            name,
-		coordinator:     coordinator,
+		ctx:         ctx,
+		cancel:      cancel,
+		name:        name,
+		coordinator: coordinator,
 	}
 
 	shard.setupPubSubHandlers()
@@ -201,7 +204,7 @@ func (s *Shard) forceUnregister(conn *Connection) {
 	if _, ok := s.activeConns[conn]; ok {
 		delete(s.activeConns, conn)
 		atomic.AddInt64(&s.connectionCount, -1)
-		atomic.AddInt64(&GetGlobalManager().totalConnections, -1)
+		s.coordinator.DecrTotalConnections()
 		conn.Close("Force unregister")
 		logger.DebugAsync("Connection forcefully unregistered", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
 	}
@@ -209,18 +212,32 @@ func (s *Shard) forceUnregister(conn *Connection) {
 
 // Run boots the main message select loop for the Shard, processing connections and broadcasts.
 func (s *Shard) Run() {
-	defer func() {
-		if r := recover(); r != nil {
-			logger.ErrorAsync("Panic in Shard.Run select loop", "error", r, "shard", s.name)
-		}
-	}()
-
 	go s.cleanupRoutine()
 
 	for {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorAsync("Panic in Shard.Run, restarting", "error", r, "shard", s.name)
+				}
+			}()
+			s.runLoop()
+		}()
+
 		select {
 		case <-s.ctx.Done():
 			s.shutdown()
+			return
+		default:
+		}
+	}
+}
+
+// runLoop is the inner select loop, extracted so Run() can recover and restart it after a panic.
+func (s *Shard) runLoop() {
+	for {
+		select {
+		case <-s.ctx.Done():
 			return
 		case conn := <-s.register:
 			s.handleRegister(conn)
@@ -271,8 +288,21 @@ func (s *Shard) handleUnregister(conn *Connection) {
 			}
 		}
 
+		// Cleanup chatRooms to prevent memory leak
+		for roomID, roomUsers := range s.chatRooms {
+			if userConns, ok := roomUsers[conn.userID]; ok {
+				delete(userConns, conn)
+				if len(userConns) == 0 {
+					delete(roomUsers, conn.userID)
+				}
+			}
+			if len(roomUsers) == 0 {
+				delete(s.chatRooms, roomID)
+			}
+		}
+
 		atomic.AddInt64(&s.connectionCount, -1)
-		atomic.AddInt64(&GetGlobalManager().totalConnections, -1)
+		s.coordinator.DecrTotalConnections()
 
 		conn.Close("Graceful unregistration")
 		logger.InfoAsync("Connection unregistered from Shard", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())

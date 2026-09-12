@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,10 +76,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	var lastErr error
 	for i := 0; i < maxRetries; i++ {
 		// Join multiple URLs for cluster support
-		serverURL := c.cfg.URLs[0]
-		if len(c.cfg.URLs) > 1 {
-			serverURL = gonats.DefaultURL // will be overridden by opts
-		}
+		serverURL := strings.Join(c.cfg.URLs, ",")
 		nc, lastErr = gonats.Connect(serverURL, opts...)
 		if lastErr == nil {
 			break

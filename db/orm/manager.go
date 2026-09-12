@@ -29,8 +29,8 @@ type Manager struct {
 
 var (
 	globalManager *Manager
-	initOnce      sync.Once
-	initErr       error
+	initMu        sync.Mutex
+	isInitialized bool
 )
 
 // Init initializes the global ORM manager with multiple configurations.
@@ -38,59 +38,66 @@ var (
 // If configs contains only 1 entry, it automatically becomes the default DB regardless.
 // Safe to call concurrently, guarantees initialization happens only once.
 func Init(configs map[string]Config, defaultDBName ...string) error {
-	initOnce.Do(func() {
-		if len(configs) == 0 {
-			initErr = errors.New("no orm configurations provided")
-			return
-		}
+	initMu.Lock()
+	defer initMu.Unlock()
 
-		mgr := &Manager{
+	if isInitialized {
+		return nil
+	}
+
+	if len(configs) == 0 {
+		return errors.New("no orm configurations provided")
+	}
+
+	if globalManager == nil {
+		globalManager = &Manager{
 			dbs: make(map[string]*gorm.DB),
 		}
+	}
 
-		// Connect to all configured databases
-		for name, cfg := range configs {
-			db, err := New(cfg)
-			if err != nil {
-				initErr = fmt.Errorf("failed to connect to orm instance '%s': %w", name, err)
-				return
-			}
-			mgr.dbs[name] = db
+	globalManager.mu.Lock()
+	defer globalManager.mu.Unlock()
+
+	// Connect to all configured databases
+	for name, cfg := range configs {
+		if _, exists := globalManager.dbs[name]; exists {
+			continue // Skip if already added via AddConnection
 		}
 
-		// Determine the default DB name
-		if len(configs) == 1 {
-			for name := range configs {
-				mgr.defaultName = name
-			}
-		} else if len(defaultDBName) > 0 && defaultDBName[0] != "" {
-			if _, exists := mgr.dbs[defaultDBName[0]]; !exists {
-				initErr = fmt.Errorf("default db name '%s' not found in configs", defaultDBName[0])
-				return
-			}
-			mgr.defaultName = defaultDBName[0]
+		db, err := New(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to connect to orm instance '%s': %w", name, err)
 		}
+		globalManager.dbs[name] = db
+	}
 
-		globalManager = mgr
-	})
+	// Determine the default DB name
+	if len(configs) == 1 && globalManager.defaultName == "" {
+		for name := range configs {
+			globalManager.defaultName = name
+		}
+	} else if len(defaultDBName) > 0 && defaultDBName[0] != "" {
+		if _, exists := globalManager.dbs[defaultDBName[0]]; !exists {
+			return fmt.Errorf("default db name '%s' not found in configs", defaultDBName[0])
+		}
+		globalManager.defaultName = defaultDBName[0]
+	}
 
-	return initErr
+	isInitialized = true
+	return nil
 }
 
 // AddConnection dynamically adds a new ORM connection at runtime.
 // If the manager has not been initialized yet, it will initialize it.
 // If setAsDefault is true (or if this is the very first connection), this connection becomes the default database.
 func AddConnection(name string, cfg Config, setAsDefault bool) error {
-	// Lazily initialize global manager if not done yet
-	initOnce.Do(func() {
+	initMu.Lock()
+	if globalManager == nil {
 		globalManager = &Manager{
 			dbs: make(map[string]*gorm.DB),
 		}
-	})
-
-	if globalManager == nil {
-		return fmt.Errorf("manager initialization previously failed: %v", initErr)
 	}
+	initMu.Unlock()
 
 	globalManager.mu.Lock()
 	defer globalManager.mu.Unlock()
@@ -139,4 +146,37 @@ func Get(name ...string) *gorm.DB {
 	}
 
 	return db
+}
+
+// Close gracefully closes all database connections managed by this instance.
+// It is useful for graceful shutdown to prevent connection leaks.
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var errs []error
+	for name, db := range m.dbs {
+		sqlDB, err := db.DB()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to get sql.DB for '%s': %w", name, err))
+			continue
+		}
+		if err := sqlDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close db '%s': %w", name, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing databases: %v", errs)
+	}
+	return nil
+}
+
+// Close gracefully closes all database connections in the global manager.
+// Safe to call even if the manager is not initialized.
+func Close() error {
+	if globalManager == nil {
+		return nil
+	}
+	return globalManager.Close()
 }

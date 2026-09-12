@@ -100,11 +100,9 @@ func (cp *ConnectionPool) PutChannel(ch chan []byte) {
 		return
 	}
 
-	// Don't put back closed channels
-	select {
-	case <-ch:
-		return
-	default:
+	// Drain remaining messages before returning channel to pool
+	for len(ch) > 0 {
+		<-ch
 	}
 
 	atomic.AddInt64(&cp.totalPuts, 1)

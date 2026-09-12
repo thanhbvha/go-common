@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Queue manages a set of Redis-Streams-backed worker pools, a delayed-job
@@ -193,7 +194,8 @@ func (q *Queue) Stop() {
 	select {
 	case <-done:
 		q.logInfo("queue: all workers stopped gracefully")
-	case <-q.ctx.Done():
+	case <-time.After(q.cfg.ShutdownTimeout):
+		q.logWarn("queue: shutdown timeout reached, forcing exit")
 	}
 }
 

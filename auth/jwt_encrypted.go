@@ -24,20 +24,23 @@ type EncryptedClaims struct {
 // EncryptedManager provides JWT generation and validation with AES-256 GCM encrypted payloads.
 // This ensures that sensitive user information cannot be read even if the token is intercepted.
 type EncryptedManager struct {
-	jwtSecret string
+	jwtSecret []byte
 	aesKey    []byte
 }
 
 // NewEncryptedManager creates a new manager for encrypted JWTs.
-// aesKey must be exactly 32 bytes (256-bit) for AES-256 GCM.
+// jwtSecret must be at least 32 characters. aesKey must be exactly 32 bytes (256-bit) for AES-256 GCM.
 func NewEncryptedManager(jwtSecret string, aesKey string) (*EncryptedManager, error) {
+	if len(jwtSecret) < 32 {
+		return nil, ErrInvalidKey
+	}
 	keyBytes := []byte(aesKey)
 	if len(keyBytes) != 32 {
 		return nil, crypt.ErrInvalidKeySize
 	}
 	
 	return &EncryptedManager{
-		jwtSecret: jwtSecret,
+		jwtSecret: []byte(jwtSecret),
 		aesKey:    keyBytes,
 	}, nil
 }
@@ -71,7 +74,7 @@ func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration, 
 
 	// 4. Sign the JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString([]byte(m.jwtSecret))
+	signedToken, err := token.SignedString(m.jwtSecret)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -86,7 +89,7 @@ func (m *EncryptedManager) ValidateToken(tokenString string, aad []byte) (*UserI
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return []byte(m.jwtSecret), nil
+		return m.jwtSecret, nil
 	})
 
 	if err != nil {

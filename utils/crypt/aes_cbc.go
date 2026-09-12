@@ -16,6 +16,12 @@ var (
 // EncryptAESCBC encrypts plaintext using AES-256 CBC with PKCS#7 padding.
 // key must be exactly 32 bytes.
 // The returned ciphertext has a 16-byte IV prepended to it.
+//
+// WARNING: AES-CBC does NOT provide authenticated encryption (AEAD).
+// It is vulnerable to Padding Oracle Attacks if decryption errors are exposed
+// to network callers (e.g. via HTTP API responses).
+// For new code, prefer [EncryptAESGCM] / [DecryptAESGCM] which provide both
+// confidentiality AND integrity via a built-in authentication tag.
 func EncryptAESCBC(key, plaintext []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKeySize
