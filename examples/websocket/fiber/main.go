@@ -118,7 +118,9 @@ func main() {
 		logger.ErrorAsync("Error during server shutdown", "error", err)
 	}
 
-	// Terminate active manager routines and connection pools
+	// 8. Terminate active manager routines and connection pools
+	// IMPORTANT: Shutdown() safely cascades the shutdown signal to all Shards 
+	// using the ShardCoordinator interface, preventing circular dependencies.
 	core.GetGlobalManager().Shutdown()
 	logger.InfoAsync("Service shutdown completed gracefully.")
 }

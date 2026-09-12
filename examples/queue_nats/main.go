@@ -47,6 +47,9 @@ func main() {
 	// 4. Setup Queue NATS
 	qCfg := queue_nats.DefaultConfig()
 	qCfg.Logger = log
+	// IMPORTANT: ShutdownTimeout determines how long q.Stop() will wait for
+	// workers to finish in-flight jobs before forcing an exit.
+	qCfg.ShutdownTimeout = 10 * time.Second
 	q := queue_nats.New(natsClient, qCfg)
 
 	// Apply all tasks registered via init() into our specific Queue instance.

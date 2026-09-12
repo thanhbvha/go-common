@@ -49,6 +49,9 @@ func main() {
 	// 4. Setup Queue
 	qCfg := queue.DefaultConfig()
 	qCfg.Logger = log
+	// IMPORTANT: ShutdownTimeout determines how long q.Stop() will wait for
+	// workers to finish in-flight jobs before forcing an exit.
+	qCfg.ShutdownTimeout = 10 * time.Second 
 	q := queue.New(rdb, qCfg)
 
 	// Apply all tasks registered via init() into our specific Queue instance.

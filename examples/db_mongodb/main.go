@@ -52,11 +52,15 @@ func main() {
 	// 2. Initialize the Global Manager
 	// We can pass "primary" as the default. 
 	// (If we had only 1 config, we wouldn't even need to pass it).
+	// IMPORTANT: mongodb.Init is thread-safe and can be called after AddConnection
+	// without losing previously added databases.
 	err = mongodb.Init(ctx, configs, "primary")
 	if err != nil {
 		log.Printf("Failed to connect to MongoDB (make sure it is running locally): %v\n", err)
 		return
 	}
+	// CRITICAL: Always use defer mongodb.DisconnectAll(ctx) after Init to ensure
+	// graceful shutdown and prevent connection pool leaks on the MongoDB server.
 	defer mongodb.DisconnectAll(ctx)
 
 	fmt.Println("Connected to multiple MongoDB instances successfully!")
