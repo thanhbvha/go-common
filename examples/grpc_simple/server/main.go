@@ -49,6 +49,8 @@ func main() {
 	proto.RegisterEchoServiceServer(srv.Server, &echoServer{})
 
 	// 4. Start Server (This blocks and also handles Graceful Shutdown internally)
+	// CRITICAL: srv.Serve() blocks the main thread. It automatically traps OS signals
+	// and performs a graceful shutdown, giving active RPCs time to finish.
 	if err := srv.Serve(); err != nil {
 		logger.Error("Server stopped with error", "err", err)
 	}

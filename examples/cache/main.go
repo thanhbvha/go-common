@@ -50,6 +50,7 @@ func main() {
 		Port:     6379,
 		PoolSize: 10,
 	})
+	// CRITICAL: Always use defer Close() for remote connections to avoid pool exhaustion
 	defer redisClient.Close()
 
 	// Initialize Redis Cache, using the Native Client from the redis module

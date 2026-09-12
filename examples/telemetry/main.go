@@ -28,7 +28,8 @@ func main() {
 	if err != nil {
 		fmt.Printf("[Error] Failed to initialize telemetry: %v\n", err)
 	} else {
-		// Ensure all data is flushed before the program exits
+		// CRITICAL: Always defer tel.Shutdown(ctx). If you forget this, the background
+		// spans might be lost in memory and never sent to the OpenTelemetry Collector upon exit.
 		defer tel.Shutdown(ctx)
 	}
 

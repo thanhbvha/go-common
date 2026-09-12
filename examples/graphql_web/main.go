@@ -77,5 +77,7 @@ func main() {
 	})
 
 	// 8. Wait for OS signals for graceful shutdown
+	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
+	// until an interrupt signal is received, preventing abrupt termination of queries.
 	graceful.Wait(10 * time.Second)
 }

@@ -93,5 +93,8 @@ func main() {
 	})
 
 	// 6. Block and wait for OS signals (CTRL+C)
+	// CRITICAL: Always use graceful.Wait() in web APIs. It blocks the main thread
+	// until a SIGINT/SIGTERM is received, then gives active requests time to finish
+	// before forcefully exiting.
 	graceful.Wait(10 * time.Second)
 }

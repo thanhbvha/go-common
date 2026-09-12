@@ -38,7 +38,9 @@ func fetchFromDB() error {
 	// Simulate an underlying driver error
 	dbErr := goErrors.New("connection reset by peer")
 
-	// Wrap it with our standard error
+	// CRITICAL: Always use xerrors.Wrap() for system/3rd-party errors.
+	// This preserves the original error stack trace for debugging while returning
+	// a safe, sanitized "DB_CONNECTION_FAILED" message to the external API client.
 	return xerrors.Wrap(dbErr, "DB_CONNECTION_FAILED", "Could not connect to the database", xerrors.StatusInternalServerError)
 }
 

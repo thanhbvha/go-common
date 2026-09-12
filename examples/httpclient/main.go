@@ -41,6 +41,8 @@ func main() {
 	cfg.Retry.MaxRetries = 5
 	cfg.Retry.WaitTime = 500 * time.Millisecond
 	
+	// IMPORTANT: httpclient automatically includes a Circuit Breaker (gobreaker) and OpenTelemetry.
+	// You can configure the Circuit Breaker thresholds in cfg.CircuitBreaker.
 	client := httpclient.NewClient(cfg)
 
 	fmt.Println("\n--- Sending Request (Watch the automatic retries) ---")

@@ -14,7 +14,8 @@ func main() {
 	fmt.Println("=== Auth Module Example ===")
 
 	// 1. Initialize the Encrypted JWT Manager
-	// The AES key must be EXACTLY 32 bytes for AES-256 GCM!
+	// CRITICAL: The AES key MUST be EXACTLY 32 bytes to ensure AES-256 GCM encryption.
+	// Never hardcode keys in production. Read them from environment variables or a Secret Manager.
 	jwtSecret := "super-secret-jwt-key"
 	aesKey := "12345678901234567890123456789012"
 

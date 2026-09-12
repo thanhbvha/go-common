@@ -31,8 +31,10 @@ func main() {
 	jobCfg := cron.DistributedConfig{
 		JobName:  "daily_report_generator",
 		// Run every 10 seconds for demonstration purposes
+		// Schedule: Run every 10 seconds for demonstration purposes
 		Schedule: "*/10 * * * * *", 
-		// TTL should be slightly less than the interval (e.g., 9s for a 10s interval)
+		// CRITICAL: LockTTL must ALWAYS be slightly less than the cron interval to ensure
+		// the lock expires just in time for the next tick, avoiding skipped executions.
 		LockTTL:  9 * time.Second,
 		RunFunc: func(ctx context.Context) {
 			fmt.Println("--------------------------------------------------")

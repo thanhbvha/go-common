@@ -32,7 +32,9 @@ func main() {
 	})
 
 	// 4. Apply RateLimit Middleware to all routes under /api
-	// We use the default Key Generator which uses the Client IP as the rate limit key.
+	// CRITICAL: By default, the middleware uses Client IP as the rate limit key.
+	// In production, ALWAYS pass a custom KeyGenerator function (the 3rd argument)
+	// that extracts the User ID or API Token to prevent IP spoofing or NAT issues.
 	api := app.Group("/api", ratelimit.FiberMiddleware(limiter, cfg, nil))
 
 	api.Get("/data", func(c *fiber.Ctx) error {

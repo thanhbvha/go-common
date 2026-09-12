@@ -39,6 +39,9 @@ func main() {
 	opts.EnvPrefix = "APP"
 
 	var cfg AppConfig
+	// CRITICAL: config.Load uses Viper under the hood. It reads the YAML file first,
+	// but ENV variables (prefixed with EnvPrefix) will ALWAYS override the file values.
+	// This is the standard 12-Factor App methodology.
 	if err := config.Load(opts, &cfg); err != nil {
 		fmt.Printf("Failed to load config: %v\n", err)
 		return
