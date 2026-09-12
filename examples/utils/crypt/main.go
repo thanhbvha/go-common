@@ -9,57 +9,97 @@ import (
 )
 
 func main() {
-	fmt.Println("--- Cryptography (AES-CBC) Example ---")
+	fmt.Println("=== go-common/utils/crypt Examples ===")
 
 	// ==========================================
-	// 1. KEY REQUIREMENTS
+	// 1. Random Key Generation
 	// ==========================================
-	// The key must be exactly 16, 24, or 32 bytes to select AES-128, AES-192, or AES-256.
-	// We use a 32-byte key for AES-256 encryption.
-	secretKey := []byte("my-32-byte-ultra-secure-key-0000")
-	if len(secretKey) != 32 {
-		log.Fatalf("Key must be 32 bytes, got %d", len(secretKey))
+	fmt.Println("\n--- 1. Random Key Generation ---")
+	// Generate a cryptographically secure 32-byte key
+	secretKey, err := crypt.GenerateKey32()
+	if err != nil {
+		log.Fatalf("Failed to generate key: %v", err)
 	}
+	fmt.Printf("Generated 32-byte Key (Hex): %x\n", secretKey)
 
-	plainText := []byte("This is a secret message that needs to be encrypted securely.")
+	plainText := []byte("This is a highly sensitive message.")
 	fmt.Printf("Original Text: %s\n", string(plainText))
 
 	// ==========================================
-	// 2. ENCRYPTION
+	// 2. AES-256 GCM (Recommended for Symmetric Encryption)
 	// ==========================================
-	// EncryptAESCBC securely encrypts the plaintext and prepends a random IV.
-	// It automatically applies PKCS7 padding to the plaintext to ensure it aligns
-	// with AES block sizes.
-	cipherText, err := crypt.EncryptAESCBC(secretKey, plainText)
-	if err != nil {
-		log.Fatalf("Encryption failed: %v", err)
-	}
+	fmt.Println("\n--- 2. AES-256 GCM (AEAD) ---")
+	// GCM provides both confidentiality and data authenticity.
+	aad := []byte("optional-additional-authenticated-data")
 	
-	// Convert to Base64 for safe storage or transmission
-	b64CipherText := base64.StdEncoding.EncodeToString(cipherText)
-	fmt.Printf("Encrypted (Base64): %s\n", b64CipherText)
+	cipherGCM, err := crypt.EncryptAESGCM(secretKey, plainText, aad)
+	if err != nil {
+		log.Fatalf("AES-GCM Encryption failed: %v", err)
+	}
+	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherGCM))
+
+	decryptedGCM, err := crypt.DecryptAESGCM(secretKey, cipherGCM, aad)
+	if err != nil {
+		log.Fatalf("AES-GCM Decryption failed: %v", err)
+	}
+	fmt.Printf("Decrypted: %s\n", string(decryptedGCM))
 
 	// ==========================================
-	// 3. DECRYPTION
+	// 3. ChaCha20-Poly1305
 	// ==========================================
-	// Decode from Base64 back to raw bytes before decrypting
-	decodedCipher, err := base64.StdEncoding.DecodeString(b64CipherText)
+	fmt.Println("\n--- 3. ChaCha20-Poly1305 (AEAD) ---")
+	// Fast on devices without AES hardware acceleration (e.g., mobile devices).
+	cipherChaCha, err := crypt.EncryptChaCha20(secretKey, plainText, nil)
 	if err != nil {
-		log.Fatalf("Base64 decode failed: %v", err)
+		log.Fatalf("ChaCha20 Encryption failed: %v", err)
 	}
+	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherChaCha))
 
-	// DecryptAESCBC expects raw bytes containing the IV + CipherText.
-	// It safely verifies padding boundaries to prevent padding oracle vulnerabilities.
-	decryptedText, err := crypt.DecryptAESCBC(secretKey, decodedCipher)
+	decryptedChaCha, err := crypt.DecryptChaCha20(secretKey, cipherChaCha, nil)
 	if err != nil {
-		log.Fatalf("Decryption failed: %v", err)
+		log.Fatalf("ChaCha20 Decryption failed: %v", err)
 	}
+	fmt.Printf("Decrypted: %s\n", string(decryptedChaCha))
+
+	// ==========================================
+	// 4. AES-256 CBC (Legacy)
+	// ==========================================
+	fmt.Println("\n--- 4. AES-256 CBC (Legacy) ---")
+	// WARNING: CBC does not provide data authenticity. Vulnerable to padding oracles
+	// if decryption errors are exposed. Use GCM for new projects.
+	cipherCBC, err := crypt.EncryptAESCBC(secretKey, plainText)
+	if err != nil {
+		log.Fatalf("AES-CBC Encryption failed: %v", err)
+	}
+	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherCBC))
+
+	decryptedCBC, err := crypt.DecryptAESCBC(secretKey, cipherCBC)
+	if err != nil {
+		log.Fatalf("AES-CBC Decryption failed: %v", err)
+	}
+	fmt.Printf("Decrypted: %s\n", string(decryptedCBC))
+
+	// ==========================================
+	// 5. Argon2id Password Hashing
+	// ==========================================
+	fmt.Println("\n--- 5. Argon2id Password Hashing (OWASP Recommended) ---")
+	userPassword := "SuperSecretPassword123!"
 	
-	fmt.Printf("Decrypted Text: %s\n", string(decryptedText))
-
-	if string(decryptedText) == string(plainText) {
-		fmt.Println("Success: Decrypted text matches original text!")
-	} else {
-		fmt.Println("Error: Decrypted text does not match!")
+	// Hash password (automatically generates salt and uses OWASP recommended params)
+	encodedHash, err := crypt.HashPasswordArgon2id(userPassword)
+	if err != nil {
+		log.Fatalf("Password hashing failed: %v", err)
 	}
+	fmt.Printf("Argon2id Encoded Hash:\n%s\n", encodedHash)
+
+	// Verify password
+	match, err := crypt.VerifyPasswordArgon2id(userPassword, encodedHash)
+	if err != nil {
+		log.Fatalf("Password verification failed: %v", err)
+	}
+	fmt.Printf("Password Match? %v\n", match)
+
+	// Verify WRONG password
+	matchWrong, _ := crypt.VerifyPasswordArgon2id("WrongPassword", encodedHash)
+	fmt.Printf("Wrong Password Match? %v\n", matchWrong)
 }
