@@ -26,6 +26,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
 | `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
 | `cron` | Distributed Job Scheduler with Redis-backed Leader Election |
+| `grpc` | Pre-configured gRPC server with unified Interceptors (Recovery, Logging, Auth) |
 
 ## Requirements
 
@@ -65,6 +66,36 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`httpclient`](./httpclient/README.md)
 - [`ratelimit`](./ratelimit/README.md)
 - [`cron`](./cron/README.md)
+- [`grpc`](./grpc/README.md)
+
+---
+
+## 🤖 AI / MCP Integration (Cursor, Cline, VSCode)
+
+This library is **fully agentic**. We provide an official **Model Context Protocol (MCP)** server that allows AI coding assistants to instantly fetch best practices, architectural rules, and boilerplate code directly from our `examples/` directory. 
+
+This guarantees that the AI writes code adhering to our strict standards (e.g., proper graceful shutdown, structured error handling).
+
+### Setup for Cursor IDE
+1. Open Cursor Settings -> Features -> MCP
+2. Click **+ Add New MCP Server**
+3. Configure as follows:
+   - **Type**: `command`
+   - **Command**: `npx`
+   - **Args**: `-y go-common-mcp-server`
+
+### Setup for VSCode (Cline)
+Add this to your `cline_mcp_settings.json`:
+```json
+{
+  "mcpServers": {
+    "go-common": {
+      "command": "npx",
+      "args": ["-y", "go-common-mcp-server"]
+    }
+  }
+}
+```
 
 ---
 
