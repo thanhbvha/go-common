@@ -8,6 +8,14 @@ The `xerrors` module provides a standardized error wrapping and categorization s
 - `xerrors.Wrap(err, code, message, httpStatus)`: Wraps an existing (e.g., driver) error.
 - `xerrors.HTTPStatusCode(err)`: Automatically extracts the correct HTTP status code for Fiber/Gin responses.
 - `xerrors.GetCode(err)`: Extracts the machine-readable error string (e.g., `USER_NOT_FOUND`).
+- `xerrors.Is(err, target)`: Convenience wrapper to check if an error matches a specific target.
+- `xerrors.Join(errs...)`: Combines multiple errors into one (utilizing Go 1.20+ `errors.Join`).
+
+## Covered Examples
+1. `RunStandardErrorExample()`: Demonstrates how to use and log predefined standard errors.
+2. `RunWrappedErrorExample()`: Demonstrates how to wrap system/3rd-party errors to prevent sensitive data leaks.
+3. `RunErrorCheckingExample()`: Demonstrates how to check error types using `xerrors.Is()`.
+4. `RunErrorJoinExample()`: Demonstrates how to combine multiple errors together, which is incredibly useful for form validation.
 
 ## 🚨 Best Practices for AI/Developers
 - **Stop using `errors.New`**: Never use standard `errors.New` or `fmt.Errorf` in business logic layers. Always use `xerrors.New` or `xerrors.Wrap`.

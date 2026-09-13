@@ -8,6 +8,11 @@ The `telemetry` module provides a unified wrapper around OpenTelemetry (`go.open
 - **Metrics**: Standardized Counters, Histograms, and Gauges.
 - `telemetry.StartSpan(ctx, name)`: Quickly start tracing a block of code.
 
+## Covered Examples
+This module provides examples for the two core pillars of observability:
+1. `RunTracingExample()`: Demonstrates how to start a Span, attach custom attributes (like User ID), and measure execution time.
+2. `RunMetricsExample()`: Demonstrates how to initialize a Counter and increment it with specific attributes.
+
 ## 🚨 Best Practices for AI/Developers
 - **Context Propagation**: The single most important rule of OpenTelemetry is Context Propagation. ALWAYS pass `context.Context` down your function calls. If you lose the context, you break the distributed trace.
 - **Attributes**: Use `telemetry.SetAttributes(span, ...)` to attach high-cardinality data to spans (like `user_id` or `order_id`). This makes querying in Jaeger extremely powerful.

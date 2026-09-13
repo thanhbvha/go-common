@@ -2,20 +2,53 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/thanhbvha/go-common/examples/queue_nats/tasks"
-	_ "github.com/thanhbvha/go-common/examples/queue_nats/tasks" // Blank import to run init() and register tasks
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/nats"
 	"github.com/thanhbvha/go-common/queue_nats"
 	"github.com/thanhbvha/go-common/queue_nats/registry"
 )
 
+// =====================================================================
+// 1. TASK REGISTRATION (via init)
+// =====================================================================
+
+func init() {
+	// Note for AI/Developers: In a real project, this init() function and the handlers below
+	// should be placed in a separate package (e.g. `tasks/email.go`) and imported into main.go 
+	// using a blank import `_ "your_project/tasks"`. We place it here in main.go solely 
+	// so you can see the complete code in one file.
+
+	logger.InfoAsync("Registering ExampleJobHandler to queue_nats")
+
+	// Register the task to the central registry.
+	registry.Register("example_job_type", queue_nats.JobTypeOptions{
+		Concurrency: 10,
+		MaxRetry:    3,
+		MaxAge:      7 * 24 * time.Hour,
+		BatchSize:   10,
+	}, ExampleJobHandler)
+
+	// Initialize the singleton worker pool for database writes.
+	dbWorkerInstance = NewDBWorkerPool()
+	// StartWorkerPool runs asynchronously
+	go func() {
+		dbWorkerInstance.StartWorkerPool(10, dbWorkerInstance.WriteData)
+	}()
+}
+
+// =====================================================================
+// 2. MAIN FUNCTION (Setup NATS & Start Queue)
+// =====================================================================
+
 func main() {
+	fmt.Println("=== Queue (NATS JetStream-based) Module Example ===")
+	
 	// 1. Initialize Logger
 	logOpts := logger.DefaultOptions()
 	logOpts.Level = 0 // Info
@@ -39,12 +72,7 @@ func main() {
 	defer nats.Close()
 	logger.Info("Connected to NATS successfully.")
 
-	// 3. Autoload Tasks
-	// The blank import `_ "github.com/thanhbvha/go-common/examples/queue_nats/tasks"` at the top
-	// ensures that the init() functions in the tasks package execute
-	// and register their configurations and handlers into our central registry.
-
-	// 4. Setup Queue NATS
+	// 3. Setup Queue NATS
 	qCfg := queue_nats.DefaultConfig()
 	qCfg.Logger = log
 	// IMPORTANT: ShutdownTimeout determines how long q.Stop() will wait for
@@ -52,6 +80,7 @@ func main() {
 	qCfg.ShutdownTimeout = 10 * time.Second
 	q := queue_nats.New(natsClient, qCfg)
 
+	// 4. Autoload Tasks
 	// Apply all tasks registered via init() into our specific Queue instance.
 	registry.ApplyToQueue(q)
 
@@ -68,7 +97,7 @@ func main() {
 		q.Stop()
 
 		// Stop custom internal worker pools inside tasks
-		if inst := tasks.GetDBWorkerPool(); inst != nil {
+		if inst := GetDBWorkerPool(); inst != nil {
 			inst.Shutdown(5 * time.Second)
 		}
 
@@ -110,4 +139,129 @@ func main() {
 
 	// Wait until an interrupt signal is received
 	<-shutdownDone
+}
+
+// =====================================================================
+// 3. JOB HANDLER IMPLEMENTATION
+// =====================================================================
+
+// ExampleJobHandler processes incoming jobs from the NATS queue.
+func ExampleJobHandler(job queue_nats.Job) error {
+	// Simulate converting interface{} to map
+	jobData, ok := job.Data.(map[string]interface{})
+	if !ok {
+		logger.ErrorAsync("Failed to convert job data to map")
+		return fmt.Errorf("invalid job data format")
+	}
+
+	jobData["isVietnam"] = "no"
+	if countryCode, ok := jobData["countryCode"].(string); ok {
+		if countryCode == "VN" || countryCode == "VI" || countryCode == "VNM" {
+			jobData["isVietnam"] = "yes"
+		}
+	}
+
+	jobData["createDate"] = time.Now().Unix()
+
+	// Submit to the internal worker pool for DB writing
+	dbWorkerInstance.SubmitToWorkerPool(jobData)
+
+	return nil
+}
+
+// Global singleton instance for this specific task's DB worker pool
+var dbWorkerInstance *DBWorkerPool
+
+// DBWorkerPool manages an internal worker pool to batch/write data to DB.
+type DBWorkerPool struct {
+	writeChan chan interface{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+}
+
+func NewDBWorkerPool() *DBWorkerPool {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &DBWorkerPool{
+		writeChan: make(chan interface{}, 10000),
+		ctx:       ctx,
+		cancel:    cancel,
+	}
+}
+
+// WriteData simulates writing the parsed data into a database.
+func (pool *DBWorkerPool) WriteData(data interface{}) error {
+	// In reality, you'd insert to MongoDB or another DB here.
+	logger.InfoAsync("Successfully inserted log data to DB", "data", data)
+	time.Sleep(10 * time.Millisecond) // Simulate DB I/O
+	return nil
+}
+
+// StartWorkerPool starts background workers that read from writeChan.
+func (pool *DBWorkerPool) StartWorkerPool(concurrency int, doWrite func(data interface{}) error) {
+	for i := 0; i < concurrency; i++ {
+		go func(workerID int) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorAsync("DB worker panic recovered", "panic", r, "worker_id", workerID)
+				}
+			}()
+
+			for {
+				select {
+				case <-pool.ctx.Done():
+					logger.InfoAsync("DB worker shutdown requested", "worker_id", workerID)
+					return
+				case data, ok := <-pool.writeChan:
+					if !ok {
+						logger.InfoAsync("DB worker channel closed", "worker_id", workerID)
+						return
+					}
+
+					if err := doWrite(data); err != nil {
+						logger.ErrorAsync("Error writing data to DB", "error", err, "worker_id", workerID)
+					}
+				}
+			}
+		}(i + 1)
+	}
+}
+
+// SubmitToWorkerPool enqueues data for the internal DB workers.
+func (pool *DBWorkerPool) SubmitToWorkerPool(data interface{}) {
+	select {
+	case pool.writeChan <- data:
+		logger.DebugAsync("Data submitted to DB worker pool", "data", data)
+	case <-time.After(5 * time.Second):
+		logger.ErrorAsync("Timeout submitting data to DB worker pool", "data", data)
+	case <-pool.ctx.Done():
+		logger.ErrorAsync("Worker pool is shutting down, dropping data", "data", data)
+	}
+}
+
+// Shutdown gracefully shuts down the DB worker pool.
+func (pool *DBWorkerPool) Shutdown(timeout time.Duration) error {
+	logger.InfoAsync("Shutting down DB worker pool")
+	pool.cancel()
+	close(pool.writeChan)
+
+	done := make(chan bool)
+	go func() {
+		// Wait slightly for pending workers to drain the channel.
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		logger.InfoAsync("DB worker pool shutdown completed")
+		return nil
+	case <-time.After(timeout):
+		logger.ErrorAsync("DB worker pool shutdown timeout")
+		return fmt.Errorf("shutdown timeout")
+	}
+}
+
+// GetDBWorkerPool exports the instance to be shut down gracefully in main.
+func GetDBWorkerPool() *DBWorkerPool {
+	return dbWorkerInstance
 }

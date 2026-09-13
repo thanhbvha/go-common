@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/thanhbvha/go-common/logger"
 )
 
 func main() {
+	fmt.Println("=== Logger Module Examples ===")
+
 	// ==========================================
 	// 1. INITIALIZATION (Required on Startup)
 	// ==========================================
@@ -36,16 +39,27 @@ func main() {
 	// ALWAYS call Close() before the app exits to flush all buffered async logs
 	defer logger.Close()
 
-	// ==========================================
-	// 2. SYNCHRONOUS LOGGING
-	// ==========================================
+	// Uncomment the example you want to run:
+	RunSynchronousLoggerExample()
+	// RunAsynchronousLoggerExample()
+	// RunContextAwareLoggerExample()
+}
+
+// =====================================================================
+// 2. SYNCHRONOUS LOGGING
+// =====================================================================
+func RunSynchronousLoggerExample() {
+	fmt.Println("\n--- Synchronous Logging ---")
 	// Synchronous logging blocks the current goroutine until the log is written.
 	logger.Info("This is a synchronous INFO log", "module", "main")
 	logger.Debug("This is a synchronous DEBUG log", "user_id", 123)
+}
 
-	// ==========================================
-	// 3. ASYNCHRONOUS LOGGING (Recommended for high-throughput)
-	// ==========================================
+// =====================================================================
+// 3. ASYNCHRONOUS LOGGING (Recommended for high-throughput)
+// =====================================================================
+func RunAsynchronousLoggerExample() {
+	fmt.Println("\n--- Asynchronous Logging ---")
 	// Async logging pushes the log to a buffered channel and returns immediately.
 	// It is highly recommended for API handlers to avoid I/O bottlenecks.
 	logger.InfoAsync("This is an async INFO log", "module", "main", "action", "async_test")
@@ -53,9 +67,15 @@ func main() {
 	err := errors.New("simulated db timeout")
 	logger.ErrorAsync("Database query failed", "error", err, "query_id", "Q-1234")
 
-	// ==========================================
-	// 4. CONTEXT-AWARE LOGGING (Tracing)
-	// ==========================================
+	// Wait a moment before exit to let async logs print (in real apps, the HTTP server blocks)
+	time.Sleep(100 * time.Millisecond)
+}
+
+// =====================================================================
+// 4. CONTEXT-AWARE LOGGING (Tracing)
+// =====================================================================
+func RunContextAwareLoggerExample() {
+	fmt.Println("\n--- Context-Aware Logging ---")
 	// If your context contains a RequestID (usually injected by a middleware),
 	// the logger can automatically extract and append it to the log fields.
 	
@@ -65,9 +85,4 @@ func main() {
 	// Use the *WithContext variants
 	logger.InfoWithContext(ctx, "Processing payment request", "amount", 500)
 	logger.ErrorWithContext(ctx, "Payment failed", "reason", "insufficient_funds")
-
-	// Wait a moment before exit to let async logs print (in real apps, the HTTP server blocks)
-	time.Sleep(100 * time.Millisecond)
-	
-	logger.Info("Shutting down logger example")
 }

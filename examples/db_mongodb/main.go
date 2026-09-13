@@ -10,6 +10,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// ---------------------------------------------------------
+// Models
+// ---------------------------------------------------------
 type Patient struct {
 	ID       bson.ObjectID `bson:"_id,omitempty"`
 	FullName string        `bson:"full_name"`
@@ -17,76 +20,39 @@ type Patient struct {
 	Status   string        `bson:"status"`
 }
 
+// ---------------------------------------------------------
+// Main Menu
+// ---------------------------------------------------------
 func main() {
-	fmt.Println("--- MongoDB Example ---")
+	fmt.Println("=== MongoDB Module Examples ===")
+	
 	ctx := context.Background()
-
-	// 0. Initialize Telemetry (Enable Tracing)
-	tel, err := telemetry.Init(ctx, telemetry.Config{
-		ServiceName:   "demo-mongodb-service",
-		EnableTracing: true,
-		Endpoint:      "localhost:4317",
-	})
-	if err == nil {
-		defer tel.Shutdown(ctx)
-	}
-
-	// 1. Config for Multiple Databases
-	cfgPrimary := mongodb.DefaultConfig()
-	cfgPrimary.URI = "mongodb://localhost:27017"
-	cfgPrimary.DBName = "primary_db"
-	cfgPrimary.PingTimeout = 2 * 1000 * 1000 * 1000
-	cfgPrimary.EnableTelemetry = true // Enable Telemetry for this connection
-
-	cfgLog := mongodb.DefaultConfig()
-	cfgLog.URI = "mongodb://localhost:27017"
-	cfgLog.DBName = "log_db"
-	cfgLog.PingTimeout = 2 * 1000 * 1000 * 1000
-	cfgLog.EnableTelemetry = true // Enable Telemetry for this connection
-
-	configs := map[string]mongodb.Config{
-		"primary": cfgPrimary,
-		"logger":  cfgLog,
-	}
-
-	// 2. Initialize the Global Manager
-	// We can pass "primary" as the default. 
-	// (If we had only 1 config, we wouldn't even need to pass it).
-	// IMPORTANT: mongodb.Init is thread-safe and can be called after AddConnection
-	// without losing previously added databases.
-	err = mongodb.Init(ctx, configs, "primary")
-	if err != nil {
-		log.Printf("Failed to connect to MongoDB (make sure it is running locally): %v\n", err)
-		return
-	}
-	// CRITICAL: Always use defer mongodb.DisconnectAll(ctx) after Init to ensure
-	// graceful shutdown and prevent connection pool leaks on the MongoDB server.
+	setupMongoDB(ctx)
+	
+	// CRITICAL: Always DisconnectAll after usage to flush background connections
 	defer mongodb.DisconnectAll(ctx)
 
-	fmt.Println("Connected to multiple MongoDB instances successfully!")
+	// Uncomment the example you want to run:
+	RunMongoPaginationExample(ctx)
+	// RunMongoMultipleDatabasesExample(ctx)
+}
 
-	// 3. Usage Anywhere in the Application
+// =====================================================================
+// 1. Pagination & Generic Repository Example
+// =====================================================================
+func RunMongoPaginationExample(ctx context.Context) {
+	fmt.Println("\n--- 1. Fetching WAITING Patients (Page 1, Size 2) ---")
 	
 	// Get the default DB and create a Generic Repository for 'Patient'
 	patientRepo := mongodb.NewRepository[Patient](mongodb.Get(), "patients")
-	
-	// We can still get a specific DB for other repos
-	logDB := mongodb.Get("logger")
-	auditColl := logDB.Collection("audit_logs")
 
-	fmt.Printf("Default DB Name: %s\n", mongodb.Get().Name())
-	fmt.Printf("Logger DB Name: %s\n", logDB.Name())
-
-	// 4. Perform Paginated Query for "WAITING" patients
-	fmt.Println("\n--- Fetching WAITING Patients (Page 1, Size 2) ---")
 	req := mongodb.PageRequest{
 		Page: 1,
 		Size: 2,
 	}
-
 	filter := bson.M{"status": "WAITING"}
 
-	// Use pagination on the generic repository (much cleaner!)
+	// Use pagination on the generic repository
 	resp, err := patientRepo.Paginate(ctx, filter, req)
 	if err != nil {
 		log.Fatalf("Pagination failed: %v", err)
@@ -100,10 +66,67 @@ func main() {
 		fmt.Printf("  %d. %s (Age: %d)\n", i+1, p.FullName, p.Age)
 	}
 	
-	// Example of using other repo functions
+	// Check Existence
 	exists, _ := patientRepo.Exists(ctx, filter)
 	fmt.Printf("Does WAITING patient exist? %v\n", exists)
-	
-	// Just a mock check to use auditColl and avoid declared-and-not-used error
-	_ = auditColl
+}
+
+// =====================================================================
+// 2. Multiple Databases Example
+// =====================================================================
+func RunMongoMultipleDatabasesExample(ctx context.Context) {
+	fmt.Println("\n--- 2. Accessing Multiple Databases ---")
+
+	// The default DB
+	defaultDB := mongodb.Get()
+	fmt.Printf("Default DB Name: %s\n", defaultDB.Name())
+
+	// The 'logger' DB (configured in setup)
+	logDB := mongodb.Get("logger")
+	fmt.Printf("Logger DB Name: %s\n", logDB.Name())
+
+	// Native Collection access if you don't want to use Generic Repository
+	auditColl := logDB.Collection("audit_logs")
+	fmt.Printf("Audit Collection initialized: %s\n", auditColl.Name())
+}
+
+// ---------------------------------------------------------
+// Helper: Setup MongoDB Connections
+// ---------------------------------------------------------
+func setupMongoDB(ctx context.Context) {
+	// Initialize Telemetry
+	tel, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName:   "demo-mongodb-service",
+		EnableTracing: true,
+		Endpoint:      "localhost:4317",
+	})
+	if err == nil {
+		defer tel.Shutdown(ctx) // In real app, put in main
+	}
+
+	// 1. Config for Multiple Databases
+	cfgPrimary := mongodb.DefaultConfig()
+	cfgPrimary.URI = "mongodb://localhost:27017"
+	cfgPrimary.DBName = "primary_db"
+	cfgPrimary.PingTimeout = 2 * 1000 * 1000 * 1000
+	cfgPrimary.EnableTelemetry = true
+
+	cfgLog := mongodb.DefaultConfig()
+	cfgLog.URI = "mongodb://localhost:27017"
+	cfgLog.DBName = "log_db"
+	cfgLog.PingTimeout = 2 * 1000 * 1000 * 1000
+	cfgLog.EnableTelemetry = true
+
+	configs := map[string]mongodb.Config{
+		"primary": cfgPrimary,
+		"logger":  cfgLog,
+	}
+
+	// 2. Initialize the Global Manager
+	err = mongodb.Init(ctx, configs, "primary")
+	if err != nil {
+		log.Printf("Failed to connect to MongoDB (make sure it is running locally): %v\n", err)
+		return
+	}
+	fmt.Println("[Setup] Connected to multiple MongoDB instances successfully!")
 }

@@ -11,6 +11,8 @@ import (
 )
 
 func main() {
+	fmt.Println("=== Telemetry Module Examples ===")
+	
 	ctx := context.Background()
 
 	// 1. Initialize Telemetry configuration
@@ -31,14 +33,19 @@ func main() {
 		// CRITICAL: Always defer tel.Shutdown(ctx). If you forget this, the background
 		// spans might be lost in memory and never sent to the OpenTelemetry Collector upon exit.
 		defer tel.Shutdown(ctx)
+		fmt.Println("✅ Telemetry initialized successfully!")
 	}
 
-	fmt.Println("--- Telemetry Example ---")
+	// Uncomment the example you want to run:
+	RunTracingExample(ctx)
+	// RunMetricsExample(ctx)
+}
 
-	// 3. Use Metrics (Counter)
-	requestCounter := telemetry.MustCounter("api_requests_total", "Total API requests")
-
-	// 4. Use Tracing (Monitor execution flow)
+// =====================================================================
+// 1. Tracing Example
+// =====================================================================
+func RunTracingExample(ctx context.Context) {
+	fmt.Println("\n--- 1. Tracing Example ---")
 	fmt.Println("Processing request...")
 	
 	// Initialize a new Trace
@@ -50,12 +57,32 @@ func main() {
 	// Simulate logic execution time
 	time.Sleep(150 * time.Millisecond) 
 	
-	// Attach an additional metric to count
-	requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
-	
 	// End Trace
 	span.End()
 
 	fmt.Printf("Processed successfully! Your TraceID is: %s\n", span.SpanContext().TraceID().String())
-	fmt.Println("If you have Jaeger installed on port 4317, open the UI and search for this TraceID!")
+	fmt.Println("If you have Jaeger/Signoz installed on port 4317, open the UI and search for this TraceID!")
+}
+
+// =====================================================================
+// 2. Metrics Example
+// =====================================================================
+func RunMetricsExample(ctx context.Context) {
+	fmt.Println("\n--- 2. Metrics Example ---")
+	
+	// Initialize a Counter Metric
+	requestCounter := telemetry.MustCounter("api_requests_total", "Total API requests")
+
+	// Simulate receiving 5 requests
+	for i := 1; i <= 5; i++ {
+		// Attach an additional metric to count with specific attributes
+		requestCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("status", "success"),
+			attribute.String("endpoint", "/api/checkout"),
+		))
+		fmt.Printf("Incremented api_requests_total counter (Request %d)\n", i)
+		time.Sleep(50 * time.Millisecond)
+	}
+	
+	fmt.Println("Metrics recorded successfully! Check your Prometheus/Grafana dashboard.")
 }

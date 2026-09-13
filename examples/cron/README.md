@@ -1,12 +1,15 @@
 # Cron Module
 
 ## Overview
-The `cron` module provides a distributed job scheduler wrapping `robfig/cron/v3`. It natively integrates with Redis to perform Leader Election via Distributed Locks, ensuring that a cron job only executes on exactly one node in a clustered environment.
+The `cron` module is a high-level wrapper around the popular `robfig/cron/v3` library. It provides second-level precision cron scheduling and adds out-of-the-box support for **Distributed Job Execution** across a cluster using Redis-backed Leader Election.
 
 ## Key Features
-- **Standard Cron**: Basic scheduling for jobs that can run safely across all nodes.
-- **Distributed Cron (`AddDistributedJob`)**: Ensures a job runs on ONLY ONE node in a horizontally scaled microservice cluster using `cache.RedisLock`.
+1. **Standard Cron**: Basic job scheduling for a single server/node (`scheduler.AddFunc`).
+2. **Distributed Cron**: Ensures that a background job only runs on exactly **one node** at a time, even if you have 10 identical containers running the same application. This prevents data duplication and race conditions (`scheduler.AddDistributedJob`).
 
 ## 🚨 Best Practices for AI/Developers
-- **LockTTL (CRITICAL)**: When defining a `DistributedConfig`, the `LockTTL` must be explicitly configured to be *slightly less* than the cron schedule interval. For example, if the cron runs every 1 hour, `LockTTL` should be 59 minutes. If it runs every 10 seconds, `LockTTL` should be 9 seconds. This guarantees the lock drops just in time for the next tick, avoiding skipped executions.
-- **RunFunc**: The `RunFunc` takes a `context.Context`. If your job triggers downstream HTTP/gRPC calls, always propagate this context so it can be canceled gracefully if the cron scheduler is stopped.
+- **When to use Standard vs Distributed**:
+  - Use **Standard Cron** for tasks that MUST run on every node independently (e.g., clearing local memory cache, emitting instance metrics).
+  - Use **Distributed Cron** for business logic tasks that interact with a central database (e.g., calculating daily reports, sending batch emails).
+- **Lock TTL (CRITICAL)**: When configuring a `DistributedConfig`, the `LockTTL` **MUST** be slightly less than the cron interval (e.g., if cron runs every 10 seconds, set LockTTL to 9 seconds). If the TTL is longer than the interval, the lock will still be held when the next tick occurs, causing the job to be skipped.
+- **Graceful Stop**: Always call `scheduler.Stop()` during application shutdown to ensure no new jobs are spawned while the app is closing.
