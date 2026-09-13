@@ -11,22 +11,31 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Cache Module Example ===")
+	fmt.Println("=== Cache Module Examples ===")
+	fmt.Println("Uncomment one of the functions below to run a specific example.")
+
+	RunMemoryCacheExample()
+	// RunRedisCacheExample()
+	// RunDistributedLockExample()
+}
+
+// =====================================================================
+// 1. LOCAL MEMORY CACHE (Ristretto - Ultra Fast, Single Node)
+// =====================================================================
+func RunMemoryCacheExample() {
+	fmt.Println("\n--- 1. Testing Memory Cache (Ristretto) ---")
 	ctx := context.Background()
 
-	// -----------------------------------------------------
-	// 1. LOCAL MEMORY CACHE (Ristretto)
-	// -----------------------------------------------------
-	fmt.Println("\n--- 1. Testing Memory Cache (Ristretto) ---")
 	// Initialize local cache with a maximum capacity of 100MB
 	memCache, err := cache.NewMemoryCache(100 * 1024 * 1024)
 	if err != nil {
 		log.Fatalf("Failed to init Memory Cache: %v", err)
 	}
+	defer memCache.Close()
 
 	// Set data with a 2-second TTL
 	memCache.Set(ctx, "local_key", "Super Fast Data", 2*time.Second)
-	
+
 	// Ristretto handles admissions asynchronously to achieve high performance,
 	// so we sleep briefly before reading in this example.
 	time.Sleep(50 * time.Millisecond)
@@ -37,12 +46,15 @@ func main() {
 	} else {
 		fmt.Printf("Memory Cache hit: [local_key] = %s\n", val)
 	}
+}
 
-
-	// -----------------------------------------------------
-	// 2. REMOTE REDIS CACHE
-	// -----------------------------------------------------
+// =====================================================================
+// 2. REMOTE REDIS CACHE (Distributed, Multi-Node)
+// =====================================================================
+func RunRedisCacheExample() {
 	fmt.Println("\n--- 2. Testing Remote Redis Cache ---")
+	ctx := context.Background()
+
 	// Initialize the core redis module of go-common
 	redisClient := myredis.MustConnect(ctx, myredis.Config{
 		Mode:     myredis.ModeSingle,
@@ -57,35 +69,51 @@ func main() {
 	remoteCache := cache.NewRedisCache(redisClient.Native())
 
 	remoteCache.Set(ctx, "remote_key", "Distributed Data", 10*time.Minute)
-	val, err = remoteCache.Get(ctx, "remote_key")
+	
+	val, err := remoteCache.Get(ctx, "remote_key")
 	if err != nil {
 		fmt.Println("Error retrieving Redis Cache:", err)
 	} else {
 		fmt.Printf("Redis Cache hit: [remote_key] = %s\n", val)
 	}
+}
 
-
-	// -----------------------------------------------------
-	// 3. DISTRIBUTED LOCK (Redlock)
-	// -----------------------------------------------------
+// =====================================================================
+// 3. DISTRIBUTED LOCK (Redlock Algorithm for Mutex across nodes)
+// =====================================================================
+func RunDistributedLockExample() {
 	fmt.Println("\n--- 3. Testing Distributed Lock ---")
+	ctx := context.Background()
+
+	// Initialize Redis Client
+	redisClient := myredis.MustConnect(ctx, myredis.Config{
+		Mode:     myredis.ModeSingle,
+		Host:     "localhost",
+		Port:     6379,
+		PoolSize: 10,
+	})
+	defer redisClient.Close()
+
 	// Initialize 2 workers competing for the same lock
 	worker1 := cache.NewRedisLock(redisClient.Native())
 	worker2 := cache.NewRedisLock(redisClient.Native())
 
 	lockKey := "cron_job_daily_report"
 
-	// Delete old lock if it exists from a previous run
+	// Ensure old lock is cleared for this demo
+	remoteCache := cache.NewRedisCache(redisClient.Native())
 	remoteCache.Delete(ctx, lockKey)
 
 	// Worker 1 attempts to acquire the lock for 5 seconds
 	acquired1, err := worker1.Acquire(ctx, lockKey, 5*time.Second)
 	if acquired1 {
 		fmt.Println("Worker 1: Successfully acquired the Lock!")
+	} else if err != nil {
+		fmt.Printf("Worker 1: Error acquiring lock: %v\n", err)
 	}
 
 	// Worker 2 attempts to acquire the lock (Will definitely fail because Worker 1 holds it)
-	acquired2, err := worker2.Acquire(ctx, lockKey, 5*time.Second)
+	acquired2, _ := worker2.Acquire(ctx, lockKey, 5*time.Second)
 	if !acquired2 {
 		fmt.Println("Worker 2: Failed! The Lock is currently held by another node.")
 	}
