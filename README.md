@@ -82,7 +82,7 @@ This guarantees that the AI writes code adhering to our strict standards (e.g., 
 3. Configure as follows:
    - **Type**: `command`
    - **Command**: `npx`
-   - **Args**: `-y go-common-mcp-server`
+   - **Args**: `-y go-common-mcp-server@latest`
 
 ### Setup for VSCode (Cline)
 Add this to your `cline_mcp_settings.json`:
@@ -91,7 +91,7 @@ Add this to your `cline_mcp_settings.json`:
   "mcpServers": {
     "go-common": {
       "command": "npx",
-      "args": ["-y", "go-common-mcp-server"]
+      "args": ["-y", "go-common-mcp-server@latest"]
     }
   }
 }
