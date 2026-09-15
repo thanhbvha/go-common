@@ -72,9 +72,9 @@ Each module contains its own detailed `README.md` with usage examples and API re
 
 ## 🤖 AI / MCP Integration (Cursor, Cline, VSCode)
 
-This library is **fully agentic**. We provide an official **Model Context Protocol (MCP)** server that allows AI coding assistants to instantly fetch best practices, architectural rules, and boilerplate code directly from our `examples/` directory. 
+This library is **fully agentic**. We provide an official **Model Context Protocol (MCP)** server that allows AI coding assistants to instantly fetch and read the latest source code, architectural rules, and boilerplate code directly from both our root modules and the `examples/` directory.
 
-This guarantees that the AI writes code adhering to our strict standards (e.g., proper graceful shutdown, structured error handling).
+This guarantees that the AI writes code adhering to our strict standards (e.g., proper graceful shutdown, structured error handling) and can adapt to the most recent changes in the library without leaving the editor.
 
 ### Setup for Cursor IDE
 1. Open Cursor Settings -> Features -> MCP
