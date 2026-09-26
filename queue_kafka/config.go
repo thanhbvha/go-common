@@ -138,7 +138,7 @@ func DefaultConfig() Config {
 	return Config{
 		TopicPrefix:              "queue",
 		DefaultGroup:             "workers",
-		DefaultPartitions:        4,
+		DefaultPartitions:        64,
 		DefaultReplicationFactor: 1,
 		DefaultRetentionMs:       15 * 24 * 60 * 60 * 1000, // 15 days
 		DefaultMaxRetry:          3,
