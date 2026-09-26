@@ -13,8 +13,10 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
 | `redis` | Redis client wrapper (single / cluster / sentinel) with health-check |
 | `nats` | NATS client wrapper — Core Pub/Sub, JetStream streams/consumers, KV Store |
+| `kafka` | Apache Kafka client wrapper (franz-go) — Producer, Consumer, Admin, TLS/SASL |
 | `queue` | Durable Redis Streams job queue — delays, retries, DLQ, reclaim |
 | `queue_nats` | NATS JetStream job queue — feature parity with Redis queue |
+| `queue_kafka` | Kafka job queue — feature parity with Redis queue, partition key routing |
 | `websocket` | Clustered, framework-agnostic real-time WebSocket server (Fiber / Gin / Echo) |
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
@@ -33,6 +35,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 - Go 1.22+
 - Redis 6.x+ (Redis 6.2+ recommended for `XAUTOCLAIM` support)
 - NATS Server 2.10+ with JetStream enabled (`-js` flag or `jetstream: enabled` in config)
+- Apache Kafka 2.8+ (or compatible brokers like Redpanda)
 
 ---
 
@@ -53,8 +56,10 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`xerrors`](./xerrors/README.md)
 - [`redis`](./redis/README.md)
 - [`nats`](./nats/README.md)
+- [`kafka`](./kafka/README.md)
 - [`queue`](./queue/README.md)
 - [`queue_nats`](./queue_nats/README.md)
+- [`queue_kafka`](./queue_kafka/README.md)
 - [`websocket`](./websocket/README.md)
 - [`telemetry`](./telemetry/README.md)
 - [`db`](./db/README.md)
