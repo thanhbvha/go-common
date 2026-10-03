@@ -1,4 +1,4 @@
-// Package orm provides a robust, production-ready PostgreSQL client using GORM.
+// Package orm provides a robust, production-ready database client using GORM.
 //
 // It includes features like multi-connection management (singleton manager),
 // connection pooling, automatic OpenTelemetry instrumentation, pagination utilities,
