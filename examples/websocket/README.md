@@ -18,6 +18,6 @@ The `main.go` file contains an extremely comprehensive example divided into two 
 Run it via: `go run client/main.go -interactive=true -user=AI_TESTER`
 
 ## 🚨 Best Practices for AI/Developers
-- **Clustered Mode**: To run in clustered mode, you MUST initialize the global `redis` or `nats` connection pool BEFORE starting the WebSocket server. The engine will auto-detect them and use them as the Pub/Sub bus. If neither is available, it silently falls back to a standalone (in-memory) mode.
+- **Clustered Mode**: To run in clustered mode, you MUST explicitly inject the Pub/Sub backend by calling `pubsub.SetGlobalManager(redispubsub.NewManagerWithClient(redisClient))` BEFORE starting the WebSocket server. If you do not inject a manager, it silently falls back to a standalone (in-memory) mode without requiring any external dependencies.
 - **Event Handlers**: Business logic should be implemented by calling `core.RegisterHandler("event_type", func(...))`. DO NOT try to parse raw bytes manually.
 - **Graceful Shutdown (CRITICAL)**: **ALWAYS** call `core.GetGlobalManager().Shutdown()` during your application's graceful shutdown sequence. This cascades the shutdown signal safely through all Shards to disconnect clients cleanly, preventing memory leaks and circular dependencies.

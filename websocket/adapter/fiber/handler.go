@@ -10,7 +10,6 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/websocket/core"
 	"github.com/thanhbvha/go-common/websocket/limiter"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
 // Config holds the configuration options for the Fiber WebSocket adapter.
@@ -22,8 +21,6 @@ type Config struct {
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
-	// PubSubAdapter specifies the pubsub backend to use ("redis" or "nats"). Defaults to "redis".
-	PubSubAdapter string
 }
 
 // Handler manages the Fiber HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -50,12 +47,10 @@ func NewHandler(config Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
-	if config.PubSubAdapter == "" {
-		config.PubSubAdapter = pubsub.AdapterRedis
-	}
+	
 
 	// Pre-initialize the core global manager with the specified pubsub adapter
-	core.GetGlobalManager(config.PubSubAdapter)
+	core.GetGlobalManager()
 
 	return &Handler{config: config}
 }

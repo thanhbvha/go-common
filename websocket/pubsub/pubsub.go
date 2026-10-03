@@ -7,7 +7,6 @@ package pubsub
 import (
 	"crypto/rand"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 )
@@ -36,8 +35,8 @@ type CrossNodeMessage struct {
 	Timestamp time.Time              `json:"timestamp"`
 }
 
-// generateNodeID generates a unique identifier for this server instance in the cluster.
-func generateNodeID() string {
+// GenerateNodeID generates a unique identifier for this server instance in the cluster.
+func GenerateNodeID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp if crypto/rand is unavailable (extremely rare)
@@ -69,46 +68,57 @@ type Manager interface {
 	Shutdown() error
 }
 
-const (
-	AdapterRedis = "redis"
-	AdapterNATS  = "nats"
-)
-
 var (
-	globalManager   Manager
-	managerOnce     sync.Once
-	initAdapterType string
+	globalManager Manager
+	managerOnce   sync.Once
 )
 
-// NewManager creates a new pubsub manager instance based on the provided adapter type.
-func NewManager(adapterType string) Manager {
-	switch strings.ToLower(adapterType) {
-	case AdapterNATS:
-		return NewNATSPubSubManager()
-	case AdapterRedis:
-		fallthrough
-	default:
-		return NewRedisPubSubManager()
-	}
+// SetGlobalManager allows setting a custom PubSub manager (e.g., Redis or NATS) before starting the server.
+func SetGlobalManager(m Manager) {
+	globalManager = m
 }
 
-// GetGlobalManager returns the singleton instance of the specified pubsub manager.
-// If it hasn't been initialized, it initializes it with the given adapterType.
-func GetGlobalManager(adapterType string) Manager {
+// GetGlobalManager returns the singleton instance of the pubsub manager.
+// If it hasn't been initialized via SetGlobalManager, it returns a NoopManager to allow single-node operation without external dependencies.
+func GetGlobalManager() Manager {
 	managerOnce.Do(func() {
-		initAdapterType = adapterType
-		globalManager = NewManager(adapterType)
+		if globalManager == nil {
+			globalManager = NewNoopManager()
+		}
 	})
-	if adapterType != initAdapterType {
-		// Cannot log with the logger package here (import cycle risk), use fmt.
-		fmt.Printf("[pubsub] WARN: GetGlobalManager called with adapter %q but singleton was already initialized with %q — ignoring new adapter\n", adapterType, initAdapterType)
-	}
 	return globalManager
 }
 
-// GetDefaultManager returns the already-initialized global manager.
-// Useful for calls where the adapter type is already determined at startup.
-// It returns nil if GetGlobalManager hasn't been called yet.
-func GetDefaultManager() Manager {
-	return globalManager
+// NoopManager is a default implementation of Manager that does nothing.
+// It is used when the WebSocket server is running in standalone (single-node) mode.
+type NoopManager struct {
+	nodeID string
 }
+
+// NewNoopManager creates a new NoopManager.
+func NewNoopManager() *NoopManager {
+	return &NoopManager{nodeID: GenerateNodeID()}
+}
+
+func (m *NoopManager) RegisterHandler(messageType string, handler func(*CrossNodeMessage)) {}
+func (m *NoopManager) Subscribe(channels ...string) error                                   { return nil }
+func (m *NoopManager) Unsubscribe(channels ...string) error                                 { return nil }
+func (m *NoopManager) Publish(channel string, message *CrossNodeMessage) error              { return nil }
+func (m *NoopManager) BroadcastMessage(shardID string, data map[string]interface{}) error   { return nil }
+func (m *NoopManager) BroadcastUserNotification(shardID, userID string, data map[string]interface{}) error {
+	return nil
+}
+func (m *NoopManager) BroadcastRoomMessage(shardID, roomID string, data map[string]interface{}) error {
+	return nil
+}
+func (m *NoopManager) BroadcastChatMessage(shardID string, userID string, data map[string]interface{}) error {
+	return nil
+}
+func (m *NoopManager) NotifyUserJoin(shardID, userID, clientIP string) error { return nil }
+func (m *NoopManager) NotifyUserLeave(shardID, userID string) error          { return nil }
+func (m *NoopManager) NotifyShardCreate(shardID string) error                { return nil }
+func (m *NoopManager) NotifyShardDestroy(shardID string) error               { return nil }
+func (m *NoopManager) SendNodeStatus(data map[string]interface{}) error      { return nil }
+func (m *NoopManager) GetNodeID() string                                     { return m.nodeID }
+func (m *NoopManager) GetStats() map[string]interface{}                      { return nil }
+func (m *NoopManager) Shutdown() error                                       { return nil }

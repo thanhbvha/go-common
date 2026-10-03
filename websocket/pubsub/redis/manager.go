@@ -1,5 +1,5 @@
-// Package pubsub handles multi-node coordination using Redis pub/sub to route messages in a clustered environment.
-package pubsub
+// package redispubsub handles multi-node coordination using Redis pub/sub to route messages in a clustered environment.
+package redispubsub
 
 import (
 	"context"
@@ -11,35 +11,36 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
-// RedisPubSubManager manages subscriptions and publication of messages across multiple instances in a cluster.
-type RedisPubSubManager struct {
+// Manager manages subscriptions and publication of messages across multiple instances in a cluster.
+type Manager struct {
 	redisClient *redis.Client
 	nodeID      string
 	subscribers map[string]*goredis.PubSub
-	handlers    map[string]func(*CrossNodeMessage)
+	handlers    map[string]func(*pubsub.CrossNodeMessage)
 	mu          sync.RWMutex
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
 
 var (
-	globalRedisPubSub *RedisPubSubManager
-	redisPubsubOnce   sync.Once
+	globalManager *Manager
+	managerOnce   sync.Once
 )
 
-// GetGlobalRedisPubSub returns the default singleton RedisPubSubManager initialized with the default Redis client.
-func GetGlobalRedisPubSub() *RedisPubSubManager {
-	redisPubsubOnce.Do(func() {
-		globalRedisPubSub = NewRedisPubSubManager()
+// GetGlobalManager returns the default singleton Manager initialized with the default Redis client.
+func GetGlobalManager() *Manager {
+	managerOnce.Do(func() {
+		globalManager = NewManager()
 	})
-	return globalRedisPubSub
+	return globalManager
 }
 
-// NewRedisPubSubManager instantiates a new RedisPubSubManager. If the default Redis client is not set,
+// NewManager instantiates a new Manager. If the default Redis client is not set,
 // it gracefully falls back to standalone loopback mode to support zero-config standalone runs.
-func NewRedisPubSubManager() *RedisPubSubManager {
+func NewManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var client *redis.Client
@@ -54,39 +55,39 @@ func NewRedisPubSubManager() *RedisPubSubManager {
 		logger.WarnAsync("Redis default client not set. WebSocket PubSub will run in standalone loopback mode.")
 	}
 
-	return &RedisPubSubManager{
+	return &Manager{
 		redisClient: client,
-		nodeID:      generateNodeID(),
+		nodeID:      pubsub.GenerateNodeID(),
 		subscribers: make(map[string]*goredis.PubSub),
-		handlers:    make(map[string]func(*CrossNodeMessage)),
+		handlers:    make(map[string]func(*pubsub.CrossNodeMessage)),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 }
 
-// NewRedisPubSubManagerWithClient instantiates a new RedisPubSubManager with a custom, user-provided Redis client.
-func NewRedisPubSubManagerWithClient(client *redis.Client) *RedisPubSubManager {
+// NewManagerWithClient instantiates a new Manager with a custom, user-provided Redis client.
+func NewManagerWithClient(client *redis.Client) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &RedisPubSubManager{
+	return &Manager{
 		redisClient: client,
-		nodeID:      generateNodeID(),
+		nodeID:      pubsub.GenerateNodeID(),
 		subscribers: make(map[string]*goredis.PubSub),
-		handlers:    make(map[string]func(*CrossNodeMessage)),
+		handlers:    make(map[string]func(*pubsub.CrossNodeMessage)),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 }
 
 // RegisterHandler binds a callback handler to a specific cross-node message type.
-func (psm *RedisPubSubManager) RegisterHandler(messageType string, handler func(*CrossNodeMessage)) {
+func (psm *Manager) RegisterHandler(messageType string, handler func(*pubsub.CrossNodeMessage)) {
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 	psm.handlers[messageType] = handler
 }
 
 // Subscribe listens to the specified Redis channels and processes incoming messages.
-func (psm *RedisPubSubManager) Subscribe(channels ...string) error {
+func (psm *Manager) Subscribe(channels ...string) error {
 	if psm.redisClient == nil {
 		return nil // No-op in standalone/test mode
 	}
@@ -114,7 +115,7 @@ func (psm *RedisPubSubManager) Subscribe(channels ...string) error {
 }
 
 // Unsubscribe stops listening to and closes the specified channels.
-func (psm *RedisPubSubManager) Unsubscribe(channels ...string) error {
+func (psm *Manager) Unsubscribe(channels ...string) error {
 	if psm.redisClient == nil {
 		return nil // No-op in standalone/test mode
 	}
@@ -146,7 +147,7 @@ func (psm *RedisPubSubManager) Unsubscribe(channels ...string) error {
 }
 
 // handleChannelMessages listens to the channel payload and dispatches events.
-func (psm *RedisPubSubManager) handleChannelMessages(channel string, pubsub *goredis.PubSub) {
+func (psm *Manager) handleChannelMessages(channel string, pubsub *goredis.PubSub) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.ErrorAsync("Panic in channel message handler", "error", r, "channel", channel, "node_id", psm.nodeID)
@@ -171,8 +172,8 @@ func (psm *RedisPubSubManager) handleChannelMessages(channel string, pubsub *gor
 }
 
 // processMessage decodes and directs a single payload to its corresponding handler.
-func (psm *RedisPubSubManager) processMessage(channel, payload string) {
-	var message CrossNodeMessage
+func (psm *Manager) processMessage(channel, payload string) {
+	var message pubsub.CrossNodeMessage
 	if err := json.Unmarshal([]byte(payload), &message); err != nil {
 		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "payload", payload)
 		return
@@ -203,8 +204,8 @@ func (psm *RedisPubSubManager) processMessage(channel, payload string) {
 	}()
 }
 
-// Publish transmits a CrossNodeMessage to the specified Redis channel.
-func (psm *RedisPubSubManager) Publish(channel string, message *CrossNodeMessage) error {
+// Publish transmits a pubsub.CrossNodeMessage to the specified Redis channel.
+func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) error {
 	message.NodeID = psm.nodeID
 	message.Timestamp = time.Now()
 
@@ -235,9 +236,9 @@ func (psm *RedisPubSubManager) Publish(channel string, message *CrossNodeMessage
 }
 
 // BroadcastMessage sends a broadcast event to all subscribers of a specific shard ID.
-func (psm *RedisPubSubManager) BroadcastMessage(shardID string, data map[string]interface{}) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeBroadcast,
+func (psm *Manager) BroadcastMessage(shardID string, data map[string]interface{}) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeBroadcast,
 		ShardID: shardID,
 		Data:    data,
 	}
@@ -247,9 +248,9 @@ func (psm *RedisPubSubManager) BroadcastMessage(shardID string, data map[string]
 }
 
 // BroadcastUserNotification sends a notification event to a specific user across different nodes.
-func (psm *RedisPubSubManager) BroadcastUserNotification(shardID, userID string, data map[string]interface{}) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeNotification,
+func (psm *Manager) BroadcastUserNotification(shardID, userID string, data map[string]interface{}) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeNotification,
 		ShardID: shardID,
 		UserID:  userID,
 		Data:    data,
@@ -260,9 +261,9 @@ func (psm *RedisPubSubManager) BroadcastUserNotification(shardID, userID string,
 }
 
 // BroadcastRoomMessage distributes a chat room message to all room members across nodes.
-func (psm *RedisPubSubManager) BroadcastRoomMessage(shardID, roomID string, data map[string]interface{}) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeChatRoom,
+func (psm *Manager) BroadcastRoomMessage(shardID, roomID string, data map[string]interface{}) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeChatRoom,
 		ShardID: shardID,
 		RoomID:  roomID,
 		Data:    data,
@@ -273,9 +274,9 @@ func (psm *RedisPubSubManager) BroadcastRoomMessage(shardID, roomID string, data
 }
 
 // BroadcastChatMessage sends a direct chat message to a user on any cluster node.
-func (psm *RedisPubSubManager) BroadcastChatMessage(shardID string, userID string, data map[string]interface{}) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeChat,
+func (psm *Manager) BroadcastChatMessage(shardID string, userID string, data map[string]interface{}) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeChat,
 		ShardID: shardID,
 		UserID:  userID,
 		Data:    data,
@@ -286,9 +287,9 @@ func (psm *RedisPubSubManager) BroadcastChatMessage(shardID string, userID strin
 }
 
 // NotifyUserJoin sends a join event to other nodes when a user connects.
-func (psm *RedisPubSubManager) NotifyUserJoin(shardID, userID, clientIP string) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeUserJoin,
+func (psm *Manager) NotifyUserJoin(shardID, userID, clientIP string) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeUserJoin,
 		ShardID: shardID,
 		UserID:  userID,
 		Data: map[string]interface{}{
@@ -301,9 +302,9 @@ func (psm *RedisPubSubManager) NotifyUserJoin(shardID, userID, clientIP string) 
 }
 
 // NotifyUserLeave sends a leave event to other nodes when a user disconnects.
-func (psm *RedisPubSubManager) NotifyUserLeave(shardID, userID string) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeUserLeave,
+func (psm *Manager) NotifyUserLeave(shardID, userID string) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeUserLeave,
 		ShardID: shardID,
 		UserID:  userID,
 	}
@@ -313,9 +314,9 @@ func (psm *RedisPubSubManager) NotifyUserLeave(shardID, userID string) error {
 }
 
 // NotifyShardCreate broadcasts a shard creation notice globally to system subscribers.
-func (psm *RedisPubSubManager) NotifyShardCreate(shardID string) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeShardCreate,
+func (psm *Manager) NotifyShardCreate(shardID string) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeShardCreate,
 		ShardID: shardID,
 	}
 
@@ -323,9 +324,9 @@ func (psm *RedisPubSubManager) NotifyShardCreate(shardID string) error {
 }
 
 // NotifyShardDestroy broadcasts a shard destruction notice globally.
-func (psm *RedisPubSubManager) NotifyShardDestroy(shardID string) error {
-	message := &CrossNodeMessage{
-		Type:    MessageTypeShardDestroy,
+func (psm *Manager) NotifyShardDestroy(shardID string) error {
+	message := &pubsub.CrossNodeMessage{
+		Type:    pubsub.MessageTypeShardDestroy,
 		ShardID: shardID,
 	}
 
@@ -333,9 +334,9 @@ func (psm *RedisPubSubManager) NotifyShardDestroy(shardID string) error {
 }
 
 // SendNodeStatus publishes node status metrics to the system control topic.
-func (psm *RedisPubSubManager) SendNodeStatus(data map[string]interface{}) error {
-	message := &CrossNodeMessage{
-		Type: MessageTypeNodeStatus,
+func (psm *Manager) SendNodeStatus(data map[string]interface{}) error {
+	message := &pubsub.CrossNodeMessage{
+		Type: pubsub.MessageTypeNodeStatus,
 		Data: data,
 	}
 
@@ -343,12 +344,12 @@ func (psm *RedisPubSubManager) SendNodeStatus(data map[string]interface{}) error
 }
 
 // GetNodeID returns the unique identifier of the current cluster node.
-func (psm *RedisPubSubManager) GetNodeID() string {
+func (psm *Manager) GetNodeID() string {
 	return psm.nodeID
 }
 
 // GetStats returns metrics and current status of the pub/sub connection.
-func (psm *RedisPubSubManager) GetStats() map[string]interface{} {
+func (psm *Manager) GetStats() map[string]interface{} {
 	psm.mu.RLock()
 	defer psm.mu.RUnlock()
 
@@ -373,7 +374,7 @@ func (psm *RedisPubSubManager) GetStats() map[string]interface{} {
 }
 
 // Shutdown gracefully unsubscribes from all channels and releases the connections.
-func (psm *RedisPubSubManager) Shutdown() error {
+func (psm *Manager) Shutdown() error {
 	logger.InfoAsync("Shutting down pub/sub manager", "node_id", psm.nodeID)
 
 	psm.cancel()
@@ -388,7 +389,7 @@ func (psm *RedisPubSubManager) Shutdown() error {
 	}
 
 	psm.subscribers = make(map[string]*goredis.PubSub)
-	psm.handlers = make(map[string]func(*CrossNodeMessage))
+	psm.handlers = make(map[string]func(*pubsub.CrossNodeMessage))
 
 	logger.InfoAsync("Pub/sub manager shutdown complete", "node_id", psm.nodeID)
 	return nil

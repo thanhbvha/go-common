@@ -37,39 +37,23 @@ type Manager struct {
 }
 
 var (
-	globalManager   *Manager
-	managerOnce     sync.Once
-	initAdapterType string
+	globalManager *Manager
+	managerOnce   sync.Once
 )
 
 // GetGlobalManager returns the singleton Manager instance, bootstrapping it if necessary.
-// It accepts an optional adapterType (e.g., pubsub.AdapterNATS) which defaults to redis.
-func GetGlobalManager(adapterType ...string) *Manager {
-	requested := ""
-	if len(adapterType) > 0 {
-		requested = adapterType[0]
-	}
+func GetGlobalManager() *Manager {
 	managerOnce.Do(func() {
-		initAdapterType = requested
-		globalManager = NewManager(adapterType...)
+		globalManager = NewManager()
 		go globalManager.Run()
 	})
-	if requested != "" && requested != initAdapterType {
-		logger.WarnAsync("GetGlobalManager: adapter type ignored, singleton already initialized",
-			"requested", requested, "active", initAdapterType)
-	}
 	return globalManager
 }
 
 // NewManager instantiates a new connection Manager and spins up standard pubsub hooks and default shard.
-func NewManager(adapterType ...string) *Manager {
-	at := pubsub.AdapterRedis
-	if len(adapterType) > 0 && adapterType[0] != "" {
-		at = adapterType[0]
-	}
-
+func NewManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	pubsubManager := pubsub.GetGlobalManager(at)
+	pubsubManager := pubsub.GetGlobalManager()
 
 	m := &Manager{
 		shards: make(map[string]*Shard),

@@ -21,6 +21,8 @@ import (
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
 	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
 	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/websocket/pubsub"
+	redispubsub "github.com/thanhbvha/go-common/websocket/pubsub/redis"
 )
 
 func main() {
@@ -61,8 +63,16 @@ func SetupCore() {
 		logger.WarnAsync("Redis unavailable, running WebSocket in standalone loopback mode", "error", err)
 	} else {
 		redis.SetDefault(redisClient)
+		// Inject the Redis PubSub Manager into the WebSocket core for clustered message routing
+		pubsub.SetGlobalManager(redispubsub.NewManagerWithClient(redisClient))
 		logger.InfoAsync("Redis clustered pub/sub engine connected successfully")
 	}
+
+	// [NATS Alternative]
+	// If you wanted to use NATS instead of Redis for PubSub:
+	// import natspubsub "github.com/thanhbvha/go-common/websocket/pubsub/nats"
+	// natsClient := nats.New(...)
+	// pubsub.SetGlobalManager(natspubsub.NewManagerWithClient(natsClient))
 
 	// 3. Register custom event handlers for business logic
 	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
@@ -95,7 +105,6 @@ func RunFiberExample() {
 			}
 			return userID, nil
 		},
-		PubSubAdapter: "redis",
 	}
 
 	handler := wsFiber.NewHandler(adapterConfig)
@@ -126,7 +135,6 @@ func RunGinExample() {
 			}
 			return userID, nil
 		},
-		PubSubAdapter: "redis",
 	})
 
 	gin.SetMode(gin.ReleaseMode)
@@ -171,7 +179,6 @@ func RunEchoExample() {
 			}
 			return userID, nil
 		},
-		PubSubAdapter: "redis",
 	})
 
 	e := echo.New()
