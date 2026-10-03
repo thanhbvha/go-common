@@ -8,6 +8,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 
 | Package | Description |
 |---|---|
+| `foundation` | Core application lifecycle orchestrator (Startup Hooks, Graceful Shutdown, Health Checks) |
 | `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
 | `config` | Environment variable and configuration file loader (Viper wrapper) |
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
@@ -52,6 +53,7 @@ go get github.com/thanhbvha/go-common
 
 Each module contains its own detailed `README.md` with usage examples and API references. Please navigate to the respective package directory to learn more:
 
+- [`foundation`](./foundation/README.md)
 - [`logger`](./logger/README.md)
 - [`config`](./config/README.md)
 - [`xerrors`](./xerrors/README.md)

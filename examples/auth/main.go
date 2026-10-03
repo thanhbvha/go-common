@@ -27,7 +27,8 @@ func main() {
 	// RunEncryptedJWT_Fiber()
 	// RunStandardJWT_Gin()
 	// RunStandardJWT_Echo()
-	RunGenericJWT_Fiber()
+	// RunGenericJWT_Fiber()
+	RunGenericEncryptedJWT_Example()
 }
 
 // =====================================================================
@@ -301,4 +302,55 @@ func RunGenericJWT_Fiber() {
 	})
 
 	log.Fatal(app.Listen(":3003"))
+}
+
+// =====================================================================
+// 5. Generic Encrypted JWT (AES-256 GCM) with Redis
+// =====================================================================
+
+type TenantClaims struct {
+	TenantID string `json:"tenant_id"`
+	Role     string `json:"role"`
+	Quota    int    `json:"quota"`
+}
+
+func RunGenericEncryptedJWT_Example() {
+	fmt.Println("--- Starting Generic Encrypted JWT (AES-256 GCM) ---")
+
+	// 1. Initialize Redis Client
+	redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+	// 2. AES Key MUST be exactly 32 bytes for AES-256 GCM
+	aesKey := "01234567890123456789012345678901"
+
+	mgr, err := auth.NewGenericEncryptedManager[TenantClaims](auth.GenericEncryptedOptions{
+		SecretKey: "super-secret-jwt-key-must-be-long",
+		AESKey:    aesKey,
+		Redis:     redisClient,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create manager: %v", err)
+	}
+
+	payload := TenantClaims{
+		TenantID: "tenant-777",
+		Role:     "admin",
+		Quota:    5000,
+	}
+	
+	aad := []byte("device-id-12345") // Bind token to a specific device/context
+
+	token, err := mgr.GenerateToken(payload, 1*time.Hour, aad)
+	if err != nil {
+		log.Fatalf("GenerateToken failed: %v", err)
+	}
+	fmt.Printf("Generated Encrypted Token: %s\n\n", token)
+
+	// Validate token
+	var decodedPayload TenantClaims
+	if err := mgr.VerifyToken(token, &decodedPayload, aad); err != nil {
+		log.Fatalf("VerifyToken failed: %v", err)
+	}
+
+	fmt.Printf("Decrypted Payload Successfully:\n%+v\n", decodedPayload)
 }

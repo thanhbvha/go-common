@@ -12,12 +12,13 @@ This module is designed to prevent Token Theft by implementing **Dynamic AAD (Ad
 2. **Encrypted JWT (`auth.EncryptedManager`)**: Encrypts the entire JWT payload using `AES-256 GCM` before signing it. The payload is completely hidden from attackers and cannot be decoded on sites like `jwt.io`.
 3. **Dynamic AAD / Token Binding**: Protect against XSS and Token Theft by binding the encrypted token to a `Session ID` (stored in an `HttpOnly` Cookie) or a `Device ID` (Custom Header).
 4. **Generic JWT & Session Control**: Use `GenericManager[T]` for custom payload structures, Refresh Token generation, and Redis-backed token revocation (Blacklisting).
-5. **High Performance**: Uses `github.com/goccy/go-json` for ultra-fast JSON serialization/deserialization.
-6. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
+5. **Generic Encrypted JWT**: Use `GenericEncryptedManager[T]` to encrypt custom payload structures via AES-256 GCM while keeping full session control via Redis.
+6. **High Performance**: Uses `github.com/goccy/go-json` for ultra-fast JSON serialization/deserialization.
+7. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
    - `github.com/thanhbvha/go-common/auth/middleware/fiber` (`fiberauth.Middleware()`)
    - `github.com/thanhbvha/go-common/auth/middleware/gin` (`ginauth.Middleware()`)
    - `github.com/thanhbvha/go-common/auth/middleware/echo` (`echoauth.Middleware()`)
-6. **Context Injection**: Automatically extracts the token, verifies/decrypts it, and injects the `UserInfo` struct into the framework's context.
+8. **Context Injection**: Automatically extracts the token, verifies/decrypts it, and injects the `UserInfo` struct into the framework's context.
 
 ---
 
@@ -97,7 +98,33 @@ rt, _ := manager.GenerateRefreshToken(context.Background(), "user_1", 7*24*time.
 isValid, _ := manager.VerifyRefreshToken(context.Background(), "user_1", rt)
 ```
 
-### 4. Extreme Security: Encrypted JWT + Dynamic AAD (Token Binding)
+### 4. Generic Encrypted JWT (Custom Claims + AES-256 GCM)
+Combine the best of both worlds: define your own struct payload and let the Manager completely encrypt it, while keeping all Redis session control features.
+
+```go
+type TenantClaims struct {
+	TenantID string `json:"tenant_id"`
+	Role     string `json:"role"`
+	Quota    int    `json:"quota"`
+}
+
+mgr, _ := auth.NewGenericEncryptedManager[TenantClaims](auth.GenericEncryptedOptions{
+	SecretKey: "super-secret-jwt-key-must-be-long",
+	AESKey:    "01234567890123456789012345678901",
+	Redis:     redisClient,
+})
+
+payload := TenantClaims{TenantID: "tenant-777", Role: "admin"}
+
+// Generate Encrypted Token (Payload is fully hidden!)
+token, _ := mgr.GenerateToken(payload, 24*time.Hour, nil)
+
+// Decrypt and Verify
+var decoded TenantClaims
+err := mgr.VerifyToken(token, &decoded, nil)
+```
+
+### 5. Extreme Security: Encrypted JWT + Dynamic AAD (Token Binding)
 Use this pattern for highly sensitive applications (e.g., Finance, Wallets). 
 It binds the JWT to a specific browser session using a randomly generated `Session ID` stored in a secure `HttpOnly` Cookie.
 
