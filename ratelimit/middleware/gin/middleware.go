@@ -1,4 +1,4 @@
-package ratelimit
+package ginlimit
 
 import (
 	"net/http"
@@ -6,20 +6,21 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/thanhbvha/go-common/ratelimit"
 )
 
-// GinKeyGenerator is a function that extracts a unique key from the Gin context.
-type GinKeyGenerator func(*gin.Context) string
+// KeyGenerator is a function that extracts a unique key from the Gin context.
+type KeyGenerator func(*gin.Context) string
 
-// DefaultGinKeyGenerator uses the Client IP as the rate limit key.
-func DefaultGinKeyGenerator(c *gin.Context) string {
+// DefaultKeyGenerator uses the Client IP as the rate limit key.
+func DefaultKeyGenerator(c *gin.Context) string {
 	return c.ClientIP()
 }
 
-// GinMiddleware creates a Rate Limit middleware for Gin.
-func GinMiddleware(limiter Limiter, cfg Config, keyGen GinKeyGenerator) gin.HandlerFunc {
+// Middleware creates a Rate Limit middleware for Gin.
+func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGenerator) gin.HandlerFunc {
 	if keyGen == nil {
-		keyGen = DefaultGinKeyGenerator
+		keyGen = DefaultKeyGenerator
 	}
 
 	return func(c *gin.Context) {

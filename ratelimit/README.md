@@ -6,7 +6,10 @@ The `ratelimit` module provides an ultra-fast, distributed Rate Limiting solutio
 
 1. **Atomic Operations**: Uses Redis Lua scripts to evaluate and increment rate limits in a single, atomic operation to prevent race conditions in highly concurrent environments.
 2. **Standard Algorithm**: Implements the Fixed Window rate limiting algorithm.
-3. **Framework-Agnostic Middlewares**: Ready-to-use middlewares for `Fiber`, `Gin`, and `Echo`.
+3. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
+   - `github.com/thanhbvha/go-common/ratelimit/middleware/fiber` (`fiberlimit.Middleware()`)
+   - `github.com/thanhbvha/go-common/ratelimit/middleware/gin` (`ginlimit.Middleware()`)
+   - `github.com/thanhbvha/go-common/ratelimit/middleware/echo` (`echolimit.Middleware()`)
 4. **Customizable Keys**: You can rate-limit based on Client IP (default), User ID, API Key, or any custom logic.
 5. **Standard Headers**: Automatically injects standard Rate Limit HTTP Headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) into responses.
 
@@ -25,7 +28,9 @@ import (
 	"time"
 	"github.com/gofiber/fiber/v2"
 	"github.com/redis/go-redis/v9"
+	
 	"github.com/thanhbvha/go-common/ratelimit"
+	"github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
 )
 
 func main() {
@@ -44,7 +49,7 @@ func main() {
 	app := fiber.New()
 
 	// 4. Apply Middleware (Uses IP by default)
-	app.Use("/api", ratelimit.FiberMiddleware(limiter, cfg, nil))
+	app.Use("/api", fiberlimit.Middleware(limiter, cfg, nil))
 
 	app.Get("/api/data", func(c *fiber.Ctx) error {
 		return c.SendString("Success!")
@@ -69,5 +74,5 @@ keyGen := func(c *fiber.Ctx) string {
 	return c.IP()
 }
 
-app.Use("/api", ratelimit.FiberMiddleware(limiter, cfg, keyGen))
+app.Use("/api", fiberlimit.Middleware(limiter, cfg, keyGen))
 ```

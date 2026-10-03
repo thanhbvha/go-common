@@ -1,4 +1,4 @@
-package ratelimit
+package echolimit
 
 import (
 	"net/http"
@@ -6,20 +6,21 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/thanhbvha/go-common/ratelimit"
 )
 
-// EchoKeyGenerator is a function that extracts a unique key from the Echo context.
-type EchoKeyGenerator func(echo.Context) string
+// KeyGenerator is a function that extracts a unique key from the Echo context.
+type KeyGenerator func(echo.Context) string
 
-// DefaultEchoKeyGenerator uses the Client IP as the rate limit key.
-func DefaultEchoKeyGenerator(c echo.Context) string {
+// DefaultKeyGenerator uses the Client IP as the rate limit key.
+func DefaultKeyGenerator(c echo.Context) string {
 	return c.RealIP()
 }
 
-// EchoMiddleware creates a Rate Limit middleware for Echo.
-func EchoMiddleware(limiter Limiter, cfg Config, keyGen EchoKeyGenerator) echo.MiddlewareFunc {
+// Middleware creates a Rate Limit middleware for Echo.
+func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGenerator) echo.MiddlewareFunc {
 	if keyGen == nil {
-		keyGen = DefaultEchoKeyGenerator
+		keyGen = DefaultKeyGenerator
 	}
 
 	return func(next echo.HandlerFunc) echo.HandlerFunc {

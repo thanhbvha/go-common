@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/thanhbvha/go-common/foundation"
 	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/health/handler/fiber"
 	"github.com/thanhbvha/go-common/logger"
 )
 
@@ -38,9 +39,9 @@ func main() {
 		})
 
 		// Expose health endpoints to Kubernetes/Load Balancer
-		srv.Get("/health", health.FiberHandler(app.Health()))
-		srv.Get("/ready", health.FiberReadyHandler(app.Health()))
-		srv.Get("/live", health.FiberLiveHandler(app.Health()))
+		srv.Get("/health", fiberhealth.Handler(app.Health()))
+		srv.Get("/ready", fiberhealth.ReadyHandler(app.Health()))
+		srv.Get("/live", fiberhealth.LiveHandler(app.Health()))
 
 		srv.Get("/", func(c *fiber.Ctx) error {
 			return c.SendString("Hello from Foundation App! (Try visiting /health)")

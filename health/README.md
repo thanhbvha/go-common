@@ -8,11 +8,11 @@ The `health` module provides standardized, Kubernetes-ready HTTP health check en
 - **Concurrent Execution**: Runs all registered dependency checks concurrently using goroutines.
 - **Configurable Timeouts**: Prevents your health endpoint from hanging indefinitely if a dependency is stuck.
 - **Built-in Checkers**: Pre-built checkers for `GORM`, `Redis`, and standard `HTTP` endpoints.
-- **Framework Agnostic**: Includes pre-built HTTP handlers for `Fiber`, `Gin`, and `Echo`.
+- **Framework Agnostic**: Handlers are isolated in subpackages (`health/handler/fiber`, `health/handler/gin`, `health/handler/echo`) so you only import what you need.
 
 ---
 
-## 🚨 Best Practices for AI/Developers
+## ðŸš¨ Best Practices for AI/Developers
 
 - **Liveness vs Readiness**: 
   - **Liveness** (`/live`): Checks if the application process is running and not deadlocked. Should be extremely fast (e.g., memory checks). **If this fails, Kubernetes restarts the pod.**
@@ -66,23 +66,29 @@ Attach the health endpoints to your favorite framework.
 
 **For Fiber:**
 ```go
-app.Get("/health", health.FiberHandler(h))       // All checks
-app.Get("/ready", health.FiberReadyHandler(h))   // Readiness only
-app.Get("/live", health.FiberLiveHandler(h))     // Liveness only
+import "github.com/thanhbvha/go-common/health/handler/fiber"
+
+app.Get("/health", fiberhealth.Handler(h))       // All checks
+app.Get("/ready", fiberhealth.ReadyHandler(h))   // Readiness only
+app.Get("/live", fiberhealth.LiveHandler(h))     // Liveness only
 ```
 
 **For Gin:**
 ```go
-router.GET("/health", health.GinHandler(h))
-router.GET("/ready", health.GinReadyHandler(h))
-router.GET("/live", health.GinLiveHandler(h))
+import "github.com/thanhbvha/go-common/health/handler/gin"
+
+router.GET("/health", ginhealth.Handler(h))
+router.GET("/ready", ginhealth.ReadyHandler(h))
+router.GET("/live", ginhealth.LiveHandler(h))
 ```
 
 **For Echo:**
 ```go
-e.GET("/health", health.EchoHandler(h))
-e.GET("/ready", health.EchoReadyHandler(h))
-e.GET("/live", health.EchoLiveHandler(h))
+import "github.com/thanhbvha/go-common/health/handler/echo"
+
+e.GET("/health", echohealth.Handler(h))
+e.GET("/ready", echohealth.ReadyHandler(h))
+e.GET("/live", echohealth.LiveHandler(h))
 ```
 
 ---

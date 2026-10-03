@@ -12,9 +12,9 @@
 //	    AddReadinessCheck("database", health.GORMChecker(db)).
 //	    AddReadinessCheck("redis", health.RedisChecker(redisClient))
 //
-//	app.Get("/health", health.FiberHandler(h))
-//	app.Get("/ready",  health.FiberReadyHandler(h))
-//	app.Get("/live",   health.FiberLiveHandler(h))
+//	app.Get("/health", fiberhealth.Handler(h))
+//	app.Get("/ready",  fiberhealth.ReadyHandler(h))
+//	app.Get("/live",   fiberhealth.LiveHandler(h))
 package health
 
 import (

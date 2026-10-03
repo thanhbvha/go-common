@@ -8,7 +8,7 @@ It natively supports concurrent health checks with timeouts, and provides pre-bu
 ## Key Features
 - **Concurrent Checks**: All registered dependency checks run simultaneously in goroutines.
 - **Timeouts**: Configurable timeout per check to ensure health endpoints never hang indefinitely.
-- **Adapters**: Ready-to-use handlers for `fiber` (`FiberHandler`), `gin` (`GinHandler`), and `echo` (`EchoHandler`).
+- **Adapters**: Ready-to-use handlers for `fiber` (`fiberhealth.Handler`), `gin` (`ginhealth.Handler`), and `echo` (`echohealth.Handler`) which are neatly isolated in subpackages.
 - **Built-in Checkers**: Contains built-in functions for checking GORM (`GORMChecker`), Redis (`RedisChecker`), and HTTP endpoints (`HTTPChecker`).
 
 ## Covered Examples

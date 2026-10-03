@@ -1,24 +1,25 @@
-package ratelimit
+package fiberlimit
 
 import (
 	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/thanhbvha/go-common/ratelimit"
 )
 
 // KeyGenerator is a function that extracts a unique key (e.g., IP, User ID) from the request.
-type FiberKeyGenerator func(*fiber.Ctx) string
+type KeyGenerator func(*fiber.Ctx) string
 
-// DefaultFiberKeyGenerator uses the Client IP as the rate limit key.
-func DefaultFiberKeyGenerator(c *fiber.Ctx) string {
+// DefaultKeyGenerator uses the Client IP as the rate limit key.
+func DefaultKeyGenerator(c *fiber.Ctx) string {
 	return c.IP()
 }
 
-// FiberMiddleware creates a Rate Limit middleware for Fiber.
-func FiberMiddleware(limiter Limiter, cfg Config, keyGen FiberKeyGenerator) fiber.Handler {
+// Middleware creates a Rate Limit middleware for Fiber.
+func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGenerator) fiber.Handler {
 	if keyGen == nil {
-		keyGen = DefaultFiberKeyGenerator
+		keyGen = DefaultKeyGenerator
 	}
 
 	return func(c *fiber.Ctx) error {

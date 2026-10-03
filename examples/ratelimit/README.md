@@ -5,7 +5,7 @@ The `ratelimit` module provides a distributed, high-performance rate limiter bas
 
 ## Key Features
 - `ratelimit.NewRedisLimiter(redisClient, prefix)`: Initializes the core limiter engine.
-- **Framework-Agnostic Middlewares**: Ready-to-use middlewares for `Fiber`, `Gin`, and `Echo` (`ratelimit.FiberMiddleware`, `ratelimit.GinMiddleware`, `ratelimit.EchoMiddleware`).
+- **Framework-Agnostic Middlewares**: Ready-to-use middlewares for `Fiber`, `Gin`, and `Echo` which are neatly isolated in subpackages (`fiberlimit.Middleware`, `ginlimit.Middleware`, `echolimit.Middleware`).
 - Automatically handles Redis pipeline transactions to guarantee atomicity and speed.
 
 ## Covered Examples

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/health/handler/fiber"
 )
 
 func main() {
@@ -73,9 +74,9 @@ func main() {
 	}))
 
 	// Register endpoints
-	app.Get("/health", health.FiberHandler(h))
-	app.Get("/ready", health.FiberReadyHandler(h))
-	app.Get("/live", health.FiberLiveHandler(h))
+	app.Get("/health", fiberhealth.Handler(h))
+	app.Get("/ready", fiberhealth.ReadyHandler(h))
+	app.Get("/live", fiberhealth.LiveHandler(h))
 
 	// Start server in background
 	go func() {

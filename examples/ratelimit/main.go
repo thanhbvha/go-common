@@ -11,6 +11,9 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/thanhbvha/go-common/ratelimit"
+	"github.com/thanhbvha/go-common/ratelimit/middleware/echo"
+	"github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
+	"github.com/thanhbvha/go-common/ratelimit/middleware/gin"
 )
 
 func main() {
@@ -49,7 +52,7 @@ func RunIPBasedRateLimitExample(rdb *redis.Client) {
 
 	// Apply RateLimit Middleware to all routes under /api
 	// By default (nil KeyGenerator), the middleware uses Client IP as the rate limit key.
-	api := app.Group("/api", ratelimit.FiberMiddleware(limiter, cfg, nil))
+	api := app.Group("/api", fiberlimit.Middleware(limiter, cfg, nil))
 
 	api.Get("/data", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -91,7 +94,7 @@ func RunUserIDBasedRateLimitExample(rdb *redis.Client) {
 		DisableStartupMessage: true,
 	})
 
-	api := app.Group("/api", ratelimit.FiberMiddleware(limiter, cfg, keyGenerator))
+	api := app.Group("/api", fiberlimit.Middleware(limiter, cfg, keyGenerator))
 
 	api.Get("/data", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -119,7 +122,7 @@ func RunGinRateLimitExample(rdb *redis.Client) {
 	r := gin.Default()
 
 	// Apply GinMiddleware
-	api := r.Group("/api", ratelimit.GinMiddleware(limiter, cfg, nil))
+	api := r.Group("/api", ginlimit.Middleware(limiter, cfg, nil))
 
 	api.GET("/data", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -144,7 +147,7 @@ func RunEchoRateLimitExample(rdb *redis.Client) {
 	e.HideBanner = true
 
 	// Apply EchoMiddleware
-	api := e.Group("/api", ratelimit.EchoMiddleware(limiter, cfg, nil))
+	api := e.Group("/api", echolimit.Middleware(limiter, cfg, nil))
 
 	api.GET("/data", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{
