@@ -12,7 +12,7 @@ Includes dedicated adapters for popular Go web frameworks:
 1. **Framework-Agnostic Core (`core.Conn`):** All connections are abstracted through the `core.Conn` interface, which wraps standard `gorilla/websocket` or any custom engine.
 2. **Actor-like Shard Sharding:** Connections are dynamically distributed across multiple parallel `Shard` instances using a consistent xxHash algorithm on the `userID`. Each Shard runs its own isolated message-select loop to prevent CPU lock contention.
 3. **Asynchronous Processing:** Heavy computations and event handlers are offloaded to an asynchronous Goroutine worker pool, ensuring the connection's network reader is never blocked.
-4. **Zero-Config Standalone Fallback:** If the Redis default client is not registered or unavailable, the clustered coordination engine seamlessly runs in standalone loopback mode.
+4. **Zero-Dependency Standalone Fallback:** If you do not explicitly inject a Pub/Sub manager (e.g., Redis or NATS) via Dependency Injection, the clustered coordination engine seamlessly defaults to a local in-memory loopback mode.
 ### Architecture & Flows
 
 The library utilizes a highly parallel, sharded architecture that isolates state to prevent CPU lock contention and scales horizontally across multiple nodes via Redis Pub/Sub.
@@ -37,8 +37,8 @@ graph TD
     readPump -->|6. Envelope Payload| WorkerPool[Asynchronous Worker Pool]
     WorkerPool -->|7. Non-blocking Callback| Handler[Business Event Handler]
     
-    Shard <-->|8. Cluster Sync| PubSub[pubsub.PubSubManager]
-    PubSub <-->|Redis Pub/Sub Channels: shard:shard_x| PeerNodes[Peer Clustered Nodes]
+    Shard <-->|8. Cluster Sync| PubSub[pubsub.Manager]
+    PubSub <-->|Redis/NATS Channels: shard:shard_x| PeerNodes[Peer Clustered Nodes]
 ```
 
 #### Detailed Workflows
@@ -58,7 +58,7 @@ graph TD
 
 ##### C. Clustered Redis Pub/Sub Synchronization
 *   When a node broadcasts a message or target event globally (e.g., `Shard.BroadcastGlobal` or `Shard.BroadcastRoomMessage`), it routes the event to its local active connections and packages the payload into a `CrossNodeMessage`.
-*   The payload is published to Redis Pub/Sub via **`pubsub.PubSubManager`** over the dedicated shard channel: `shard:<shard_name>`.
+*   The payload is published to the Pub/Sub broker (Redis or NATS) via **`pubsub.Manager`** over the dedicated shard channel: `shard:<shard_name>`.
 *   Clustered peer instances subscribing to `shard:<shard_name>` receive the event, deserialize the envelope, and feed it into their local shard event loop, reaching target clients globally in sub-millisecond times.
 
 ### Usage Example
@@ -69,10 +69,16 @@ import (
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
 	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
 	wsEcho "github.com/thanhbvha/go-common/websocket/adapter/echo"
+	"github.com/thanhbvha/go-common/websocket/pubsub"
+	redispubsub "github.com/thanhbvha/go-common/websocket/pubsub/redis"
 )
 
 func main() {
-	// 1. Register Custom Event Handlers
+	// 1. (Optional) Inject a distributed Pub/Sub backend for clustered mode
+	// rdb := redis.NewClient(...) 
+	// pubsub.SetGlobalManager(redispubsub.NewManagerWithClient(rdb))
+
+	// 2. Register Custom Event Handlers
 	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
 		// Process message asynchronously in worker pool
 		conn.SendJSON(core.OutgoingMessage{
@@ -82,7 +88,7 @@ func main() {
 		return nil
 	})
 
-	// 2. Instantiate Adapters (Zero-arguments defaults fallback)
+	// 3. Instantiate Adapters (Zero-arguments defaults fallback)
 
 	// A. Fiber Adapter Setup
 	fiberHandler := wsFiber.NewHandler()
@@ -110,5 +116,6 @@ func main() {
 | `core.Connection` | Active thread-safe client session (with read/write pumps) |
 | `core.Shard` | Parallel communication channel (room & group routers) |
 | `core.Manager` | Process-wide websocket registry & sharding distributor |
-| `pubsub.PubSubManager` | Redis-backed multi-node clustered message router |
+| `pubsub.Manager` | Abstract clustered message router interface |
+| `redispubsub.Manager` / `natspubsub.Manager` | Concrete Redis or NATS PubSub backends |
 | `limiter.RateLimiter` | Generic token-bucket rate throttler |
