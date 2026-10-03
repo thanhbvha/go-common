@@ -6,6 +6,8 @@ The `telemetry` module provides a unified wrapper around OpenTelemetry (`go.open
 ## Key Features
 - **Tracing**: Track the lifecycle of a request as it moves through various components (Database, HTTP, Redis, gRPC).
 - **Metrics**: Standardized Counters, Histograms, and Gauges.
+- **Configurable Sampling**: Use `SamplingRate` to control the volume of traces (e.g., 10%) sent to the collector in production to save costs.
+- **Secure by Default**: Configurable `Insecure` flag and TLS support for OTLP.
 - `telemetry.StartSpan(ctx, name)`: Quickly start tracing a block of code.
 
 ## Covered Examples

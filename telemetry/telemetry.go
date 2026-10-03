@@ -59,7 +59,7 @@ func Init(ctx context.Context, cfg Config) (*Telemetry, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
 	if cfg.EnableTracing {
-		traceProvider, err := initTracerProvider(ctx, res, cfg.Endpoint)
+		traceProvider, err := initTracerProvider(ctx, res, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +69,7 @@ func Init(ctx context.Context, cfg Config) (*Telemetry, error) {
 	}
 
 	if cfg.EnableMetrics {
-		meterProvider, err := initMeterProvider(ctx, res, cfg.Endpoint)
+		meterProvider, err := initMeterProvider(ctx, res, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -95,18 +95,33 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func initTracerProvider(ctx context.Context, res *resource.Resource, endpoint string) (*trace.TracerProvider, error) {
-	traceExporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(), // Adjust for production if using TLS
-	)
+func initTracerProvider(ctx context.Context, res *resource.Resource, cfg Config) (*trace.TracerProvider, error) {
+	opts := []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.Insecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	traceExporter, err := otlptracegrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
 
+	samplingRate := cfg.SamplingRate
+	if samplingRate <= 0 || samplingRate >= 1.0 {
+		samplingRate = 1.0
+	}
+	var sampler trace.Sampler
+	if samplingRate == 1.0 {
+		sampler = trace.AlwaysSample()
+	} else {
+		sampler = trace.ParentBased(trace.TraceIDRatioBased(samplingRate))
+	}
+
 	bsp := trace.NewBatchSpanProcessor(traceExporter)
 	traceProvider := trace.NewTracerProvider(
-		trace.WithSampler(trace.AlwaysSample()), // For production, you might want trace.ParentBased(trace.TraceIDRatioBased(0.1))
+		trace.WithSampler(sampler),
 		trace.WithResource(res),
 		trace.WithSpanProcessor(bsp),
 	)
@@ -114,20 +129,28 @@ func initTracerProvider(ctx context.Context, res *resource.Resource, endpoint st
 	return traceProvider, nil
 }
 
-func initMeterProvider(ctx context.Context, res *resource.Resource, endpoint string) (*metric.MeterProvider, error) {
-	metricExporter, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(endpoint),
-		otlpmetricgrpc.WithInsecure(), // Adjust for production if using TLS
-	)
+func initMeterProvider(ctx context.Context, res *resource.Resource, cfg Config) (*metric.MeterProvider, error) {
+	opts := []otlpmetricgrpc.Option{
+		otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.Insecure {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+
+	metricExporter, err := otlpmetricgrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+	}
+
+	interval := cfg.ExportInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
 	}
 
 	meterProvider := metric.NewMeterProvider(
 		metric.WithResource(res),
 		metric.WithReader(metric.NewPeriodicReader(metricExporter,
-			// Default is 1m. Set to 15s for demonstration purposes.
-			metric.WithInterval(15*time.Second),
+			metric.WithInterval(interval),
 		)),
 	)
 

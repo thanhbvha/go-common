@@ -15,6 +15,7 @@ func main() {
 	RunWrappedErrorExample()
 	RunErrorCheckingExample()
 	RunErrorJoinExample()
+	RunStackTraceAndFieldsExample()
 }
 
 // =====================================================================
@@ -93,4 +94,27 @@ func logError(err error) {
 
 	// Print the full error (which includes the wrapped cause for our internal logs)
 	log.Printf("Internal System Log: %v\n", err)
+}
+
+// =====================================================================
+// 5. Stack Trace and Context Fields
+// =====================================================================
+func RunStackTraceAndFieldsExample() {
+	fmt.Println("\n--- 5. Stack Trace and Context Fields ---")
+
+	// Create an error with custom fields (e.g., user_id)
+	err := xerrors.NewWithFields("USER_BLOCKED", "The user is temporarily blocked", 403, map[string]any{
+		"user_id": 12345,
+		"reason":  "multiple failed login attempts",
+	})
+
+	logError(err)
+
+	// Extract fields
+	fields := xerrors.GetFields(err)
+	fmt.Printf("Extracted Fields: %+v\n", fields)
+
+	// Extract and print stack trace
+	stack := xerrors.StackTraceString(err)
+	fmt.Printf("Stack Trace:%s\n", stack)
 }

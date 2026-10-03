@@ -15,6 +15,7 @@ func main() {
 	fmt.Println("Uncomment one of the functions below to run a specific example.")
 
 	RunMemoryCacheExample()
+	RunJSONCacheExample()
 	// RunRedisCacheExample()
 	// RunDistributedLockExample()
 }
@@ -137,3 +138,44 @@ func RunDistributedLockExample() {
 		worker2.Release(ctx, lockKey)
 	}
 }
+
+// =====================================================================
+// 4. JSON CACHE HELPERS (Store Structs transparently)
+// =====================================================================
+type UserProfile struct {
+	ID    int      `json:"id"`
+	Name  string   `json:"name"`
+	Roles []string `json:"roles"`
+}
+
+func RunJSONCacheExample() {
+	fmt.Println("\n--- 4. Testing JSON Cache Helpers ---")
+	ctx := context.Background()
+
+	memCache, _ := cache.NewMemoryCache(100 * 1024 * 1024)
+	defer memCache.Close()
+
+	user := UserProfile{
+		ID:    1,
+		Name:  "Admin",
+		Roles: []string{"admin", "editor"},
+	}
+
+	// Store struct as JSON automatically
+	err := cache.SetJSON(ctx, memCache, "user:1", user, 5*time.Minute)
+	if err != nil {
+		log.Fatalf("SetJSON failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond) // Ristretto async wait
+
+	// Retrieve JSON into struct pointer
+	var fetched UserProfile
+	err = cache.GetJSON(ctx, memCache, "user:1", &fetched)
+	if err != nil {
+		log.Fatalf("GetJSON failed: %v", err)
+	}
+
+	fmt.Printf("JSON Cache hit: %+v\n", fetched)
+}
+

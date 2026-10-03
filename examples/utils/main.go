@@ -23,7 +23,7 @@ func main() {
 	RunCtxKeyExample()
 	RunSliceExample()
 	RunMapsExample()
-	
+
 	// Run graceful shutdown last as it blocks
 	RunGracefulExample()
 }
@@ -42,7 +42,7 @@ func RunCryptExample() {
 	fmt.Printf("Generated 32-byte Key (Hex): %x\n", secretKey)
 
 	plainText := []byte("This is a highly sensitive message.")
-	
+
 	// A. AES-256 GCM (Recommended for Symmetric Encryption)
 	fmt.Println("\n--- A. AES-256 GCM (AEAD) ---")
 	aad := []byte("optional-additional-authenticated-data")
@@ -107,9 +107,9 @@ func RunStrExample() {
 // =====================================================================
 func RunCtxKeyExample() {
 	fmt.Println("\n--- 3. Context Keys (utils/ctxkey) ---")
-	
+
 	ctx := context.Background()
-	
+
 	// Set values safely without string collision
 	ctx = ctxkey.SetUserID(ctx, "user_999")
 	ctx = ctxkey.SetRequestID(ctx, "req-abcd-1234")
@@ -171,20 +171,23 @@ func RunGracefulExample() {
 	fmt.Println("\n--- 6. Graceful Shutdown (utils/graceful) ---")
 	fmt.Println("Press Ctrl+C to trigger graceful shutdown...")
 
+	// Create a new Shutdown coordinator with a 5-second timeout
+	sd := graceful.NewShutdown(5 * time.Second)
+
 	// Register a cleanup hook (e.g. closing DB connections)
-	graceful.Register(func(ctx context.Context) error {
+	sd.Register(func(ctx context.Context) error {
 		fmt.Println("[Hook 1] Closing Database Connection...")
 		time.Sleep(500 * time.Millisecond) // Simulate work
 		return nil
 	})
 
 	// Register another hook (executed in LIFO order)
-	graceful.Register(func(ctx context.Context) error {
+	sd.Register(func(ctx context.Context) error {
 		fmt.Println("[Hook 2] Stopping HTTP Server...")
 		time.Sleep(500 * time.Millisecond) // Simulate work
 		return nil
 	})
 
-	// Wait for OS Signal (SIGINT/SIGTERM), with 5 seconds timeout
-	graceful.Wait(5 * time.Second)
+	// Wait for OS Signal (SIGINT/SIGTERM), then execute all hooks
+	sd.Wait()
 }

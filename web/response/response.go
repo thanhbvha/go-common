@@ -70,3 +70,34 @@ func Created(c *fiber.Ctx, data interface{}) error {
 		RequestID: getRequestID(c),
 	})
 }
+
+// PaginatedResponse is the standard structure for paginated list API responses.
+type PaginatedResponse[T any] struct {
+	Code       int    `json:"code"`
+	Message    string `json:"message"`
+	Data       []T    `json:"data"`
+	TotalRows  int64  `json:"total_rows"`
+	TotalPages int    `json:"total_pages"`
+	Page       int    `json:"page"`
+	Size       int    `json:"size"`
+	RequestID  string `json:"request_id,omitempty"`
+}
+
+// Paginated returns a standard paginated list response for Fiber.
+//
+// Example:
+//
+//	page, _ := repo.Paginate(ctx, orm.PageRequest{Page: 1, Size: 20})
+//	return response.Paginated(c, page.Items, page.TotalRows, page.TotalPages, page.Page, page.Size)
+func Paginated[T any](c *fiber.Ctx, items []T, totalRows int64, totalPages, page, size int) error {
+	return c.Status(fiber.StatusOK).JSON(PaginatedResponse[T]{
+		Code:       0,
+		Message:    "Success",
+		Data:       items,
+		TotalRows:  totalRows,
+		TotalPages: totalPages,
+		Page:       page,
+		Size:       size,
+		RequestID:  getRequestID(c),
+	})
+}

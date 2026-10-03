@@ -41,6 +41,7 @@ func main() {
 
 	// Uncomment the example you want to run:
 	RunSynchronousLoggerExample()
+	RunChildLoggerExample()
 	// RunAsynchronousLoggerExample()
 	// RunContextAwareLoggerExample()
 }
@@ -85,4 +86,20 @@ func RunContextAwareLoggerExample() {
 	// Use the *WithContext variants
 	logger.InfoWithContext(ctx, "Processing payment request", "amount", 500)
 	logger.ErrorWithContext(ctx, "Payment failed", "reason", "insufficient_funds")
+}
+
+// =====================================================================
+// 5. CHILD LOGGER (Pre-attached fields)
+// =====================================================================
+func RunChildLoggerExample() {
+	fmt.Println("\n--- Child Logger Logging ---")
+	// You can create a child logger that automatically includes certain fields
+	// in every log record. Useful for module-specific or request-specific loggers.
+	
+	// Create a child logger from the global default
+	workerLogger := logger.With("component", "background_worker", "worker_id", 42)
+	
+	workerLogger.Info("Worker started") // automatically includes component & worker_id
+	workerLogger.Debug("Processing item", "item_id", "A1")
+	workerLogger.Warn("Item skipped", "item_id", "A2", "reason", "invalid_format")
 }

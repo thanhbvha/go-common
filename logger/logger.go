@@ -224,6 +224,17 @@ func (l *Logger) Close() {
 	}
 }
 
+// With returns a new Logger that automatically includes the given key-value
+// pairs in every log record. The original Logger is not modified.
+func (l *Logger) With(args ...any) *Logger {
+	return &Logger{
+		sl:      l.sl.With(args...),
+		logChan: l.logChan,
+		cancel:  l.cancel,
+		closer:  l.closer,
+	}
+}
+
 // ---- Synchronous methods ----
 
 // Info logs a message at INFO level synchronously on this Logger.
@@ -379,3 +390,13 @@ func Close() {
 		l.Close()
 	}
 }
+
+// With returns a new Logger derived from the default Logger with the given
+// key-value pairs pre-attached. Falls back to a new standard logger if default is unset.
+func With(args ...any) *Logger {
+	if l := getDefault(); l != nil {
+		return l.With(args...)
+	}
+	return New(DefaultOptions()).With(args...)
+}
+

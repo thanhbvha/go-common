@@ -54,3 +54,17 @@ func EchoCreated(c echo.Context, data interface{}) error {
 		RequestID: getEchoRequestID(c),
 	})
 }
+
+// EchoPaginated returns a standard paginated list response for Echo.
+func EchoPaginated[T any](c echo.Context, items []T, totalRows int64, totalPages, page, size int) error {
+	return c.JSON(http.StatusOK, PaginatedResponse[T]{
+		Code:       0,
+		Message:    "Success",
+		Data:       items,
+		TotalRows:  totalRows,
+		TotalPages: totalPages,
+		Page:       page,
+		Size:       size,
+		RequestID:  getEchoRequestID(c),
+	})
+}

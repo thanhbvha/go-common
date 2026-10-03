@@ -32,7 +32,7 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 	err := r.coll.FindOne(ctx, bson.M{"_id": id}).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil // Return nil instead of error when not found
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (r *Repository[T]) FindOne(ctx context.Context, filter interface{}) (*T, er
 	err := r.coll.FindOne(ctx, filter).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}
@@ -110,8 +110,8 @@ func (r *Repository[T]) FindOneAndUpdate(ctx context.Context, filter interface{}
 	var result T
 	err := r.coll.FindOneAndUpdate(ctx, filter, update, opts...).Decode(&result)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, nil
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}
@@ -133,8 +133,8 @@ func (r *Repository[T]) FindOneAndDelete(ctx context.Context, filter interface{}
 	var result T
 	err := r.coll.FindOneAndDelete(ctx, filter, opts...).Decode(&result)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, nil
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}

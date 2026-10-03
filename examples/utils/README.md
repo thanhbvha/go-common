@@ -15,7 +15,7 @@ This example module contains a central `main.go` file demonstrating all sub-pack
 3. **`RunCtxKeyExample()`**: Strongly-typed context keys to prevent context value collisions (e.g., `ctxkey.UserIDKey`, `ctxkey.RequestIDKey`).
 4. **`RunSliceExample()`**: Go 1.18+ Generics for Slices. Includes `slice.Contains`, `slice.Unique`, `slice.Filter`, and `slice.Map` so you never have to write manual `for-range` loops again!
 5. **`RunMapsExample()`**: Go 1.18+ Generics for Maps. Quickly extract `maps.Keys` or `maps.Values`.
-6. **`RunGracefulExample()`**: A centralized coordinator that traps OS signals (SIGINT/SIGTERM) and triggers registered shutdown hooks in reverse order (LIFO) with a timeout.
+6. **`RunGracefulExample()`**: A struct-based coordinator (`graceful.NewShutdown`) that traps OS signals (SIGINT/SIGTERM) and triggers registered shutdown hooks in reverse order (LIFO) with a timeout.
 
 ## 🚨 Best Practices for AI/Developers
 - **Cryptography (CRITICAL)**: Always use `AES-256 GCM` (`EncryptAESGCM`) for new symmetric encryption needs. Do NOT use CBC unless maintaining legacy systems, as it is vulnerable to padding oracle attacks. For passwords, ALWAYS use `HashPasswordArgon2id`; never use MD5, SHA1, or plain bcrypt.

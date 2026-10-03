@@ -16,14 +16,21 @@ func main() {
 	ctx := context.Background()
 
 	// 1. Initialize Telemetry configuration
-	cfg := telemetry.Config{
-		ServiceName:    "demo-telemetry-service",
-		ServiceVersion: "v1.0.0",
-		Environment:    "development",
-		Endpoint:       "localhost:4317", // Default address of OpenTelemetry Collector or Jaeger/Signoz
-		EnableTracing:  true,
-		EnableMetrics:  true,
-	}
+	// We use DefaultConfig as a baseline, then override settings.
+	cfg := telemetry.DefaultConfig("demo-telemetry-service")
+	cfg.ServiceVersion = "v1.0.0"
+	cfg.Environment = "development"
+	cfg.Endpoint = "localhost:4317" // Default address of OpenTelemetry Collector or Jaeger/Signoz
+
+	// --- Advanced Configuration ---
+	// SamplingRate: 1.0 means 100% of traces are sampled. In high-traffic production, set to 0.1 (10%) or 0.01 (1%).
+	cfg.SamplingRate = 0.5 // Sample 50% of traces for demonstration
+
+	// Insecure: true disables TLS for the gRPC connection (good for local dev). Set to false for production.
+	cfg.Insecure = true
+
+	// ExportInterval: controls how often metrics are pushed to the collector.
+	cfg.ExportInterval = 10 * time.Second
 
 	// 2. Initialize module
 	tel, err := telemetry.Init(ctx, cfg)

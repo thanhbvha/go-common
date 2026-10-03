@@ -54,3 +54,17 @@ func GinCreated(c *gin.Context, data interface{}) {
 		RequestID: getGinRequestID(c),
 	})
 }
+
+// GinPaginated returns a standard paginated list response for Gin.
+func GinPaginated[T any](c *gin.Context, items []T, totalRows int64, totalPages, page, size int) {
+	c.JSON(http.StatusOK, PaginatedResponse[T]{
+		Code:       0,
+		Message:    "Success",
+		Data:       items,
+		TotalRows:  totalRows,
+		TotalPages: totalPages,
+		Page:       page,
+		Size:       size,
+		RequestID:  getGinRequestID(c),
+	})
+}

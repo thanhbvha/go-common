@@ -2,6 +2,7 @@ package orm
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -39,8 +40,8 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 	var result T
 	err := r.db.WithContext(ctx).First(&result, id).Error
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil // Return nil instead of error when not found
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}
@@ -57,8 +58,8 @@ func (r *Repository[T]) FindOne(ctx context.Context, conds ...interface{}) (*T, 
 	}
 	err := query.First(&result).Error
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
 		}
 		return nil, err
 	}
