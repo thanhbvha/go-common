@@ -28,6 +28,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
 | `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
 | `cron` | Distributed Job Scheduler with Redis-backed Leader Election |
+| `health` | Kubernetes-ready health checks (`/live`, `/ready`) with concurrent Checkers and Framework adapters |
 | `grpc` | Pre-configured gRPC server with unified Interceptors (Recovery, Logging, Auth) |
 
 ## Requirements
@@ -71,6 +72,7 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`httpclient`](./httpclient/README.md)
 - [`ratelimit`](./ratelimit/README.md)
 - [`cron`](./cron/README.md)
+- [`health`](./health/README.md)
 - [`grpc`](./grpc/README.md)
 
 ---
