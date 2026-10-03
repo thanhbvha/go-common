@@ -20,7 +20,7 @@ func UnaryServerErrorHandler() grpc.UnaryServerInterceptor {
 				// Map HTTP status to gRPC codes
 				c := httpToGRPCCode(customErr.HTTPStatus)
 				st := status.New(c, customErr.Message)
-				
+
 				return resp, st.Err()
 			}
 		}

@@ -1,8 +1,8 @@
 package health
 
 import (
-	"net/http"
 	"github.com/gofiber/fiber/v2"
+	"net/http"
 )
 
 func statusCode(r HealthResponse) int {

@@ -37,19 +37,19 @@ type ShardCoordinator interface {
 
 type Shard struct {
 	// activeConns tracks all physical WebSocket connections currently connected directly to this shard.
-	activeConns     map[*Connection]bool
+	activeConns map[*Connection]bool
 
 	// userSessions maps an authenticated User ID to their active physical connections.
 	// This structure naturally supports multi-device/multi-tab logins (1-to-many relationship).
 	//   key:   userID (e.g. "user_123")
 	//   value: map of active Connection pointers belonging to this user
-	userSessions    map[string]map[*Connection]bool
+	userSessions map[string]map[*Connection]bool
 
 	// chatRooms tracks logical pub/sub message rooms hosted within this shard.
 	//   key 1: roomID (e.g. "room_game_99")
 	//   key 2: userID (to fast-lookup users in this room)
 	//   value: connection pointer mapping
-	chatRooms       map[string]map[string]map[*Connection]bool
+	chatRooms map[string]map[string]map[*Connection]bool
 
 	broadcast       chan []byte
 	incomingMessage chan *EventMessage
@@ -59,8 +59,8 @@ type Shard struct {
 	connectionCount int64
 	ctx             context.Context
 	cancel          context.CancelFunc
-	name        string // Shard unique identifier (e.g. "shard_0", "shard_1")
-	coordinator ShardCoordinator
+	name            string // Shard unique identifier (e.g. "shard_0", "shard_1")
+	coordinator     ShardCoordinator
 }
 
 // NewShard creates a new Shard instance with the specified name and registers cross-node PubSub handlers.
@@ -75,10 +75,10 @@ func NewShard(name string, coordinator ShardCoordinator) *Shard {
 		incomingMessage: make(chan *EventMessage, incomingMessageSize),
 		register:        make(chan *Connection, registerChannelSize),
 		unregister:      make(chan *Connection, registerChannelSize),
-		ctx:         ctx,
-		cancel:      cancel,
-		name:        name,
-		coordinator: coordinator,
+		ctx:             ctx,
+		cancel:          cancel,
+		name:            name,
+		coordinator:     coordinator,
 	}
 
 	shard.setupPubSubHandlers()

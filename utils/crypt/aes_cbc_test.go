@@ -33,7 +33,7 @@ func TestAESCBC(t *testing.T) {
 func TestPKCS7(t *testing.T) {
 	blockSize := 16
 	data := []byte("test")
-	
+
 	padded := pkcs7Pad(data, blockSize)
 	if len(padded) != 16 {
 		t.Errorf("expected padded length 16, got %d", len(padded))

@@ -7,7 +7,7 @@
 // Basic usage:
 //
 //	err := orm.Init(map[string]orm.Config{
-//		"main": { Host: "localhost", DBName: "app_db", User: "postgres" },
+//		"main": { Dialector: postgres.Open("dsn"), MaxOpenConns: 100 },
 //	})
 //	db := orm.Get("main")
 package orm

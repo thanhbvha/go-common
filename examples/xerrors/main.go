@@ -23,7 +23,7 @@ func main() {
 // =====================================================================
 func RunStandardErrorExample() {
 	fmt.Println("\n--- 1. Standard Error Handling ---")
-	
+
 	// Simulate an authentication failure
 	err := xerrors.ErrUnauthorized
 
@@ -35,7 +35,7 @@ func RunStandardErrorExample() {
 // =====================================================================
 func RunWrappedErrorExample() {
 	fmt.Println("\n--- 2. Wrapped Error Handling ---")
-	
+
 	// Simulate an underlying driver error (e.g., from Postgres or Redis)
 	dbErr := goErrors.New("connection reset by peer: timeout 30s")
 
@@ -85,7 +85,7 @@ func RunErrorJoinExample() {
 func logError(err error) {
 	// Extract the HTTP status code to send to the client (e.g. 401, 500)
 	httpStatus := xerrors.HTTPStatusCode(err)
-	
+
 	// Extract the custom machine-readable code (e.g. "UNAUTHORIZED", "DB_CONNECTION_FAILED")
 	code := xerrors.GetCode(err)
 

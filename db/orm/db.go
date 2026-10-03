@@ -6,16 +6,15 @@ import (
 	"os"
 	"time"
 
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
 
-// New initializes a new GORM database connection for PostgreSQL based on the config.
+// New initializes a new GORM database connection based on the config.
 func New(cfg Config) (*gorm.DB, error) {
-	if cfg.DBName == "" {
-		return nil, errors.New("database name is required")
+	if cfg.Dialector == nil {
+		return nil, errors.New("dialector is required")
 	}
 
 	// Setup logger (uses standard logger, but configured for GORM)
@@ -35,12 +34,9 @@ func New(cfg Config) (*gorm.DB, error) {
 	)
 
 	// Open connection
-	db, err := gorm.Open(postgres.New(postgres.Config{
-		DSN:                  cfg.DSN(),
-		PreferSimpleProtocol: true, // Disables implicit prepared statement usage to avoid cached plan errors
-	}), &gorm.Config{
+	db, err := gorm.Open(cfg.Dialector, &gorm.Config{
 		Logger:                                   newLogger,
-		DisableForeignKeyConstraintWhenMigrating: true, // Often preferred in microservices
+		DisableForeignKeyConstraintWhenMigrating: true,  // Often preferred in microservices
 		PrepareStmt:                              false, // Ensure GORM doesn't cache statements either
 	})
 	if err != nil {

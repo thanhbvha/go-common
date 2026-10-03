@@ -1,15 +1,16 @@
-package auth
+package echoauth
 
 import (
 	"net/http"
 	"strings"
 
 	"github.com/labstack/echo/v4"
+	"github.com/thanhbvha/go-common/auth"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
-// EchoMiddleware creates an Echo middleware to protect routes using standard JWT.
-func EchoMiddleware(manager *Manager) echo.MiddlewareFunc {
+// Middleware creates an Echo middleware to protect routes using standard JWT.
+func Middleware(manager *auth.Manager) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			tokenString := extractTokenFromEcho(c)
@@ -33,9 +34,9 @@ func EchoMiddleware(manager *Manager) echo.MiddlewareFunc {
 	}
 }
 
-// EchoEncryptedMiddleware creates an Echo middleware to protect routes using Encrypted JWT.
+// EncryptedMiddleware creates an Echo middleware to protect routes using Encrypted JWT.
 // aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
-func EchoEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c echo.Context) []byte) echo.MiddlewareFunc {
+func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c echo.Context) []byte) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			tokenString := extractTokenFromEcho(c)

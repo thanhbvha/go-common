@@ -122,12 +122,12 @@ type Logger interface {
 // DefaultConfig returns a Config pre-populated with sensible production defaults.
 func DefaultConfig() Config {
 	return Config{
-		URLs:           []string{"nats://localhost:4222"},
-		ConnectTimeout: 5 * time.Second,
-		ReconnectWait:  2 * time.Second,
-		MaxReconnects:  60,
-		MaxConnRetries: 3,
-		DefaultStorage: MemoryStorage,
+		URLs:            []string{"nats://localhost:4222"},
+		ConnectTimeout:  5 * time.Second,
+		ReconnectWait:   2 * time.Second,
+		MaxReconnects:   60,
+		MaxConnRetries:  3,
+		DefaultStorage:  MemoryStorage,
 		DefaultReplicas: 1,
 	}
 }

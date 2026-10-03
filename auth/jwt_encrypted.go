@@ -38,7 +38,7 @@ func NewEncryptedManager(jwtSecret string, aesKey string) (*EncryptedManager, er
 	if len(keyBytes) != 32 {
 		return nil, crypt.ErrInvalidKeySize
 	}
-	
+
 	return &EncryptedManager{
 		jwtSecret: []byte(jwtSecret),
 		aesKey:    keyBytes,

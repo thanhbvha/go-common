@@ -9,7 +9,7 @@ import (
 func TestEncryptedManager(t *testing.T) {
 	jwtSecret := "my-jwt-secret-key-must-be-32bytes"
 	// AES-256 key must be exactly 32 bytes
-	aesKey := "12345678901234567890123456789012" 
+	aesKey := "12345678901234567890123456789012"
 
 	manager, err := NewEncryptedManager(jwtSecret, aesKey)
 	if err != nil {

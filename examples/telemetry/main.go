@@ -12,7 +12,7 @@ import (
 
 func main() {
 	fmt.Println("=== Telemetry Module Examples ===")
-	
+
 	ctx := context.Background()
 
 	// 1. Initialize Telemetry configuration
@@ -54,16 +54,16 @@ func main() {
 func RunTracingExample(ctx context.Context) {
 	fmt.Println("\n--- 1. Tracing Example ---")
 	fmt.Println("Processing request...")
-	
+
 	// Initialize a new Trace
 	ctx, span := telemetry.StartSpan(ctx, "HandleCheckoutAPI")
-	
+
 	// Attach tags (attributes) for easy searching on Dashboard (e.g., find all errors for user_123)
 	telemetry.SetAttributes(span, attribute.String("user.id", "user_123"), attribute.String("order.id", "ORD-8888"))
-	
+
 	// Simulate logic execution time
-	time.Sleep(150 * time.Millisecond) 
-	
+	time.Sleep(150 * time.Millisecond)
+
 	// End Trace
 	span.End()
 
@@ -76,7 +76,7 @@ func RunTracingExample(ctx context.Context) {
 // =====================================================================
 func RunMetricsExample(ctx context.Context) {
 	fmt.Println("\n--- 2. Metrics Example ---")
-	
+
 	// Initialize a Counter Metric
 	requestCounter := telemetry.MustCounter("api_requests_total", "Total API requests")
 
@@ -90,6 +90,6 @@ func RunMetricsExample(ctx context.Context) {
 		fmt.Printf("Incremented api_requests_total counter (Request %d)\n", i)
 		time.Sleep(50 * time.Millisecond)
 	}
-	
+
 	fmt.Println("Metrics recorded successfully! Check your Prometheus/Grafana dashboard.")
 }

@@ -7,7 +7,7 @@ The `db/orm` module provides a robust wrapper around GORM (PostgreSQL/SQLite) wi
 3. **Generic Repository Pattern**: Simplifies CRUD with `orm.NewRepository[T]()`.
 
 ## Key Structs & Configs
-- `orm.Config`: Contains fields like `Host`, `Port`, `DBName`, `MaxOpenConns`, `MaxIdleConns`, etc.
+- `orm.Config`: Contains fields like `Dialector`, `MaxOpenConns`, `MaxIdleConns`, etc.
 - `orm.Manager`: Thread-safe manager that holds all `gorm.DB` connection pools.
 
 ## Generic Repository Operations

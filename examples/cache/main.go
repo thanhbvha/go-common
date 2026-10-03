@@ -70,7 +70,7 @@ func RunRedisCacheExample() {
 	remoteCache := cache.NewRedisCache(redisClient.Native())
 
 	remoteCache.Set(ctx, "remote_key", "Distributed Data", 10*time.Minute)
-	
+
 	val, err := remoteCache.Get(ctx, "remote_key")
 	if err != nil {
 		fmt.Println("Error retrieving Redis Cache:", err)
@@ -178,4 +178,3 @@ func RunJSONCacheExample() {
 
 	fmt.Printf("JSON Cache hit: %+v\n", fetched)
 }
-

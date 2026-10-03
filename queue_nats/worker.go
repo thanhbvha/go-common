@@ -2,8 +2,8 @@ package queue_nats
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"time"
 
 	"github.com/thanhbvha/go-common/nats"
@@ -153,7 +153,7 @@ func (q *Queue) delayedDispatchLoop(ctx context.Context) {
 
 			// Job is due! Push to target stream
 			targetSubject := fmt.Sprintf("%s.%s", q.cfg.StreamPrefix, job.Type)
-			
+
 			// Marshal again to update any fields if necessary, or just use raw data
 			// We push the updated job so RunAt is retained if needed, though we can just push original Data.
 			jobBytes, _ := json.Marshal(job)
@@ -168,7 +168,7 @@ func (q *Queue) delayedDispatchLoop(ctx context.Context) {
 					continue
 				}
 			}
-			
+
 			// Successfully dispatched
 			msg.Ack()
 		}

@@ -1,14 +1,15 @@
-package logger
+package echolog
 
 import (
 	"time"
 
-	"github.com/labstack/echo/v4"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/thanhbvha/go-common/logger"
 )
 
-// EchoMiddleware creates a custom request logging middleware for Echo
-func EchoMiddleware() echo.MiddlewareFunc {
+// Middleware creates a custom request logging middleware for Echo
+func Middleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			path := c.Path()
@@ -37,7 +38,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 			respBody := []byte{}
 
 			// Initialize Entry
-			entry := LogEntry{
+			entry := logger.LogEntry{
 				Time:      time.Now().Format(time.RFC3339),
 				RequestID: requestID,
 				Method:    c.Request().Method,
@@ -45,18 +46,18 @@ func EchoMiddleware() echo.MiddlewareFunc {
 				Status:    c.Response().Status,
 				Latency:   duration.String(),
 				IP:        c.RealIP(),
-				ServerIP:  localServerIP,
+				ServerIP:  logger.LocalServerIP,
 				UserAgent: c.Request().UserAgent(),
-				Request:   safeStringBytes(reqBody, 1024),
-				Response:  safeStringBytes(respBody, 2048),
+				Request:   logger.SafeStringBytes(reqBody, 1024),
+				Response:  logger.SafeStringBytes(respBody, 2048),
 			}
 
 			// Log via the core logger library
 			if err != nil {
 				entry.Error = err.Error()
-				ErrorAsync("HTTP Request Failed", "entry", entry)
+				logger.ErrorAsync("HTTP Request Failed", "entry", entry)
 			} else {
-				InfoAsync("HTTP Request OK", "entry", entry)
+				logger.InfoAsync("HTTP Request OK", "entry", entry)
 			}
 
 			return err
@@ -64,8 +65,8 @@ func EchoMiddleware() echo.MiddlewareFunc {
 	}
 }
 
-// EchoRequestIDMiddleware adds a unique X-Request-ID to each request in Echo
-func EchoRequestIDMiddleware() echo.MiddlewareFunc {
+// RequestIDMiddleware adds a unique X-Request-ID to each request in Echo
+func RequestIDMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			requestID := c.Request().Header.Get("X-Request-ID")

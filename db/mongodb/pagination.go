@@ -65,7 +65,7 @@ func ExecutePagination[T any](ctx context.Context, coll *mongo.Collection, filte
 
 	// 2. Prepare FindOptions with Skip and Limit
 	opts := options.Find().SetSkip(req.GetSkip()).SetLimit(req.GetLimit())
-	
+
 	// Apply user-provided options (like Sort, Projection) if any
 	allOpts := append([]options.Lister[options.FindOptions]{opts}, findOpts...)
 

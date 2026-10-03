@@ -13,11 +13,11 @@ import (
 
 // Argon2id parameters (OWASP recommended defaults for 2023+)
 const (
-	time        = 1      // 1 iteration
-	memory      = 64 * 1024 // 64 MB
-	threads     = 4      // 4 threads
-	keyLen      = 32     // 32 bytes key length
-	saltLen     = 16     // 16 bytes salt length
+	time    = 1         // 1 iteration
+	memory  = 64 * 1024 // 64 MB
+	threads = 4         // 4 threads
+	keyLen  = 32        // 32 bytes key length
+	saltLen = 16        // 16 bytes salt length
 )
 
 var (

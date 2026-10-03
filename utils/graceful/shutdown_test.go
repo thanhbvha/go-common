@@ -31,6 +31,10 @@ func TestShutdownIsolation(t *testing.T) {
 	sd2.Register(func(ctx context.Context) error { ran2 = true; return nil })
 
 	sd1.Execute()
-	if !ran1 { t.Error("sd1 cleanup should have run") }
-	if ran2  { t.Error("sd2 cleanup should NOT have run") }
+	if !ran1 {
+		t.Error("sd1 cleanup should have run")
+	}
+	if ran2 {
+		t.Error("sd2 cleanup should NOT have run")
+	}
 }

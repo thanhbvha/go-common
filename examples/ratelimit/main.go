@@ -15,12 +15,12 @@ import (
 
 func main() {
 	fmt.Println("=== RateLimit Module Examples ===")
-	
+
 	// 1. Connect to Redis
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379", // Assuming a local Redis is running
 	})
-	
+
 	// Uncomment the example you want to run:
 	RunIPBasedRateLimitExample(rdb)
 	// RunUserIDBasedRateLimitExample(rdb)

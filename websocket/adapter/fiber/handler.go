@@ -8,9 +8,9 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/websocket/core"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/core"
 )
 
 // Config holds the configuration options for the Fiber WebSocket adapter.
@@ -128,10 +128,10 @@ func (h *Handler) HandleStats(c *fiber.Ctx) error {
 	pubsubManager := manager.GetPubSubManager()
 
 	return c.JSON(fiber.Map{
-		"manager":      manager.GetStats(),
-		"rateLimiter":  h.config.ConnectionLimiter.GetStats(),
-		"pubsub":       pubsubManager.GetStats(),
-		"timestamp":    time.Now(),
+		"manager":     manager.GetStats(),
+		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
+		"pubsub":      pubsubManager.GetStats(),
+		"timestamp":   time.Now(),
 	})
 }
 

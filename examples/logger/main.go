@@ -17,7 +17,7 @@ func main() {
 	// ==========================================
 	// The logger module provides a high-performance, asynchronous logger.
 	// You should initialize it once and set it as the global default.
-	
+
 	opts := logger.DefaultOptions()
 	opts.Level = -4 // DEBUG level (slog.LevelDebug is -4)
 	opts.StdOut = true
@@ -32,7 +32,7 @@ func main() {
 	// }
 
 	l := logger.New(opts)
-	
+
 	// Set it as the process-wide default so you can use logger.Info() anywhere
 	logger.SetDefault(l)
 
@@ -64,7 +64,7 @@ func RunAsynchronousLoggerExample() {
 	// Async logging pushes the log to a buffered channel and returns immediately.
 	// It is highly recommended for API handlers to avoid I/O bottlenecks.
 	logger.InfoAsync("This is an async INFO log", "module", "main", "action", "async_test")
-	
+
 	err := errors.New("simulated db timeout")
 	logger.ErrorAsync("Database query failed", "error", err, "query_id", "Q-1234")
 
@@ -79,7 +79,7 @@ func RunContextAwareLoggerExample() {
 	fmt.Println("\n--- Context-Aware Logging ---")
 	// If your context contains a RequestID (usually injected by a middleware),
 	// the logger can automatically extract and append it to the log fields.
-	
+
 	// Simulate a context with a request ID
 	ctx := context.WithValue(context.Background(), logger.ContextKeyRequestID, "REQ-9999")
 
@@ -95,10 +95,10 @@ func RunChildLoggerExample() {
 	fmt.Println("\n--- Child Logger Logging ---")
 	// You can create a child logger that automatically includes certain fields
 	// in every log record. Useful for module-specific or request-specific loggers.
-	
+
 	// Create a child logger from the global default
 	workerLogger := logger.With("component", "background_worker", "worker_id", 42)
-	
+
 	workerLogger.Info("Worker started") // automatically includes component & worker_id
 	workerLogger.Debug("Processing item", "item_id", "A1")
 	workerLogger.Warn("Item skipped", "item_id", "A2", "reason", "invalid_format")

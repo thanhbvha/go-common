@@ -83,7 +83,7 @@ func TestPaginationWithFilters(t *testing.T) {
 
 	// Filter age > 25 (Alice(30), Charlie(35), Diana(28) -> 3 items)
 	req := orm.PageRequest{Page: 1, Size: 10, Sorts: []string{"age desc"}}
-	
+
 	repo := orm.NewRepository[User](gormDB)
 	resp, err := repo.Paginate(context.Background(), req, "age > ?", 25)
 	if err != nil {

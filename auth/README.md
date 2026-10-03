@@ -11,11 +11,12 @@ This module is designed to prevent Token Theft by implementing **Dynamic AAD (Ad
 1. **Standard JWT (`auth.Manager`)**: Standard HS256 signing via `golang-jwt`.
 2. **Encrypted JWT (`auth.EncryptedManager`)**: Encrypts the entire JWT payload using `AES-256 GCM` before signing it. The payload is completely hidden from attackers and cannot be decoded on sites like `jwt.io`.
 3. **Dynamic AAD / Token Binding**: Protect against XSS and Token Theft by binding the encrypted token to a `Session ID` (stored in an `HttpOnly` Cookie) or a `Device ID` (Custom Header).
-4. **High Performance**: Uses `github.com/goccy/go-json` for ultra-fast JSON serialization/deserialization.
-5. **Framework-Agnostic Middlewares**:
-   - `auth.FiberMiddleware` / `auth.FiberEncryptedMiddleware`
-   - `auth.GinMiddleware` / `auth.GinEncryptedMiddleware`
-   - `auth.EchoMiddleware` / `auth.EchoEncryptedMiddleware`
+4. **Generic JWT & Session Control**: Use `GenericManager[T]` for custom payload structures, Refresh Token generation, and Redis-backed token revocation (Blacklisting).
+5. **High Performance**: Uses `github.com/goccy/go-json` for ultra-fast JSON serialization/deserialization.
+6. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
+   - `github.com/thanhbvha/go-common/auth/middleware/fiber` (`fiberauth.Middleware()`)
+   - `github.com/thanhbvha/go-common/auth/middleware/gin` (`ginauth.Middleware()`)
+   - `github.com/thanhbvha/go-common/auth/middleware/echo` (`echoauth.Middleware()`)
 6. **Context Injection**: Automatically extracts the token, verifies/decrypts it, and injects the `UserInfo` struct into the framework's context.
 
 ---
@@ -59,7 +60,44 @@ token, err := manager.GenerateToken(user, 24*time.Hour, nil)
 userInfo, err := manager.ValidateToken(token, nil)
 ```
 
-### 3. Extreme Security: Encrypted JWT + Dynamic AAD (Token Binding)
+### 3. Generic JWT, Refresh Tokens & Revocation (Redis)
+If you need to store custom claims (beyond standard `UserInfo`), manage user sessions (Refresh Tokens), or implement logout capabilities (Token Blacklist), use the `GenericManager[T]`.
+
+```go
+import "github.com/golang-jwt/jwt/v5"
+
+// Define custom claims
+type CustomClaims struct {
+	TenantID string `json:"tenant_id"`
+	jwt.RegisteredClaims
+}
+
+// Initialize GenericManager with Redis
+redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+manager, _ := auth.NewGenericManager[*CustomClaims](auth.GenericOptions{
+	SecretKey: "my-jwt-secret-key-must-be-32-bytes",
+	Redis:     redisClient,
+})
+
+// Generate Token
+claims := &CustomClaims{
+	TenantID: "tenant_1",
+	RegisteredClaims: jwt.RegisteredClaims{
+		ID:        "unique-token-id-jti", // Important for Revocation
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
+	},
+}
+token, _ := manager.GenerateToken(claims)
+
+// Revoke a Token (Logout)
+manager.RevokeToken(context.Background(), "unique-token-id-jti", 15*time.Minute)
+
+// Generate & Verify Refresh Tokens
+rt, _ := manager.GenerateRefreshToken(context.Background(), "user_1", 7*24*time.Hour)
+isValid, _ := manager.VerifyRefreshToken(context.Background(), "user_1", rt)
+```
+
+### 4. Extreme Security: Encrypted JWT + Dynamic AAD (Token Binding)
 Use this pattern for highly sensitive applications (e.g., Finance, Wallets). 
 It binds the JWT to a specific browser session using a randomly generated `Session ID` stored in a secure `HttpOnly` Cookie.
 
@@ -116,7 +154,7 @@ func main() {
 	}
 
 	// Apply Middleware
-	api.Use(auth.FiberEncryptedMiddleware(manager, aadExtractor))
+	api.Use(fiberauth.EncryptedMiddleware(manager, aadExtractor))
 
 	// API Handler
 	api.Get("/profile", func(c *fiber.Ctx) error {

@@ -1,4 +1,4 @@
-package middleware
+package echomw
 
 import (
 	"net/http"
@@ -7,8 +7,8 @@ import (
 	"github.com/thanhbvha/go-common/xerrors"
 )
 
-// EchoErrorHandler is a custom global error handler for Echo
-func EchoErrorHandler(err error, c echo.Context) {
+// ErrorHandler is a custom global error handler for Echo
+func ErrorHandler(err error, c echo.Context) {
 	if c.Response().Committed {
 		return
 	}

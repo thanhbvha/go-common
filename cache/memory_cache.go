@@ -17,10 +17,10 @@ type MemoryCache struct {
 // Note: It is highly concurrent and uses TinyLFU for optimal cache admission.
 func NewMemoryCache(maxCostBytes int64) (*MemoryCache, error) {
 	cache, err := ristretto.NewCache(&ristretto.Config{
-		NumCounters: 1e7,     // number of keys to track frequency of (10M).
+		NumCounters: 1e7, // number of keys to track frequency of (10M).
 		MaxCost:     maxCostBytes,
-		BufferItems: 64,      // number of keys per Get buffer.
-		Metrics:     false,   // set to true for profiling (has performance overhead).
+		BufferItems: 64,    // number of keys per Get buffer.
+		Metrics:     false, // set to true for profiling (has performance overhead).
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to init ristretto cache: %w", err)
@@ -46,7 +46,7 @@ func (m *MemoryCache) Get(ctx context.Context, key string) (string, error) {
 	return strVal, nil
 }
 
-// Set stores a string value in the cache. 
+// Set stores a string value in the cache.
 // Ristretto requires a 'cost' for each item. We use the length of the string as the cost.
 func (m *MemoryCache) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
 	cost := int64(len(value))

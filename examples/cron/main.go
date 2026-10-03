@@ -26,7 +26,7 @@ func main() {
 // =====================================================================
 func RunStandardCronExample() {
 	fmt.Println("\n--- 1. Testing Standard Local Cron ---")
-	
+
 	// Initialize Scheduler
 	scheduler := cron.NewScheduler()
 
@@ -64,12 +64,12 @@ func RunDistributedCronExample() {
 
 	// 4. Define a Distributed Job
 	jobCfg := cron.DistributedConfig{
-		JobName:  "daily_report_generator",
+		JobName: "daily_report_generator",
 		// Schedule: Run every 10 seconds for demonstration purposes
-		Schedule: "*/10 * * * * *", 
+		Schedule: "*/10 * * * * *",
 		// CRITICAL: LockTTL must ALWAYS be slightly less than the cron interval to ensure
 		// the lock expires just in time for the next tick, avoiding skipped executions.
-		LockTTL:  9 * time.Second,
+		LockTTL: 9 * time.Second,
 		RunFunc: func(ctx context.Context) {
 			fmt.Println("--------------------------------------------------")
 			fmt.Printf("[%s] 🚀 RUNNING HEAVY JOB: Generating Report...\n", time.Now().Format("15:04:05"))
@@ -88,7 +88,7 @@ func RunDistributedCronExample() {
 	fmt.Println("Distributed Scheduler is running. Press Ctrl+C to stop.")
 	fmt.Println("Try running multiple instances of this program simultaneously!")
 	fmt.Println("You will see that only ONE instance executes the job every 10 seconds.")
-	
+
 	waitForInterrupt(scheduler)
 }
 

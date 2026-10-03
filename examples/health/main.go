@@ -14,7 +14,7 @@ import (
 
 func main() {
 	fmt.Println("=== Health Module Example ===")
-	
+
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -30,11 +30,11 @@ func main() {
 	// In production, you would use the built-in GORMChecker and pass your *gorm.DB instance:
 	//   db, _ := gorm.Open(...)
 	//   h.AddReadinessCheck("postgresql", health.GORMChecker(db))
-	// 
+	//
 	// Here we simulate the result:
 	h.AddReadinessCheck("postgresql", health.CustomChecker(func(ctx context.Context) error {
 		time.Sleep(100 * time.Millisecond) // Simulate DB latency
-		return nil // OK
+		return nil                         // OK
 	}))
 
 	// =====================================================================
@@ -102,9 +102,9 @@ func runRequest(method, url string) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	fmt.Printf("Status: %d %s\n", resp.StatusCode, resp.Status)
-	
+
 	// Print JSON body
 	var body = make([]byte, 1024)
 	n, _ := resp.Body.Read(body)

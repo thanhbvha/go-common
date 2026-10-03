@@ -1,14 +1,15 @@
-package logger
+package ginlog
 
 import (
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/thanhbvha/go-common/logger"
 )
 
-// GinMiddleware creates a custom request logging middleware for Gin
-func GinMiddleware() gin.HandlerFunc {
+// Middleware creates a custom request logging middleware for Gin
+func Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 		// Skip logging for unnecessary paths
@@ -39,7 +40,7 @@ func GinMiddleware() gin.HandlerFunc {
 		respBody := []byte{}
 
 		// Initialize Entry
-		entry := LogEntry{
+		entry := logger.LogEntry{
 			Time:      time.Now().Format(time.RFC3339),
 			RequestID: requestID,
 			Method:    c.Request.Method,
@@ -47,24 +48,24 @@ func GinMiddleware() gin.HandlerFunc {
 			Status:    c.Writer.Status(),
 			Latency:   duration.String(),
 			IP:        c.ClientIP(),
-			ServerIP:  localServerIP,
+			ServerIP:  logger.LocalServerIP,
 			UserAgent: c.Request.UserAgent(),
-			Request:   safeStringBytes(reqBody, 1024),
-			Response:  safeStringBytes(respBody, 2048),
+			Request:   logger.SafeStringBytes(reqBody, 1024),
+			Response:  logger.SafeStringBytes(respBody, 2048),
 		}
 
 		// Log via the core logger library
 		if len(c.Errors) > 0 {
 			entry.Error = c.Errors.String()
-			ErrorAsync("HTTP Request Failed", "entry", entry)
+			logger.ErrorAsync("HTTP Request Failed", "entry", entry)
 		} else {
-			InfoAsync("HTTP Request OK", "entry", entry)
+			logger.InfoAsync("HTTP Request OK", "entry", entry)
 		}
 	}
 }
 
-// GinRequestIDMiddleware adds a unique X-Request-ID to each request in Gin
-func GinRequestIDMiddleware() gin.HandlerFunc {
+// RequestIDMiddleware adds a unique X-Request-ID to each request in Gin
+func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := c.GetHeader("X-Request-ID")
 		if requestID == "" {

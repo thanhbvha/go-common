@@ -25,10 +25,10 @@ type Patient struct {
 // ---------------------------------------------------------
 func main() {
 	fmt.Println("=== MongoDB Module Examples ===")
-	
+
 	ctx := context.Background()
 	setupMongoDB(ctx)
-	
+
 	// CRITICAL: Always DisconnectAll after usage to flush background connections
 	defer mongodb.DisconnectAll(ctx)
 
@@ -42,7 +42,7 @@ func main() {
 // =====================================================================
 func RunMongoPaginationExample(ctx context.Context) {
 	fmt.Println("\n--- 1. Fetching WAITING Patients (Page 1, Size 2) ---")
-	
+
 	// Get the default DB and create a Generic Repository for 'Patient'
 	patientRepo := mongodb.NewRepository[Patient](mongodb.Get(), "patients")
 
@@ -61,11 +61,11 @@ func RunMongoPaginationExample(ctx context.Context) {
 	fmt.Printf("Total Records: %d\n", resp.TotalRows)
 	fmt.Printf("Total Pages: %d\n", resp.TotalPages)
 	fmt.Printf("Current Page: %d\n", resp.Page)
-	
+
 	for i, p := range resp.Items {
 		fmt.Printf("  %d. %s (Age: %d)\n", i+1, p.FullName, p.Age)
 	}
-	
+
 	// Check Existence
 	exists, _ := patientRepo.Exists(ctx, filter)
 	fmt.Printf("Does WAITING patient exist? %v\n", exists)

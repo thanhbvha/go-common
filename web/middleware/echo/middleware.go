@@ -1,4 +1,4 @@
-package middleware
+package echomw
 
 import (
 	"github.com/labstack/echo/v4"
@@ -7,13 +7,13 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// EchoRecover enables Echo's built-in Recovery middleware to prevent crashes on panics
-func EchoRecover() echo.MiddlewareFunc {
+// Recover enables Echo's built-in Recovery middleware to prevent crashes on panics
+func Recover() echo.MiddlewareFunc {
 	return middleware.Recover()
 }
 
-// EchoTelemetry creates an OpenTelemetry span for every incoming HTTP request in Echo.
-func EchoTelemetry(operationName string) echo.MiddlewareFunc {
+// Telemetry creates an OpenTelemetry span for every incoming HTTP request in Echo.
+func Telemetry(operationName string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			ctx := c.Request().Context()

@@ -1,14 +1,15 @@
-package logger
+package fiberlog
 
 import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/thanhbvha/go-common/logger"
 )
 
-// FiberMiddleware creates a custom request logging middleware for Fiber
-func FiberMiddleware() fiber.Handler {
+// Middleware creates a custom request logging middleware for Fiber
+func Middleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		path := c.Path()
 		// Skip logging for unnecessary paths
@@ -38,7 +39,7 @@ func FiberMiddleware() fiber.Handler {
 		respBody := []byte{}
 
 		// Initialize Entry
-		entry := LogEntry{
+		entry := logger.LogEntry{
 			Time:      time.Now().Format(time.RFC3339),
 			RequestID: requestID,
 			Method:    c.Method(),
@@ -46,26 +47,26 @@ func FiberMiddleware() fiber.Handler {
 			Status:    c.Response().StatusCode(),
 			Latency:   duration.String(),
 			IP:        c.IP(),
-			ServerIP:  localServerIP,
+			ServerIP:  logger.LocalServerIP,
 			UserAgent: c.Get(fiber.HeaderUserAgent),
-			Request:   safeStringBytes(reqBody, 1024),  // Take only the first 1KB
-			Response:  safeStringBytes(respBody, 2048), // Take only the first 2KB
+			Request:   logger.SafeStringBytes(reqBody, 1024),  // Take only the first 1KB
+			Response:  logger.SafeStringBytes(respBody, 2048), // Take only the first 2KB
 		}
 
 		// Log via the core logger library
 		if err != nil {
 			entry.Error = err.Error()
-			ErrorAsync("HTTP Request Failed", "entry", entry)
+			logger.ErrorAsync("HTTP Request Failed", "entry", entry)
 		} else {
-			InfoAsync("HTTP Request OK", "entry", entry)
+			logger.InfoAsync("HTTP Request OK", "entry", entry)
 		}
 
 		return err
 	}
 }
 
-// FiberRequestIDMiddleware adds a unique X-Request-ID to each request in Fiber
-func FiberRequestIDMiddleware() fiber.Handler {
+// RequestIDMiddleware adds a unique X-Request-ID to each request in Fiber
+func RequestIDMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Get request id from header if exists
 		requestID := c.Get("X-Request-ID")

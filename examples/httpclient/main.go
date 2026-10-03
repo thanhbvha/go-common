@@ -88,10 +88,10 @@ func RunCircuitBreakerExample() {
 
 	// Configure the HTTP Client
 	cfg := httpclient.DefaultConfig(ts.URL)
-	
+
 	// Disable Retry to purely demonstrate the Circuit Breaker
-	cfg.Retry.Enabled = false 
-	
+	cfg.Retry.Enabled = false
+
 	// Configure Circuit Breaker
 	cfg.CircuitBreaker.ReadyToTripMinRequests = 3 // Check rules after 3 requests
 	cfg.CircuitBreaker.ReadyToTripFailRatio = 0.5 // Trip if >= 50% failed

@@ -5,9 +5,9 @@ package main
 
 import (
 	"bufio"
-	"github.com/goccy/go-json"
 	"flag"
 	"fmt"
+	"github.com/goccy/go-json"
 	"io"
 	"math/rand"
 	"net/http"

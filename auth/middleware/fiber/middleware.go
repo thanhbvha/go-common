@@ -1,24 +1,25 @@
-package auth
+package fiberauth
 
 import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/thanhbvha/go-common/auth"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
 )
 
-// FiberMiddleware creates a Fiber middleware to protect routes using standard JWT.
-func FiberMiddleware(manager *Manager) fiber.Handler {
+// Middleware creates a Fiber middleware to protect routes using standard JWT.
+func Middleware(manager *auth.Manager) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenString := extractTokenFromFiber(c)
 		if tokenString == "" {
-			return response.Error(c, fiber.StatusUnauthorized, "Missing or invalid Authorization header")
+			return fiberresp.Error(c, fiber.StatusUnauthorized, "Missing or invalid Authorization header")
 		}
 
 		userInfo, err := manager.ExtractUserInfo(tokenString)
 		if err != nil {
-			return response.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
+			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
 		}
 
 		// Store UserInfo in Fiber's context for downstream handlers
@@ -29,13 +30,13 @@ func FiberMiddleware(manager *Manager) fiber.Handler {
 	}
 }
 
-// FiberEncryptedMiddleware creates a Fiber middleware to protect routes using Encrypted JWT.
+// EncryptedMiddleware creates a Fiber middleware to protect routes using Encrypted JWT.
 // aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
-func FiberEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c *fiber.Ctx) []byte) fiber.Handler {
+func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *fiber.Ctx) []byte) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenString := extractTokenFromFiber(c)
 		if tokenString == "" {
-			return response.Error(c, fiber.StatusUnauthorized, "Missing or invalid Authorization header")
+			return fiberresp.Error(c, fiber.StatusUnauthorized, "Missing or invalid Authorization header")
 		}
 
 		var aad []byte
@@ -45,7 +46,7 @@ func FiberEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c *fi
 
 		userInfo, err := manager.ValidateToken(tokenString, aad)
 		if err != nil {
-			return response.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
+			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
 		}
 
 		c.Locals(string(ctxkey.UserInfo), userInfo)

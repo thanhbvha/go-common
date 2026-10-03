@@ -3,8 +3,8 @@ package crypt
 import (
 	"crypto/rand"
 	"errors"
-	"io"
 	"golang.org/x/crypto/chacha20poly1305"
+	"io"
 )
 
 // EncryptChaCha20 encrypts the plaintext using ChaCha20-Poly1305.
@@ -50,7 +50,7 @@ func DecryptChaCha20(key, ciphertext, additionalData []byte) ([]byte, error) {
 	}
 
 	nonce, encryptedMessage := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	
+
 	plaintext, err := aead.Open(nil, nonce, encryptedMessage, additionalData)
 	if err != nil {
 		return nil, errors.New("crypt: chacha20poly1305 decryption failed")

@@ -31,16 +31,16 @@ func RunSingleNodeExample() {
 	cfg.Port = 6379
 	cfg.Password = "" // Set if required
 	cfg.DB = 0
-	
+
 	// MaxConnRetries ensures we don't panic immediately if Redis is booting
 	cfg.MaxConnRetries = 3
 
 	fmt.Println("Connecting to Redis (Ensure it is running locally on port 6379)...")
-	
+
 	// MustConnect will panic if the connection fails completely.
 	// For graceful handling, use redis.New(cfg) followed by Connect(ctx).
 	rdb := redis.MustConnect(ctx, cfg)
-	
+
 	// Set the global default so other packages can use redis.Default()
 	redis.SetDefault(rdb)
 
@@ -51,7 +51,7 @@ func RunSingleNodeExample() {
 	// ── BASIC USAGE (Native Client) ──
 	// The wrapper provides a Native() method to access the underlying go-redis client.
 	client := rdb.Native()
-	
+
 	err := client.Set(ctx, "example_key", "Hello from Single Node", 10*time.Minute).Err()
 	if err != nil {
 		fmt.Printf("❌ Failed to set key: %v\n", err)
@@ -76,7 +76,7 @@ func RunClusterModeExample() {
 
 	cfg := redis.DefaultConfig()
 	cfg.Mode = redis.ModeCluster
-	
+
 	// Provide the seed nodes for the cluster
 	cfg.ClusterAddrs = []string{
 		"localhost:7000",
@@ -86,7 +86,7 @@ func RunClusterModeExample() {
 	cfg.Password = "my-cluster-password"
 
 	fmt.Println("Connecting to Redis Cluster (Will timeout if not running locally)...")
-	
+
 	// Use New() + Connect() to handle connection errors gracefully
 	rdb := redis.New(cfg)
 	if err := rdb.Connect(ctx); err != nil {
@@ -94,9 +94,9 @@ func RunClusterModeExample() {
 		return
 	}
 	defer rdb.Close()
-	
+
 	fmt.Println("✅ Connected to Cluster successfully!")
-	
+
 	client := rdb.Native()
 	_ = client.Set(ctx, "cluster_key", "Hello from Cluster", 0).Err()
 }
@@ -110,7 +110,7 @@ func RunSentinelModeExample() {
 
 	cfg := redis.DefaultConfig()
 	cfg.Mode = redis.ModeSentinel
-	
+
 	// Configure Sentinel endpoints and Master name
 	cfg.MasterName = "mymaster"
 	cfg.SentinelAddrs = []string{
@@ -122,16 +122,16 @@ func RunSentinelModeExample() {
 	cfg.DB = 0 // Sentinels support multiple logical DBs
 
 	fmt.Println("Connecting to Redis Sentinel (Will timeout if not running locally)...")
-	
+
 	rdb := redis.New(cfg)
 	if err := rdb.Connect(ctx); err != nil {
 		fmt.Printf("❌ Sentinel connection failed (expected if no local sentinels): %v\n", err)
 		return
 	}
 	defer rdb.Close()
-	
+
 	fmt.Println("✅ Connected to Sentinel Master successfully!")
-	
+
 	client := rdb.Native()
 	_ = client.Set(ctx, "sentinel_key", "Hello from Sentinel Master", 0).Err()
 }

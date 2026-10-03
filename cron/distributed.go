@@ -30,7 +30,7 @@ func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.Re
 
 	wrapper := func() {
 		ctx := context.Background()
-		
+
 		// Attempt to acquire the lock. If false, another node is already running this job.
 		acquired, err := redisLock.Acquire(ctx, lockKey, cfg.LockTTL)
 		if err != nil {

@@ -204,7 +204,7 @@ func waitForShutdown(shutdownHttp func()) {
 	<-sigChan
 
 	logger.InfoAsync("Initiating graceful shutdown sequence...")
-	
+
 	// 1. Shutdown HTTP Server
 	shutdownHttp()
 
@@ -212,7 +212,7 @@ func waitForShutdown(shutdownHttp func()) {
 	// This cascades the shutdown signal to all Shards to disconnect clients cleanly.
 	core.GetGlobalManager().Shutdown()
 	logger.InfoAsync("Service shutdown completed gracefully.")
-	
+
 	// Close resources
 	logger.Close()
 	redis.Close()

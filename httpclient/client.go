@@ -64,20 +64,20 @@ func (c *Client) Execute(ctx context.Context, fn func(req *resty.Request) (*rest
 	// Since gobreaker works with generic types, we execute it and return dummy bytes,
 	// capturing the actual response in a closure variable.
 	var finalResp *resty.Response
-	
+
 	_, err := c.cb.Execute(func() ([]byte, error) {
 		resp, reqErr := fn(req)
 		finalResp = resp
-		
+
 		// Determine if the circuit breaker should count this as a failure.
 		if reqErr != nil {
 			return nil, reqErr
 		}
-		
+
 		if resp != nil && resp.StatusCode() >= 500 {
 			return nil, fmt.Errorf("server error: status code %d", resp.StatusCode())
 		}
-		
+
 		return nil, nil // Success
 	})
 

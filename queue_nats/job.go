@@ -2,8 +2,8 @@ package queue_nats
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"time"
 
 	"github.com/google/uuid"
@@ -132,7 +132,7 @@ func (q *Queue) pushToStream(ctx context.Context, job *Job) error {
 	}
 
 	subject := fmt.Sprintf("%s.%s", q.cfg.StreamPrefix, job.Type)
-	
+
 	if _, err := q.nats.JSPublish(ctx, subject, jobBytes); err != nil {
 		// Fallback to default stream subject if specific type fails or is undefined
 		defaultSubject := fmt.Sprintf("%s.default", q.cfg.StreamPrefix)

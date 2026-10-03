@@ -14,10 +14,10 @@ type Key string
 const (
 	// UserIDKey is the context key for the user ID
 	UserIDKey Key = "user_id"
-	
+
 	// ClientIPKey is the context key for the client IP address
 	ClientIPKey Key = "client_ip"
-	
+
 	// RequestIDKey is the context key for the unique request ID
 	RequestIDKey Key = "request_id"
 

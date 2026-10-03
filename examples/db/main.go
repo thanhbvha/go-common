@@ -2,14 +2,21 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"log"
 
 	"github.com/glebarez/sqlite"
+	"github.com/thanhbvha/go-common/db/migration"
 	"github.com/thanhbvha/go-common/db/orm"
 	"github.com/thanhbvha/go-common/telemetry"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
+
+//go:embed sql/*.sql
+var migrationFS embed.FS
 
 // ---------------------------------------------------------
 // Models
@@ -47,9 +54,10 @@ func main() {
 	dbConn := setupDatabaseAndSeed()
 
 	// Uncomment the example you want to run:
-	
+
 	RunMultiDatabaseConfigExample()
 	RunPaginationExample(dbConn)
+	RunMigrationExample(dbConn)
 	// RunAggregateAndRawQueryExample(dbConn)
 	// RunTransactionExample(dbConn)
 	// RunComplexJoinExample(dbConn)
@@ -60,32 +68,30 @@ func main() {
 // =====================================================================
 func RunMultiDatabaseConfigExample() {
 	fmt.Println("\n--- 0. Multi-Database Configuration Example ---")
-	
+
 	// Create configuration for two separate PostgreSQL databases
 	configs := map[string]orm.Config{
 		"primary_db": {
-			Host:            "localhost",
-			Port:            5432,
-			User:            "postgres",
-			Password:        "password",
-			DBName:          "app_main",
+			Dialector: postgres.New(postgres.Config{
+				DSN:                  "host=localhost user=postgres password=password dbname=app_main port=5432 sslmode=disable TimeZone=Asia/Ho_Chi_Minh",
+				PreferSimpleProtocol: true,
+			}),
 			MaxOpenConns:    100,
 			MaxIdleConns:    10,
 			EnableTelemetry: true,
 		},
 		"analytics_db": {
-			Host:            "localhost",
-			Port:            5432,
-			User:            "postgres",
-			Password:        "password",
-			DBName:          "app_analytics",
+			Dialector: postgres.New(postgres.Config{
+				DSN:                  "host=localhost user=postgres password=password dbname=app_analytics port=5432 sslmode=disable TimeZone=Asia/Ho_Chi_Minh",
+				PreferSimpleProtocol: true,
+			}),
 			MaxOpenConns:    50,
 			MaxIdleConns:    5,
 			EnableTelemetry: false,
 		},
 	}
 
-	// Initialize the global ORM Manager. 
+	// Initialize the global ORM Manager.
 	// The second parameter specifies the default database.
 	// NOTE: In a real environment without these DBs running, this will return an error.
 	err := orm.Init(configs, "primary_db")
@@ -194,11 +200,11 @@ func RunTransactionExample(dbConn *gorm.DB) {
 			fmt.Println("  [Error] Insert failed, rolling back...")
 			return err
 		}
-		
+
 		fmt.Println("  [Success] Inserted Tx Patient within transaction.")
 		return nil // Returning nil will automatically Commit
 	})
-	
+
 	if err != nil {
 		panic(err)
 	}
@@ -234,6 +240,52 @@ func RunComplexJoinExample(dbConn *gorm.DB) {
 	for _, vd := range visitDetails {
 		fmt.Printf("  Patient: %-15s | Diagnosis: %-20s | Doctor: %-15s | Dept: %s\n", vd.PatientName, vd.Diagnosis, vd.DoctorName, vd.DepartmentName)
 	}
+}
+
+// =====================================================================
+// 5. Database Migration Example (Using goose wrapper)
+// =====================================================================
+func RunMigrationExample(dbConn *gorm.DB) {
+	fmt.Println("\n--- 5. Database Migration: Running Up and Down ---")
+
+	// Extract the underlying *sql.DB from GORM
+	sqlDB, err := dbConn.DB()
+	if err != nil {
+		log.Fatalf("Failed to get raw SQL DB: %v", err)
+	}
+
+	// Initialize the migration manager using embedded filesystem
+	migrator, err := migration.New(migration.Options{
+		DB:      sqlDB,
+		Dialect: "sqlite3", // Using sqlite3 for this example
+		Dir:     "sql",     // Directory inside the embed.FS
+		FS:      migrationFS,
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize migration manager: %v", err)
+	}
+
+	// Print Status
+	fmt.Println(">> Current Status before migration:")
+	_ = migrator.Status()
+
+	// Apply migrations (Up)
+	fmt.Println("\n>> Applying Migrations (Up)...")
+	if err := migrator.Up(); err != nil {
+		log.Fatalf("Migration Up failed: %v", err)
+	}
+
+	fmt.Println("\n>> Current Status after Up:")
+	_ = migrator.Status()
+
+	// Rollback migrations (Down)
+	fmt.Println("\n>> Rolling back Migrations (Down)...")
+	if err := migrator.Down(); err != nil {
+		log.Fatalf("Migration Down failed: %v", err)
+	}
+
+	fmt.Println("\n>> Current Status after Down:")
+	_ = migrator.Status()
 }
 
 // ---------------------------------------------------------

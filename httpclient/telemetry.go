@@ -14,7 +14,7 @@ func telemetryOnBeforeRequest(c *resty.Client, req *resty.Request) error {
 	// Start a span for this outgoing HTTP request using our centralized telemetry module
 	spanName := "HTTP " + req.Method
 	ctx, _ = telemetry.StartClientSpan(ctx, spanName)
-	
+
 	// Inject trace context into headers so the downstream service can continue the trace
 	telemetry.InjectHTTPHeaders(ctx, req.Header)
 
@@ -31,7 +31,7 @@ func telemetryOnAfterResponse(c *resty.Client, resp *resty.Response) error {
 	defer span.End()
 
 	// Record HTTP attributes using our centralized module
-	telemetry.SetAttributes(span, 
+	telemetry.SetAttributes(span,
 		attribute.String("http.method", resp.Request.Method),
 		attribute.String("http.url", resp.Request.URL),
 		attribute.Int("http.status_code", resp.StatusCode()),

@@ -20,11 +20,11 @@ type LogEntry struct {
 	RequestID string      `json:"request_id,omitempty"`
 }
 
-// localServerIP caches the LAN IP so we don't query network interfaces on every request
-var localServerIP = getServerIP()
+// LocalServerIP caches the LAN IP so we don't query network interfaces on every request
+var LocalServerIP = getServerIP()
 
-// safeStringBytes truncates byte slice if it's too long to prevent log bloat and memory leaks
-func safeStringBytes(b []byte, maxLen int) string {
+// SafeStringBytes truncates byte slice if it's too long to prevent log bloat and memory leaks
+func SafeStringBytes(b []byte, maxLen int) string {
 	if len(b) == 0 {
 		return ""
 	}

@@ -103,17 +103,17 @@ func (l *DataLoader[K, V]) Load(ctx context.Context, key K) (V, error) {
 func (l *DataLoader[K, V]) LoadAll(ctx context.Context, keys []K) ([]V, []error) {
 	results := make([]V, len(keys))
 	errors := make([]error, len(keys))
-	
+
 	var wg sync.WaitGroup
 	wg.Add(len(keys))
-	
+
 	for i, key := range keys {
 		go func(i int, key K) {
 			defer wg.Done()
 			results[i], errors[i] = l.Load(ctx, key)
 		}(i, key)
 	}
-	
+
 	wg.Wait()
 	return results, errors
 }

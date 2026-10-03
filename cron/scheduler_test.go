@@ -60,7 +60,7 @@ func TestDistributedJob_SingleExecution(t *testing.T) {
 		defer wg.Done()
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		
+
 		for i := 0; i < 25; i++ { // 25 * 100ms = 2.5s
 			<-ticker.C
 			mr.FastForward(100 * time.Millisecond)
@@ -71,7 +71,7 @@ func TestDistributedJob_SingleExecution(t *testing.T) {
 	// 5. Assertions
 	count := atomic.LoadInt32(&executionCount)
 
-	// In 2.5 seconds, a 1-second interval cron will fire either 2 or 3 times depending on 
+	// In 2.5 seconds, a 1-second interval cron will fire either 2 or 3 times depending on
 	// when exactly the scheduler started within the current second.
 	// Even though we have 3 nodes registered, it should ONLY execute 1 time per second across the entire cluster,
 	// because the RedisLock ensures Leader Election.

@@ -14,15 +14,15 @@ import (
 
 // Message types for cross-node communication.
 const (
-	MessageTypeChat          = "chat"
-	MessageTypeChatRoom      = "chat_room"
-	MessageTypeNotification  = "notification"
-	MessageTypeBroadcast     = "broadcast"
-	MessageTypeUserJoin      = "user_join"
-	MessageTypeUserLeave     = "user_leave"
-	MessageTypeShardCreate   = "shard_create"
-	MessageTypeShardDestroy  = "shard_destroy"
-	MessageTypeNodeStatus    = "node_status"
+	MessageTypeChat         = "chat"
+	MessageTypeChatRoom     = "chat_room"
+	MessageTypeNotification = "notification"
+	MessageTypeBroadcast    = "broadcast"
+	MessageTypeUserJoin     = "user_join"
+	MessageTypeUserLeave    = "user_leave"
+	MessageTypeShardCreate  = "shard_create"
+	MessageTypeShardDestroy = "shard_destroy"
+	MessageTypeNodeStatus   = "node_status"
 )
 
 // CrossNodeMessage represents the payload wrapper sent between different cluster nodes.

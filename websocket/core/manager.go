@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	maxShards           = 1000
-	maxTotalConnections = 200000 // For high-scale connection support
-	defaultShardName    = "default"
+	maxShards            = 1000
+	maxTotalConnections  = 200000 // For high-scale connection support
+	defaultShardName     = "default"
 	shardCleanupInterval = 5 * time.Minute
 )
 

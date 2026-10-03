@@ -28,14 +28,14 @@ type RetryConfig struct {
 
 // CBConfig configures the Circuit Breaker pattern.
 type CBConfig struct {
-	Enabled                  bool
-	Name                     string
-	MaxRequests              uint32
-	Interval                 time.Duration
-	Timeout                  time.Duration
-	ReadyToTripFailRatio     float64
-	ReadyToTripMinRequests   uint32
-	OnStateChange            func(name string, from gobreaker.State, to gobreaker.State)
+	Enabled                bool
+	Name                   string
+	MaxRequests            uint32
+	Interval               time.Duration
+	Timeout                time.Duration
+	ReadyToTripFailRatio   float64
+	ReadyToTripMinRequests uint32
+	OnStateChange          func(name string, from gobreaker.State, to gobreaker.State)
 }
 
 // DefaultConfig returns a recommended set of default configurations.
@@ -53,11 +53,11 @@ func DefaultConfig(baseURL string) Config {
 		CircuitBreaker: CBConfig{
 			Enabled:                true,
 			Name:                   "default-cb",
-			MaxRequests:            0,               // Unlimited when half-open by default (gobreaker standard: 1)
-			Interval:               0,               // Cyclic period
+			MaxRequests:            0,                // Unlimited when half-open by default (gobreaker standard: 1)
+			Interval:               0,                // Cyclic period
 			Timeout:                30 * time.Second, // Time in open state before transitioning to half-open
-			ReadyToTripMinRequests: 5,               // Minimum requests before checking failure ratio
-			ReadyToTripFailRatio:   0.6,             // Trip if > 60% failures
+			ReadyToTripMinRequests: 5,                // Minimum requests before checking failure ratio
+			ReadyToTripFailRatio:   0.6,              // Trip if > 60% failures
 		},
 	}
 }

@@ -5,21 +5,22 @@ Core utilities for building REST APIs. Includes standardized responses, friendly
 ```go
 import (
     "github.com/thanhbvha/go-common/logger"
-    "github.com/thanhbvha/go-common/web/response"
+    fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
+    fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
+    fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
     "github.com/thanhbvha/go-common/web/validator"
-    "github.com/thanhbvha/go-common/web/middleware"
 )
 
 app := fiber.New(fiber.Config{
     // Automatically formats xerrors and unwraps panics into standard JSON responses
-    ErrorHandler: middleware.ErrorHandler,
+    ErrorHandler: fibermw.ErrorHandler,
 })
 
 // Middlewares
-app.Use(middleware.Recover())
-app.Use(logger.FiberRequestIDMiddleware())
-app.Use(logger.FiberMiddleware())
-app.Use(middleware.Telemetry("HTTP Request")) // Creates a span for each request
+app.Use(fibermw.Recover())
+app.Use(fiberlog.RequestIDMiddleware())
+app.Use(fiberlog.Middleware())
+app.Use(fibermw.Telemetry("HTTP Request")) // Creates a span for each request
 
 app.Post("/users", func(c *fiber.Ctx) error {
     var req UserReq
@@ -27,9 +28,9 @@ app.Post("/users", func(c *fiber.Ctx) error {
 
     // Validate with friendly Vietnamese errors
     if errs := validator.Struct(&req); errs != nil {
-        return response.ValidationError(c, errs)
+        return fiberresp.ValidationError(c, errs)
     }
 
-    return response.Success(c, req)
+    return fiberresp.Success(c, req)
 })
 ```

@@ -1,15 +1,16 @@
-package auth
+package ginauth
 
 import (
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/thanhbvha/go-common/auth"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
-// GinMiddleware creates a Gin middleware to protect routes using standard JWT.
-func GinMiddleware(manager *Manager) gin.HandlerFunc {
+// Middleware creates a Gin middleware to protect routes using standard JWT.
+func Middleware(manager *auth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := extractTokenFromGin(c)
 		if tokenString == "" {
@@ -33,9 +34,9 @@ func GinMiddleware(manager *Manager) gin.HandlerFunc {
 	}
 }
 
-// GinEncryptedMiddleware creates a Gin middleware to protect routes using Encrypted JWT.
+// EncryptedMiddleware creates a Gin middleware to protect routes using Encrypted JWT.
 // aadExtractor is an optional function to extract Dynamic AAD (e.g., from a Session ID cookie).
-func GinEncryptedMiddleware(manager *EncryptedManager, aadExtractor func(c *gin.Context) []byte) gin.HandlerFunc {
+func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gin.Context) []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := extractTokenFromGin(c)
 		if tokenString == "" {

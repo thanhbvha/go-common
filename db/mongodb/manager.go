@@ -65,7 +65,7 @@ func Init(ctx context.Context, configs map[string]Config, defaultDBName ...strin
 		if _, exists := globalManager.dbs[name]; exists {
 			continue // Skip if already added via AddConnection
 		}
-		
+
 		client, err := New(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to connect to mongodb instance '%s': %w", name, err)

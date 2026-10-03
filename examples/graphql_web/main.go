@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph"
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
@@ -16,9 +16,12 @@ import (
 	fiber_adapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
 	gin_adapter "github.com/thanhbvha/go-common/graphql/adapter/gin"
 	common_logger "github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/logger/middleware/echo"
+	"github.com/thanhbvha/go-common/logger/middleware/fiber"
+	"github.com/thanhbvha/go-common/logger/middleware/gin"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/utils/graceful"
-	web_middleware "github.com/thanhbvha/go-common/web/middleware"
+	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
 	"net/http"
 )
 
@@ -65,10 +68,10 @@ func RunFiberExample() {
 	coreSrv, userLoader := setupCoreGraphQL()
 
 	app := fiber.New(fiber.Config{
-		ErrorHandler: web_middleware.ErrorHandler,
+		ErrorHandler: fibermw.ErrorHandler,
 	})
-	app.Use(common_logger.FiberRequestIDMiddleware())
-	app.Use(common_logger.FiberMiddleware())
+	app.Use(fiberlog.RequestIDMiddleware())
+	app.Use(fiberlog.Middleware())
 
 	// 4. Wrap the Server with Fiber Adapter
 	gqlHandler := fiber_adapter.NewHandler(coreSrv, fiber_adapter.Config{
@@ -112,8 +115,8 @@ func RunGinExample() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(common_logger.GinRequestIDMiddleware())
-	r.Use(common_logger.GinMiddleware())
+	r.Use(ginlog.RequestIDMiddleware())
+	r.Use(ginlog.Middleware())
 
 	// 4. Wrap the Server with Gin Adapter
 	gqlHandler := gin_adapter.NewHandler(coreSrv, gin_adapter.Config{
@@ -160,8 +163,8 @@ func RunEchoExample() {
 
 	e := echo.New()
 	e.HideBanner = true
-	e.Use(common_logger.EchoRequestIDMiddleware())
-	e.Use(common_logger.EchoMiddleware())
+	e.Use(echolog.RequestIDMiddleware())
+	e.Use(echolog.Middleware())
 
 	// 4. Wrap the Server with Echo Adapter
 	gqlHandler := echo_adapter.NewHandler(coreSrv, echo_adapter.Config{

@@ -88,7 +88,7 @@ func Load(opts Options, target interface{}) error {
 	return v.Unmarshal(target)
 }
 
-// LoadEnv is a convenience function to load a .env file (if it exists) 
+// LoadEnv is a convenience function to load a .env file (if it exists)
 // and unmarshal environment variables into the target struct.
 func LoadEnv(path string, target interface{}) error {
 	opts := DefaultOptions()

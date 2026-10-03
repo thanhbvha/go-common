@@ -10,13 +10,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	
+
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/logger/middleware/fiber"
 	"github.com/thanhbvha/go-common/telemetry"
 	"github.com/thanhbvha/go-common/utils/graceful"
 	"github.com/thanhbvha/go-common/utils/str"
-	"github.com/thanhbvha/go-common/web/middleware"
-	"github.com/thanhbvha/go-common/web/response"
+	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
+	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
+	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
+	echoresp "github.com/thanhbvha/go-common/web/response/echo"
+	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
+	ginresp "github.com/thanhbvha/go-common/web/response/gin"
 	"github.com/thanhbvha/go-common/web/validator"
 )
 
@@ -61,33 +66,33 @@ func main() {
 func RunFiberAPIExample() {
 	fmt.Println("\n--- 1. Fiber REST API ---")
 	app := fiber.New(fiber.Config{
-		ErrorHandler: middleware.ErrorHandler,
+		ErrorHandler: fibermw.ErrorHandler,
 	})
 
 	// Setup Middlewares
-	app.Use(middleware.Recover())
-	app.Use(logger.FiberRequestIDMiddleware())
-	app.Use(logger.FiberMiddleware())
-	app.Use(middleware.Telemetry("HTTP Request"))
+	app.Use(fibermw.Recover())
+	app.Use(fiberlog.RequestIDMiddleware())
+	app.Use(fiberlog.Middleware())
+	app.Use(fibermw.Telemetry("HTTP Request"))
 
 	// Define Routes
 	app.Post("/users", func(c *fiber.Ctx) error {
 		var req CreateUserRequest
 		if err := c.BodyParser(&req); err != nil {
-			return response.Error(c, fiber.StatusBadRequest, "Invalid input data")
+			return fiberresp.Error(c, fiber.StatusBadRequest, "Invalid input data")
 		}
 
 		if errs := validator.Struct(&req); errs != nil {
-			return response.ValidationError(c, errs)
+			return fiberresp.ValidationError(c, errs)
 		}
 
 		slugName := str.Slugify(req.Name)
 		tempPassword := str.Random(8)
 
-		return response.Created(c, fiber.Map{
-			"slug":     slugName,
-			"password": tempPassword,
-			"email":    req.Email,
+		return fiberresp.Created(c, fiber.Map{
+			"slug":      slugName,
+			"password":  tempPassword,
+			"email":     req.Email,
 			"framework": "Fiber",
 		})
 	})
@@ -117,36 +122,36 @@ func RunGinAPIExample() {
 	r := gin.New()
 
 	// Setup Middlewares
-	r.Use(middleware.GinRecover())
-	r.Use(middleware.GinErrorHandler())
-	r.Use(middleware.GinTelemetry("HTTP Request"))
+	r.Use(ginmw.Recover())
+	r.Use(ginmw.ErrorHandler())
+	r.Use(ginmw.Telemetry("HTTP Request"))
 
 	// Define Routes
 	r.POST("/users", func(c *gin.Context) {
 		var req CreateUserRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			response.GinError(c, http.StatusBadRequest, "Invalid input data")
+			ginresp.Error(c, http.StatusBadRequest, "Invalid input data")
 			return
 		}
 
 		if errs := validator.Struct(&req); errs != nil {
-			response.GinValidationError(c, errs)
+			ginresp.ValidationError(c, errs)
 			return
 		}
 
 		slugName := str.Slugify(req.Name)
 		tempPassword := str.Random(8)
 
-		response.GinCreated(c, gin.H{
-			"slug":     slugName,
-			"password": tempPassword,
-			"email":    req.Email,
+		ginresp.Created(c, gin.H{
+			"slug":      slugName,
+			"password":  tempPassword,
+			"email":     req.Email,
 			"framework": "Gin",
 		})
 	})
 
 	srv := &http.Server{Addr: ":3000", Handler: r}
-	
+
 	// Start Server in a goroutine
 	go func() {
 		logger.Info("Gin Server is starting", "port", ":3000")
@@ -169,30 +174,30 @@ func RunEchoAPIExample() {
 	fmt.Println("\n--- 3. Echo REST API ---")
 	e := echo.New()
 	e.HideBanner = true
-	e.HTTPErrorHandler = middleware.EchoErrorHandler
+	e.HTTPErrorHandler = echomw.ErrorHandler
 
 	// Setup Middlewares
-	e.Use(middleware.EchoRecover())
-	e.Use(middleware.EchoTelemetry("HTTP Request"))
+	e.Use(echomw.Recover())
+	e.Use(echomw.Telemetry("HTTP Request"))
 
 	// Define Routes
 	e.POST("/users", func(c echo.Context) error {
 		var req CreateUserRequest
 		if err := c.Bind(&req); err != nil {
-			return response.EchoError(c, http.StatusBadRequest, "Invalid input data")
+			return echoresp.Error(c, http.StatusBadRequest, "Invalid input data")
 		}
 
 		if errs := validator.Struct(&req); errs != nil {
-			return response.EchoValidationError(c, errs)
+			return echoresp.ValidationError(c, errs)
 		}
 
 		slugName := str.Slugify(req.Name)
 		tempPassword := str.Random(8)
 
-		return response.EchoCreated(c, map[string]interface{}{
-			"slug":     slugName,
-			"password": tempPassword,
-			"email":    req.Email,
+		return echoresp.Created(c, map[string]interface{}{
+			"slug":      slugName,
+			"password":  tempPassword,
+			"email":     req.Email,
 			"framework": "Echo",
 		})
 	})

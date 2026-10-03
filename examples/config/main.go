@@ -38,7 +38,7 @@ func main() {
 // =====================================================================
 func RunYamlConfigExample() {
 	fmt.Println("\n--- 1. Testing YAML Config (with ENV Overrides) ---")
-	
+
 	// Create a dummy config file for the example
 	createDummyYamlConfig()
 	defer os.Remove("example_config.yaml")
@@ -53,7 +53,7 @@ func RunYamlConfigExample() {
 	opts.EnvPrefix = "APP"
 
 	var cfg AppConfig
-	// CRITICAL: config.Load reads the YAML file first, but ENV variables 
+	// CRITICAL: config.Load reads the YAML file first, but ENV variables
 	// (prefixed with EnvPrefix) will ALWAYS override the file values.
 	// This is the standard 12-Factor App methodology.
 	if err := config.Load(opts, &cfg); err != nil {
@@ -72,13 +72,13 @@ func RunYamlConfigExample() {
 // =====================================================================
 func RunEnvConfigExample() {
 	fmt.Println("\n--- 2. Testing .env Config ---")
-	
+
 	// Create a dummy .env file
 	createDummyDotEnv()
 	defer os.Remove(".env.example")
 
 	var cfg AppConfig
-	
+
 	// LoadEnv will automatically read the .env file and map it to the struct fields.
 	// It internally ignores "file not found" errors so it's safe for production environments
 	// where the .env file might be absent (and values are provided purely via system ENV).

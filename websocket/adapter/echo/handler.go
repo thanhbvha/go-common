@@ -9,9 +9,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/websocket/core"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/core"
 )
 
 // Config holds the configuration options for the Echo WebSocket adapter.
@@ -135,10 +135,10 @@ func (h *Handler) HandleStats(c echo.Context) error {
 	pubsubManager := manager.GetPubSubManager()
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"manager":      manager.GetStats(),
-		"rateLimiter":  h.config.ConnectionLimiter.GetStats(),
-		"pubsub":       pubsubManager.GetStats(),
-		"timestamp":    time.Now(),
+		"manager":     manager.GetStats(),
+		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
+		"pubsub":      pubsubManager.GetStats(),
+		"timestamp":   time.Now(),
 	})
 }
 

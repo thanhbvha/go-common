@@ -83,7 +83,7 @@ func (r *redisFixedWindowLimiter) Allow(ctx context.Context, key string, cfg Con
 	if !ok {
 		return nil, fmt.Errorf("ratelimit: unexpected type for 'ttl' field in Redis response")
 	}
-	
+
 	if ttlMs < 0 {
 		ttlMs = 0
 	}

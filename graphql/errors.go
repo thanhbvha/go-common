@@ -18,11 +18,11 @@ func ErrorPresenter(ctx context.Context, e error) *gqlerror.Error {
 	var customErr *xerrors.CustomError
 	if errors.As(e, &customErr) {
 		err.Message = customErr.Message
-		
+
 		if err.Extensions == nil {
 			err.Extensions = map[string]interface{}{}
 		}
-		
+
 		// Push custom information out to the extension for the client
 		err.Extensions["code"] = customErr.Code
 		err.Extensions["http_status"] = customErr.HTTPStatus

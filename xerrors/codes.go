@@ -43,9 +43,9 @@ var (
 	ErrTooManyRequests     = New("TOO_MANY_REQUESTS", "Rate limit exceeded, please try again later", StatusTooManyRequests)
 
 	// 5xx Server Errors
-	ErrInternal            = New("INTERNAL_ERROR", "An unexpected internal error occurred", StatusInternalServerError)
-	ErrNotImplemented      = New("NOT_IMPLEMENTED", "This feature is not yet implemented", StatusNotImplemented)
-	ErrBadGateway          = New("BAD_GATEWAY", "Invalid response from upstream server", StatusBadGateway)
-	ErrServiceUnavailable  = New("SERVICE_UNAVAILABLE", "Service is currently unavailable", StatusServiceUnavailable)
-	ErrGatewayTimeout      = New("GATEWAY_TIMEOUT", "Upstream server timed out", StatusGatewayTimeout)
+	ErrInternal           = New("INTERNAL_ERROR", "An unexpected internal error occurred", StatusInternalServerError)
+	ErrNotImplemented     = New("NOT_IMPLEMENTED", "This feature is not yet implemented", StatusNotImplemented)
+	ErrBadGateway         = New("BAD_GATEWAY", "Invalid response from upstream server", StatusBadGateway)
+	ErrServiceUnavailable = New("SERVICE_UNAVAILABLE", "Service is currently unavailable", StatusServiceUnavailable)
+	ErrGatewayTimeout     = New("GATEWAY_TIMEOUT", "Upstream server timed out", StatusGatewayTimeout)
 )

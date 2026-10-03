@@ -1,4 +1,4 @@
-package middleware
+package fibermw
 
 import (
 	"github.com/gofiber/fiber/v2"
@@ -9,9 +9,10 @@ import (
 // unwraps xerrors and formats them into a standardized JSON response.
 //
 // Usage:
-// app := fiber.New(fiber.Config{
-//     ErrorHandler: middleware.ErrorHandler,
-// })
+//
+//	app := fiber.New(fiber.Config{
+//	    ErrorHandler: middleware.ErrorHandler,
+//	})
 func ErrorHandler(c *fiber.Ctx, err error) error {
 	// Default to 500
 	code := fiber.StatusInternalServerError

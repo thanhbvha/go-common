@@ -91,7 +91,7 @@ func (r *Repository[T]) FindDistinct(ctx context.Context, columns []string, cond
 	for i, c := range columns {
 		args[i] = c
 	}
-	
+
 	query := r.db.WithContext(ctx).Distinct(args...)
 	if len(conds) > 0 {
 		query = query.Where(conds[0], conds[1:]...)
@@ -150,7 +150,7 @@ func (r *Repository[T]) InsertMany(ctx context.Context, models []T) error {
 	return r.db.WithContext(ctx).Create(&models).Error
 }
 
-// Upsert creates or updates a record. 
+// Upsert creates or updates a record.
 // - If conflict occurs on conflictColumns, it updates all fields by default.
 // - If updateColumns are provided, it only updates those specific columns.
 func (r *Repository[T]) Upsert(ctx context.Context, model *T, conflictColumns []string, updateColumns ...string) error {
@@ -158,7 +158,7 @@ func (r *Repository[T]) Upsert(ctx context.Context, model *T, conflictColumns []
 	for _, c := range conflictColumns {
 		cols = append(cols, clause.Column{Name: c})
 	}
-	
+
 	onConflict := clause.OnConflict{
 		Columns: cols,
 	}
@@ -178,14 +178,14 @@ func (r *Repository[T]) UpsertIgnore(ctx context.Context, model *T, conflictColu
 	for _, c := range conflictColumns {
 		cols = append(cols, clause.Column{Name: c})
 	}
-	
+
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   cols,
 		DoNothing: true,
 	}).Create(model).Error
 }
 
-// UpsertMany creates or updates multiple records in bulk. 
+// UpsertMany creates or updates multiple records in bulk.
 // - If conflict occurs on conflictColumns, it updates all fields by default.
 // - If updateColumns are provided, it only updates those specific columns.
 func (r *Repository[T]) UpsertMany(ctx context.Context, models []T, conflictColumns []string, updateColumns ...string) error {
@@ -196,7 +196,7 @@ func (r *Repository[T]) UpsertMany(ctx context.Context, models []T, conflictColu
 	for _, c := range conflictColumns {
 		cols = append(cols, clause.Column{Name: c})
 	}
-	
+
 	onConflict := clause.OnConflict{
 		Columns: cols,
 	}
@@ -219,7 +219,7 @@ func (r *Repository[T]) UpsertIgnoreMany(ctx context.Context, models []T, confli
 	for _, c := range conflictColumns {
 		cols = append(cols, clause.Column{Name: c})
 	}
-	
+
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   cols,
 		DoNothing: true,

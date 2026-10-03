@@ -2,8 +2,8 @@ package nats
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"fmt"
+	"github.com/goccy/go-json"
 )
 
 // ============================================================

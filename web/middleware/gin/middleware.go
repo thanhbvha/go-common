@@ -1,4 +1,4 @@
-package middleware
+package ginmw
 
 import (
 	"github.com/gin-gonic/gin"
@@ -6,13 +6,13 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// GinRecover enables Gin's built-in Recovery middleware to prevent crashes on panics
-func GinRecover() gin.HandlerFunc {
+// Recover enables Gin's built-in Recovery middleware to prevent crashes on panics
+func Recover() gin.HandlerFunc {
 	return gin.Recovery()
 }
 
-// GinTelemetry creates an OpenTelemetry span for every incoming HTTP request in Gin.
-func GinTelemetry(operationName string) gin.HandlerFunc {
+// Telemetry creates an OpenTelemetry span for every incoming HTTP request in Gin.
+func Telemetry(operationName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 

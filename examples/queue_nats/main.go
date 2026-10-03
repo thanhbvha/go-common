@@ -20,8 +20,8 @@ import (
 
 func init() {
 	// Note for AI/Developers: In a real project, this init() function and the handlers below
-	// should be placed in a separate package (e.g. `tasks/email.go`) and imported into main.go 
-	// using a blank import `_ "your_project/tasks"`. We place it here in main.go solely 
+	// should be placed in a separate package (e.g. `tasks/email.go`) and imported into main.go
+	// using a blank import `_ "your_project/tasks"`. We place it here in main.go solely
 	// so you can see the complete code in one file.
 
 	logger.InfoAsync("Registering ExampleJobHandler to queue_nats")
@@ -48,7 +48,7 @@ func init() {
 
 func main() {
 	fmt.Println("=== Queue (NATS JetStream-based) Module Example ===")
-	
+
 	// 1. Initialize Logger
 	logOpts := logger.DefaultOptions()
 	logOpts.Level = 0 // Info
@@ -124,13 +124,13 @@ func main() {
 	} else {
 		logger.Info("Sample job enqueued successfully.")
 	}
-	
+
 	// Push a delayed job as well
 	err = q.EnqueueDelayed(context.Background(), "example_job_type", map[string]interface{}{
 		"countryCode": "US",
 		"userId":      67890,
 		"isDelayed":   true,
-	}, 5 * time.Second)
+	}, 5*time.Second)
 	if err != nil {
 		logger.Error("Failed to enqueue delayed sample job", "err", err)
 	} else {

@@ -451,10 +451,10 @@ type Msg struct {
 	Reply        string
 	Data         []byte
 	Headers      gonats.Header
-	Sequence     uint64        // ≈ Redis Stream message ID
+	Sequence     uint64 // ≈ Redis Stream message ID
 	Stream       string
 	Consumer     string
-	NumDelivered uint64        // ≈ XPendingExt DeliveryCount
+	NumDelivered uint64 // ≈ XPendingExt DeliveryCount
 	NumPending   uint64
 	Redelivered  bool
 	raw          *gonats.Msg

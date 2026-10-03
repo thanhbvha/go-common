@@ -14,7 +14,7 @@ func TestHealthChecks(t *testing.T) {
 	c.AddReadinessCheck("db", health.CustomChecker(func(ctx context.Context) error {
 		return nil
 	}))
-	
+
 	c.AddReadinessCheck("redis", health.CustomChecker(func(ctx context.Context) error {
 		return errors.New("redis down")
 	}))

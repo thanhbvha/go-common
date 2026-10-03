@@ -27,13 +27,13 @@ func main() {
 	ctx := context.Background()
 	cfg := nats.DefaultConfig()
 	cfg.Logger = l
-	
+
 	client := nats.MustConnect(ctx, cfg)
-	
+
 	// CRITICAL: Always defer client.Close() to safely drain active subscriptions
 	// and flush pending outgoing messages to the server before the application exits.
 	defer client.Close()
-	
+
 	l.Info("✅ Connected to NATS & JetStream")
 
 	// Uncomment the example you want to run:
@@ -313,8 +313,8 @@ func RunKVStoreExample(client *nats.Client) {
 
 	// ── 1. Create KV bucket with History=5 ─────────────────────────────
 	err := client.KVCreate(ctx, bucket,
-		nats.WithKVHistory(5),                 // keep last 5 revisions
-		nats.WithKVTTL(10*time.Minute),        // auto-expire entries after 10m
+		nats.WithKVHistory(5),          // keep last 5 revisions
+		nats.WithKVTTL(10*time.Minute), // auto-expire entries after 10m
 		nats.WithKVDescription("Feature flag store"),
 	)
 	if err != nil {

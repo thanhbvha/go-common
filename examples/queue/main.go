@@ -20,8 +20,8 @@ import (
 
 func init() {
 	// Note for AI/Developers: In a real project, this init() function and the handlers below
-	// should be placed in a separate package (e.g. `tasks/email.go`) and imported into main.go 
-	// using a blank import `_ "your_project/tasks"`. We place it here in main.go solely 
+	// should be placed in a separate package (e.g. `tasks/email.go`) and imported into main.go
+	// using a blank import `_ "your_project/tasks"`. We place it here in main.go solely
 	// so you can see the complete code in one file.
 
 	// Register the task to the central registry.
@@ -46,7 +46,7 @@ func init() {
 
 func main() {
 	fmt.Println("=== Queue (Redis-based) Module Example ===")
-	
+
 	// 1. Initialize Logger
 	logOpts := logger.DefaultOptions()
 	logOpts.Level = 0 // Info
@@ -77,7 +77,7 @@ func main() {
 	qCfg.Logger = log
 	// IMPORTANT: ShutdownTimeout determines how long q.Stop() will wait for
 	// workers to finish in-flight jobs before forcing an exit.
-	qCfg.ShutdownTimeout = 10 * time.Second 
+	qCfg.ShutdownTimeout = 10 * time.Second
 	q := queue.New(rdb, qCfg)
 
 	// 4. Autoload Tasks

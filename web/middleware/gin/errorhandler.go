@@ -1,4 +1,4 @@
-package middleware
+package ginmw
 
 import (
 	"net/http"
@@ -7,14 +7,14 @@ import (
 	"github.com/thanhbvha/go-common/xerrors"
 )
 
-// GinErrorHandler is a custom global error handler middleware for Gin.
-func GinErrorHandler() gin.HandlerFunc {
+// ErrorHandler is a custom global error handler middleware for Gin.
+func ErrorHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
 
 		if len(c.Errors) > 0 {
 			err := c.Errors.Last().Err
-			
+
 			code := xerrors.HTTPStatusCode(err)
 			stringCode := xerrors.GetCode(err)
 			message := err.Error()

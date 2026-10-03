@@ -6,9 +6,9 @@ import (
 
 // UserInfo represents the standard user information embedded in a token.
 type UserInfo struct {
-	ID       string `json:"id"`
-	Role     string `json:"role,omitempty"`
-	Email    string `json:"email,omitempty"`
+	ID       string                 `json:"id"`
+	Role     string                 `json:"role,omitempty"`
+	Email    string                 `json:"email,omitempty"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 

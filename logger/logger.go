@@ -399,4 +399,3 @@ func With(args ...any) *Logger {
 	}
 	return New(DefaultOptions()).With(args...)
 }
-

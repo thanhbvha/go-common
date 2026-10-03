@@ -105,20 +105,20 @@ type Config struct {
 // DefaultConfig returns a Config pre-populated with production-ready defaults.
 func DefaultConfig() Config {
 	return Config{
-		StreamPrefix:         "queue_stream",
-		DefaultGroup:         "workers",
-		DefaultMaxAge:        15 * 24 * time.Hour,
-		DefaultMaxRetry:      3,
-		DefaultWorkerCount:   5,
+		StreamPrefix:       "queue_stream",
+		DefaultGroup:       "workers",
+		DefaultMaxAge:      15 * 24 * time.Hour,
+		DefaultMaxRetry:    3,
+		DefaultWorkerCount: 5,
 
 		DelayedStreamSubject: "queue_delayed",
 
-		DLQStreamName:        "queue_dlq",
-		DLQRetention:         15 * 24 * time.Hour,
+		DLQStreamName: "queue_dlq",
+		DLQRetention:  15 * 24 * time.Hour,
 
-		AckWait:              5 * time.Minute,
+		AckWait: 5 * time.Minute,
 
-		ShutdownTimeout:      10 * time.Second,
+		ShutdownTimeout: 10 * time.Second,
 	}
 }
 
