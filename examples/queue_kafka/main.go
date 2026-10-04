@@ -14,6 +14,7 @@ import (
 	"github.com/thanhbvha/go-common/kafka"
 	"github.com/thanhbvha/go-common/logger"
 	queue_kafka "github.com/thanhbvha/go-common/queue_kafka"
+	"github.com/thanhbvha/go-common/queue_kafka/registry"
 )
 
 // EmailPayload is an example job payload for sending email.
@@ -27,6 +28,42 @@ type EmailPayload struct {
 type NotifyPayload struct {
 	UserID  string `json:"user_id"`
 	Message string `json:"message"`
+}
+
+// =====================================================================
+// 1. TASK REGISTRATION (via init)
+// =====================================================================
+
+func init() {
+	registry.Register("send-email", queue_kafka.JobTypeOptions{
+		Concurrency: 4,
+		MaxRetry:    5,
+	}, handleSendEmail)
+
+	registry.Register("push-notify", queue_kafka.JobTypeOptions{
+		Concurrency: 8,
+		MaxRetry:    3,
+	}, handlePushNotify)
+}
+
+func handleSendEmail(job queue_kafka.Job) error {
+	// In real code, unmarshal job.Data into your payload type, e.g.:
+	//   var payload EmailPayload
+	//   json.Unmarshal(mustJSON(job.Data), &payload)
+	log.Printf("send-email: processing job_id=%s created_at=%s payload=%+v",
+		job.ID, job.CreatedAt.Format(time.RFC3339), job.Data)
+
+	// Simulate occasional failures to demonstrate retry behavior.
+	if job.Retry < 2 {
+		return fmt.Errorf("send-email: simulated transient error (retry %d)", job.Retry)
+	}
+	log.Printf("send-email: email sent successfully job_id=%s", job.ID)
+	return nil
+}
+
+func handlePushNotify(job queue_kafka.Job) error {
+	log.Printf("push-notify: processing job_id=%s payload=%+v", job.ID, job.Data)
+	return nil
 }
 
 func main() {
@@ -57,39 +94,11 @@ func main() {
 
 	q := queue_kafka.New(kc, qCfg)
 
-	// ---- 3. Register job types ----
-	q.RegisterJobType("send-email", queue_kafka.JobTypeOptions{
-		Concurrency: 4,
-		MaxRetry:    5,
-	})
+	// ---- 3. Autoload Tasks ----
+	// Apply all tasks registered via init() into our specific Queue instance.
+	registry.ApplyToQueue(q)
 
-	q.RegisterJobType("push-notify", queue_kafka.JobTypeOptions{
-		Concurrency: 8,
-		MaxRetry:    3,
-	})
-
-	// ---- 4. Register handlers ----
-	q.RegisterHandler("send-email", func(job queue_kafka.Job) error {
-		// In real code, unmarshal job.Data into your payload type, e.g.:
-		//   var payload EmailPayload
-		//   json.Unmarshal(mustJSON(job.Data), &payload)
-		log.Printf("send-email: processing job_id=%s created_at=%s payload=%+v",
-			job.ID, job.CreatedAt.Format(time.RFC3339), job.Data)
-
-		// Simulate occasional failures to demonstrate retry behavior.
-		if job.Retry < 2 {
-			return fmt.Errorf("send-email: simulated transient error (retry %d)", job.Retry)
-		}
-		log.Printf("send-email: email sent successfully job_id=%s", job.ID)
-		return nil
-	})
-
-	q.RegisterHandler("push-notify", func(job queue_kafka.Job) error {
-		log.Printf("push-notify: processing job_id=%s payload=%+v", job.ID, job.Data)
-		return nil
-	})
-
-	// ---- 5. Start the queue ----
+	// ---- 4. Start the queue ----
 	q.Start(ctx)
 	defer q.Stop()
 	log.Println("queue_kafka: all workers started")

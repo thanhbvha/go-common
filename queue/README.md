@@ -3,25 +3,28 @@
 Backed by Redis Streams. Supports per-type worker pools, delayed jobs, automatic retry, dead-letter queue, and stuck-job reclaiming.
 
 ```go
-import "github.com/thanhbvha/go-common/queue"
+import (
+    "github.com/thanhbvha/go-common/queue"
+    "github.com/thanhbvha/go-common/queue/registry"
+)
 
 cfg := queue.DefaultConfig()
 cfg.Logger = log
 
 q := queue.New(rdb, cfg) // rdb satisfies queue.RedisStreamer
 
-// Register types (before Start)
-q.RegisterJobType("email", queue.JobTypeOptions{
+// Register tasks via registry
+registry.Register("email", queue.JobTypeOptions{
     Concurrency: 4,
     MaxRetry:    5,
     BatchSize:   10,
-})
-
-// Register handlers (before Start)
-q.RegisterHandler("email", func(job queue.Job) error {
+}, func(job queue.Job) error {
     // job.Data holds your payload
     return sendEmail(job.Data)
 })
+
+// Apply registered tasks to the queue
+registry.ApplyToQueue(q)
 
 q.Start(ctx)
 defer q.Stop()

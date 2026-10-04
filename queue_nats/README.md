@@ -7,8 +7,11 @@ By leveraging NATS JetStream, `queue_nats` automatically handles message retenti
 ### Quick Start
 
 ```go
-import "github.com/thanhbvha/go-common/queue_nats"
-import "github.com/thanhbvha/go-common/nats"
+import (
+    "github.com/thanhbvha/go-common/nats"
+    "github.com/thanhbvha/go-common/queue_nats"
+    "github.com/thanhbvha/go-common/queue_nats/registry"
+)
 
 // 1. Initialize NATS Streamer
 natsClient := nats.MustConnect(ctx, nats.DefaultConfig())
@@ -19,19 +22,19 @@ cfg.Logger = log
 
 q := queue_nats.New(natsClient, cfg)
 
-// 3. Register Job Types (Defines Concurrency, Stream names, etc.)
-q.RegisterJobType("email", queue_nats.JobTypeOptions{
+// 3. Register Tasks via registry
+registry.Register("email", queue_nats.JobTypeOptions{
     Concurrency: 4,
     MaxRetry:    5,
     BatchSize:   10,
-})
-
-// 4. Register Handlers
-q.RegisterHandler("email", func(job queue_nats.Job) error {
+}, func(job queue_nats.Job) error {
     // Process payload
     return sendEmail(job.Data) 
     // Return non-nil error to trigger automatic retry (up to MaxRetry times)
 })
+
+// Apply registered tasks to the queue
+registry.ApplyToQueue(q)
 
 // 5. Start processing (Creates streams and consumers in JetStream)
 q.Start(ctx)

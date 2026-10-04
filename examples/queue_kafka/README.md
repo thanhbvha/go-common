@@ -13,7 +13,7 @@ The `queue_kafka` module provides a distributed task queue built natively on top
   - `MaxRetry`: Maximum retry attempts before routing to the DLQ.
 
 ## 🚨 Best Practices for AI/Developers
-- **Task Registration (IMPORTANT)**: Always call `q.RegisterJobType(...)` and `q.RegisterHandler(...)` for all job types **before** calling `q.Start(ctx)`.
+- **Task Registration (IMPORTANT)**: Use the central registry pattern by calling `registry.Register(...)` in your package `init()` functions. Then, apply all registered tasks to the queue instance by calling `registry.ApplyToQueue(q)` **before** calling `q.Start(ctx)`.
 - **Auto-Provisioning**: The queue automatically calls `EnsureTopic` for all registered job types (main topic and retry topic), as well as the delayed and DLQ topics on `Start`. Ensure your Kafka user has topic creation permissions or pre-provision them.
 - **Graceful Shutdown (CRITICAL)**: Call `defer q.Stop()` and block your main thread on `<-ctx.Done()`. `Stop()` signals all workers and waits up to `ShutdownTimeout` for in-flight jobs to complete gracefully.
 - **Job Enqueueing**: Use `EnqueueDelayed` for jobs that should run in the future, or `EnqueueWithKey` with a partition key to ensure strict ordering of events for a specific entity (like a User ID) within a partition.

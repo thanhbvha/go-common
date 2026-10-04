@@ -25,15 +25,17 @@ kc := kafka.MustConnect(ctx, kafka.DefaultConfig())
 // 2. Create queue
 q := queue_kafka.New(kc, queue_kafka.DefaultConfig())
 
-// 3. Register types and handlers
-q.RegisterJobType("send-email", queue_kafka.JobTypeOptions{
+// 3. Register tasks via registry
+registry.Register("send-email", queue_kafka.JobTypeOptions{
     Concurrency: 4,
     MaxRetry:    5,
-})
-q.RegisterHandler("send-email", func(job queue_kafka.Job) error {
+}, func(job queue_kafka.Job) error {
     // process job.Data
     return nil
 })
+
+// Apply registered tasks to the queue
+registry.ApplyToQueue(q)
 
 // 4. Start (creates topics, launches goroutines)
 q.Start(ctx)
