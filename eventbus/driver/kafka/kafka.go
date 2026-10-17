@@ -75,7 +75,11 @@ func NewWithClient(client *commonkafka.Client) (transport.Transport, error) {
 	if base == nil {
 		return nil, fmt.Errorf("kafka: client is not connected")
 	}
-	factory, err := commonkafka.NewNativeClientFactory(client.Config())
+	cfg := client.Config()
+	if err := validateCommitPolicy(cfg); err != nil {
+		return nil, err
+	}
+	factory, err := commonkafka.NewNativeClientFactory(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: create client factory: %w", err)
 	}
@@ -86,6 +90,9 @@ func NewWithClient(client *commonkafka.Client) (transport.Transport, error) {
 // share the same immutable connection/security snapshot. Close owns the base
 // producer created by this constructor.
 func NewWithConfig(cfg commonkafka.Config) (transport.Transport, error) {
+	if err := validateCommitPolicy(cfg); err != nil {
+		return nil, err
+	}
 	factory, err := commonkafka.NewNativeClientFactory(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: create client factory: %w", err)
@@ -95,6 +102,15 @@ func NewWithConfig(cfg commonkafka.Config) (transport.Transport, error) {
 		return nil, fmt.Errorf("kafka: create producer: %w", err)
 	}
 	return newKafkaTransport(producer, factory, true), nil
+}
+
+// EventBus owns offset settlement and currently requires marked auto-commit.
+// Manual commits belong to the wrapper API until the driver coordinator exists.
+func validateCommitPolicy(cfg commonkafka.Config) error {
+	if cfg.ConsumerCommitInterval <= 0 {
+		return fmt.Errorf("%w: kafka EventBus requires ConsumerCommitInterval > 0; manual commit is not supported", transport.ErrNotSupported)
+	}
+	return nil
 }
 
 func newKafkaTransport(base *kgo.Client, factory *commonkafka.NativeClientFactory, producerOwned bool) *kafkaTransport {
@@ -109,9 +125,8 @@ func (t *kafkaTransport) Name() string { return "kafka" }
 func (t *kafkaTransport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
 		DelayPrecision: 5 * time.Second, // Based on the smallest tier
-		// The broker routes equal keys to one partition, but the current engine
-		// processes deliveries concurrently and has no contiguous offset
-		// coordinator. Do not advertise processing order until Phase P5.2-P5.3.
+		// Partition dispatch is serialized, but contiguous broker-confirmed
+		// offset coordination remains P5.3 work.
 		Ordering: false,
 	}
 }
@@ -253,6 +268,10 @@ func (t *kafkaTransport) PublishAt(ctx context.Context, topo transport.Topology,
 }
 
 func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
+	capacity, err := subscriptionCapacity(sub)
+	if err != nil {
+		return err
+	}
 	topic := t.mainTopic(sub.Topology)
 	group := sub.Topology.Name() + "-group"
 	if sub.Group != "" {
@@ -275,11 +294,17 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 		if sub.WaitForHandlers != nil {
 			sub.WaitForHandlers()
 		}
-		cl.Close()
+		cl.CloseAllowingRebalance()
 	}()
+	return t.consumeRecords(ctx, sub.Topology, cl, capacity, deliver)
+}
 
+func (t *kafkaTransport) consumeRecords(ctx context.Context, topo transport.Topology, cl recordConsumer, capacity int, deliver func(transport.Delivery)) error {
 	for {
-		fetches := cl.PollFetches(ctx)
+		// Do not poll another batch until every record in this bounded batch
+		// settles. PollRecords limits application-owned records, independently
+		// of franz-go's byte-bounded internal fetch buffer.
+		fetches := cl.PollRecords(ctx, capacity)
 		if fetches.IsClientClosed() || fetches.Err() != nil {
 			if errors.Is(fetches.Err(), context.Canceled) {
 				return ctx.Err()
@@ -287,33 +312,8 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 			return fetches.Err()
 		}
 
-		for _, record := range fetches.Records() {
-			msg := transport.Message{
-				Payload:     record.Value,
-				OrderingKey: string(record.Key),
-			}
-
-			// Extract the normalized attempt from either a v2 or v3 envelope.
-			var env eventbus.Envelope
-			count := 1
-			if err := json.Unmarshal(record.Value, &env); err == nil {
-				count = env.Attempt
-				if env.V == 2 {
-					count++
-				}
-				if count < 1 {
-					count = 1
-				}
-			}
-
-			deliver(&kafkaDelivery{
-				transport: t,
-				topo:      sub.Topology,
-				cl:        cl,
-				record:    record,
-				msg:       msg,
-				count:     count,
-			})
+		if err := t.dispatchBatch(ctx, topo, cl, fetches.Records(), deliver); err != nil {
+			return err
 		}
 	}
 }
@@ -445,11 +445,12 @@ func (t *kafkaTransport) Close(ctx context.Context) error {
 type kafkaDelivery struct {
 	transport *kafkaTransport
 	topo      transport.Topology
-	cl        *kgo.Client
+	cl        recordMarker
 	record    *kgo.Record
 	msg       transport.Message
 	count     int
 	settled   transport.SettlementGuard
+	completed func(error)
 }
 
 func (d *kafkaDelivery) Message() transport.Message { return d.msg }
@@ -484,7 +485,10 @@ func (d *kafkaDelivery) deadLetter(ctx context.Context, decision transport.Decis
 }
 
 func (d *kafkaDelivery) Settle(ctx context.Context, decision transport.Decision) error {
-	return d.settled.Settle(decision, func() error {
+	err := d.settled.Settle(decision, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		switch decision.Kind {
 		case transport.DecisionAck:
 			return d.ack()
@@ -499,6 +503,10 @@ func (d *kafkaDelivery) Settle(ctx context.Context, decision transport.Decision)
 			return transport.ErrInvalidDecision
 		}
 	})
+	if d.completed != nil && !errors.Is(err, transport.ErrDeliverySettled) && !errors.Is(err, transport.ErrSettlementInProgress) {
+		d.completed(err)
+	}
+	return err
 }
 
 func (d *kafkaDelivery) Heartbeat(ctx context.Context) error {

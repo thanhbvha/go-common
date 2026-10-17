@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"crypto/tls"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -112,4 +113,86 @@ func assertKafkaOpt(t *testing.T, client *kgo.Client, option any, want any) {
 	if got := client.OptValue(option); !reflect.DeepEqual(got, want) {
 		t.Fatalf("option %v = %#v (%T), want %#v (%T)", option, got, got, want, want)
 	}
+}
+
+func TestProducerIdempotencyAndAcks(t *testing.T) {
+	for _, idempotent := range []bool{false, true} {
+		for _, acks := range []int{-2, -1, 0, 1, 2} {
+			t.Run(fmt.Sprintf("idempotent=%t/acks=%d", idempotent, acks), func(t *testing.T) {
+				cfg := DefaultConfig()
+				cfg.ProducerIdempotent, cfg.ProducerAcks = idempotent, acks
+				factory, err := NewNativeClientFactory(cfg)
+				invalid := acks < -1 || acks > 1 || (idempotent && acks != -1)
+				if invalid {
+					if err == nil {
+						t.Fatal("invalid ACK/idempotency combination accepted")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				client, err := factory.NewProducer()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.Close()
+				assertKafkaOpt(t, client, kgo.DisableIdempotentWrite, !idempotent)
+			})
+		}
+	}
+}
+
+func TestClientSnapshotsInputBeforeBuildingOptions(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SecurityProtocol = SSL
+	cfg.TLSConfig = &tls.Config{ServerName: "original.invalid", MinVersion: tls.VersionTLS13}
+	wrapper := New(cfg)
+	defer wrapper.Close()
+	cfg.Brokers[0] = "mutated.invalid:9092"
+	cfg.TLSConfig.ServerName = "mutated.invalid"
+	if got := wrapper.Config(); got.Brokers[0] != "localhost:9092" || got.TLSConfig.ServerName != "original.invalid" {
+		t.Fatal("input mutation changed wrapper snapshot")
+	}
+	opts, err := wrapper.buildOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer, err := kgo.NewClient(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	factory, err := NewNativeClientFactory(wrapper.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := factory.NewConsumer(kgo.ConsumerGroup("snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+	for _, client := range []*kgo.Client{producer, consumer} {
+		assertKafkaOpt(t, client, kgo.SeedBrokers, []string{"localhost:9092"})
+		tlsConfig := client.OptValue(kgo.DialTLSConfig).(*tls.Config)
+		if tlsConfig.ServerName != "original.invalid" {
+			t.Fatal("producer/consumer TLS snapshot diverged")
+		}
+	}
+}
+
+func TestFactoryManualCommitConsumerStillConstructs(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConsumerCommitInterval = 0
+	factory, err := NewNativeClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := factory.NewConsumer(kgo.ConsumerGroup("manual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	assertKafkaOpt(t, client, kgo.DisableAutoCommit, true)
+	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
 }

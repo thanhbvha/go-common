@@ -19,6 +19,10 @@ Integration prerequisites:
 - Kafka must be reachable at `localhost:9092` for the current Kafka driver and
   Kafka spike tests. Tests skip when the driver test cannot reach Kafka, while
   the low-level Kafka spike reports setup failures.
+  `go test -tags=integration ./eventbus/driver/kafka -count=1` includes a unique
+  two-partition topic test. Default Kafka tests use deterministic `synctest`
+  coverage for partition serialization, cross-partition concurrency through the
+  engine, bounded polling, cancellation, and settlement failure.
 - NATS driver and spike tests start an in-process JetStream server and do not
   require a separately installed NATS server. The suite includes the shared
   transport contract plus restart/reconnect, `AckWait`, heartbeat,

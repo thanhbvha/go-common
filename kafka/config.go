@@ -24,6 +24,7 @@ package kafka
 
 import (
 	"crypto/tls"
+	"slices"
 	"time"
 )
 
@@ -233,6 +234,16 @@ type Config struct {
 	// Logger receives connection, health-check, and error events.
 	// Set to nil to suppress all internal logging.
 	Logger Logger
+}
+
+// clone snapshots mutable connection settings. As with tls.Config.Clone, nested
+// TLS objects and callback state must remain immutable after configuration.
+func (c Config) clone() Config {
+	c.Brokers = slices.Clone(c.Brokers)
+	if c.TLSConfig != nil {
+		c.TLSConfig = c.TLSConfig.Clone()
+	}
+	return c
 }
 
 // DefaultConfig returns a Config pre-populated with production-ready defaults.

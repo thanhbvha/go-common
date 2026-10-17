@@ -3,9 +3,11 @@ package kafka
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/thanhbvha/go-common/eventbus/transport"
 	commonkafka "github.com/thanhbvha/go-common/kafka"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -107,5 +109,16 @@ func TestDefaultTransportWithoutRegisteredClientReturnsError(t *testing.T) {
 func TestNewWithClientRejectsDisconnectedClient(t *testing.T) {
 	if _, err := NewWithClient(commonkafka.New(commonkafka.DefaultConfig())); err == nil {
 		t.Fatal("NewWithClient unexpectedly accepted a disconnected client")
+	}
+}
+
+func TestNewWithConfigRejectsUnsupportedCommitPolicy(t *testing.T) {
+	for _, interval := range []time.Duration{0, -time.Second} {
+		cfg := commonkafka.DefaultConfig()
+		cfg.ConsumerCommitInterval = interval
+		backend, err := NewWithConfig(cfg)
+		if backend != nil || !errors.Is(err, transport.ErrNotSupported) {
+			t.Fatalf("unsupported commit policy: transport=%T error=%v", backend, err)
+		}
 	}
 }

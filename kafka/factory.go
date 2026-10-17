@@ -25,12 +25,9 @@ type NativeClientFactory struct {
 // NewNativeClientFactory snapshots cfg and validates the common TLS/SASL
 // options shared by producer, consumer, delay, and administrative clients.
 func NewNativeClientFactory(cfg Config) (*NativeClientFactory, error) {
-	cfg.Brokers = slices.Clone(cfg.Brokers)
+	cfg = cfg.clone()
 	if len(cfg.Brokers) == 0 {
 		cfg.Brokers = []string{"localhost:9092"}
-	}
-	if cfg.TLSConfig != nil {
-		cfg.TLSConfig = cfg.TLSConfig.Clone()
 	}
 	base, err := nativeConnectionOptions(cfg)
 	if err != nil {
@@ -148,6 +145,12 @@ func nativeConnectionOptions(cfg Config) ([]kgo.Opt, error) {
 }
 
 func nativeProducerOptions(cfg Config) ([]kgo.Opt, error) {
+	if cfg.ProducerAcks != -1 && cfg.ProducerAcks != 0 && cfg.ProducerAcks != 1 {
+		return nil, fmt.Errorf("kafka: ProducerAcks must be -1, 0, or 1")
+	}
+	if cfg.ProducerIdempotent && cfg.ProducerAcks != -1 {
+		return nil, fmt.Errorf("kafka: ProducerIdempotent requires ProducerAcks=-1")
+	}
 	compression, err := buildCompressionOpt(cfg.ProducerCompression)
 	if err != nil {
 		return nil, err
@@ -161,9 +164,10 @@ func nativeProducerOptions(cfg Config) ([]kgo.Opt, error) {
 		kgo.ProducerBatchMaxBytes(int32(cfg.ProducerBatchSize)),
 		kgo.ProducerLinger(cfg.ProducerBatchMaxWait),
 	}
-	if cfg.ProducerIdempotent && cfg.ProducerAcks == -1 {
+	if cfg.ProducerIdempotent {
 		return append(opts, kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordPartitioner(kgo.StickyKeyPartitioner(nil))), nil
 	}
+	opts = append(opts, kgo.DisableIdempotentWrite())
 	switch cfg.ProducerAcks {
 	case 0:
 		opts = append(opts, kgo.RequiredAcks(kgo.NoAck()))

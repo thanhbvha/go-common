@@ -74,7 +74,7 @@ consumer, err := factory.NewConsumer(
 | `SecurityProtocol` | `Plaintext` | `Plaintext` / `SSL` / `SASLPlaintext` / `SASLSSL` |
 | `SASLMechanism` | `SASLNone` | `SASLPlain` / `SASLSCRAMSHA256` / `SASLSCRAMSHA512` / `SASLOAuthBearer` |
 | `ProducerAcks` | `-1` | `-1`=all replicas, `1`=leader, `0`=none |
-| `ProducerIdempotent` | `true` | Exactly-once produce semantics |
+| `ProducerIdempotent` | `true` | Idempotent produce; requires `ProducerAcks=-1`; `false` disables it |
 | `ProducerCompression` | `"snappy"` | `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `ConsumerGroup` | `""` | Consumer group ID (required for Subscribe) |
 | `ConsumerAutoOffsetReset` | `"earliest"` | `"earliest"` / `"latest"` |

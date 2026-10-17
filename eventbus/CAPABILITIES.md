@@ -61,10 +61,20 @@ and ordering for fast publish-path checks:
 | NATS | 1 s | false |
 | Kafka | 5 s | false |
 
-Kafka key-based partition routing still exists internally, but ordered
-processing is deliberately not advertised because the engine can complete and
-commit records out of order. Ordering can return to `true` only after P5.2 and
-P5.3 pass their contract and rebalance tests.
+Kafka P5.2 serializes delivery within each topic/partition through successful
+settlement while allowing different partition heads into the engine worker pool
+concurrently. Main-consumer polls are bounded to `Concurrency + Prefetch` records
+and a whole batch settles before the next poll. Direct transport callers default
+to concurrency 10 plus prefetch 20. Franz-go's additional internal fetch buffering
+is byte-bounded by its fetch settings, not by this application record limit.
+A slow partition can therefore delay the next batch for all partitions. A failed
+settlement ends the consume session without dispatching later records from that
+partition. Accepted handlers can still settle during graceful drain.
+
+Ordering remains deliberately unadvertised: broker-confirmed contiguous offset
+coordination and safe rebalance handling still need P5.3/P5.4 verification.
+The current mark-for-auto-commit settlement is not broker confirmation. Retries
+can reorder relative to later source records, as specified by DS-52.
 
 All delivery implementations expose one terminal `Settle(Decision)` operation
 guarded by the shared single-use state machine. A failed settlement reopens the

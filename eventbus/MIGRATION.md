@@ -123,6 +123,26 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
 
 ## Breaking changes without adapters
 
+- Kafka EventBus `NewWithConfig`/`NewWithClient` require a positive
+  `ConsumerCommitInterval`. Zero/negative intervals return an error matching
+  `ErrNotSupported` at construction, since manual source-offset settlement is
+  not implemented by this driver. The standalone Kafka wrapper retains its
+  manual-commit configuration. Producer configuration now honors
+  `ProducerIdempotent=false`; enabling it requires `ProducerAcks=-1`, and ACK
+  values outside -1/0/1 are rejected. `kafka.New` snapshots its input broker
+  slice and TLS config so later caller mutation cannot split producer and
+  internal-consumer configuration. Nested TLS objects/callback state follow
+  `tls.Config.Clone` semantics and must remain immutable.
+- Kafka main consumers now hand only one unsettled record per partition to the
+  engine at a time. Use multiple partitions and sufficient `Concurrency` for
+  parallel handling. Each poll accepts at most `Concurrency + Prefetch` records;
+  a slow record delays the next batch, and a settlement failure ends the session
+  for supervisor reconnect. Direct transport consumers must settle accepted
+  deliveries before receiving their partition's successor. Negative subscription
+  bounds and integer overflow are rejected; omitted bounds default to 10/20.
+  Cancellation stops intake while accepted handlers retain their settlement
+  client through the existing drain barrier. `Ordering` remains false pending
+  contiguous commit/rebalance work; source ordering does not imply retry ordering.
 - Kafka EventBus applications should prefer
   `kafkadriver.NewWithConfig(kafka.Config)` for an owned transport or
   `kafkadriver.NewWithClient(*kafka.Client)` for a connected caller-owned

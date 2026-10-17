@@ -33,7 +33,7 @@ var (
 func New(cfg Config) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		cfg:    cfg,
+		cfg:    cfg.clone(),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -171,12 +171,7 @@ func (c *Client) Ping(ctx context.Context) error {
 func (c *Client) Config() Config {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	cfg := c.cfg
-	cfg.Brokers = slices.Clone(c.cfg.Brokers)
-	if c.cfg.TLSConfig != nil {
-		cfg.TLSConfig = c.cfg.TLSConfig.Clone()
-	}
-	return cfg
+	return c.cfg.clone()
 }
 
 // Native returns the underlying *kgo.Client for advanced operations not
