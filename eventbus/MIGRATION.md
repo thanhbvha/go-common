@@ -1,0 +1,285 @@
+# EventBus migration guide
+
+This guide covers migration from `queue`, `queue_kafka`, and `queue_nats`, and
+from the pre-refactor EventBus API. EventBus provides at-least-once delivery:
+handlers must be idempotent and may receive a message more than once.
+
+## Canonical API
+
+Import the selected driver for its registry side effect, configure the bus,
+declare every topology, attach local handlers, and then start consumption:
+
+```go
+import (
+    "context"
+
+    "github.com/thanhbvha/go-common/eventbus"
+    _ "github.com/thanhbvha/go-common/eventbus/driver/kafka"
+)
+
+cfg := eventbus.DefaultConfig()
+cfg.Driver = "kafka"
+cfg.Namespace = "billing"
+
+bus, err := eventbus.Open(cfg)
+if err != nil {
+    return err
+}
+defer bus.Stop(context.Background())
+
+if err := bus.DeclareTask("send_email", eventbus.WithMaxAttempts(5)); err != nil {
+    return err
+}
+if err := bus.HandleTask("send_email", func(ctx context.Context, job eventbus.Job) error {
+    var payload struct{ To string `json:"to"` }
+    if err := job.Decode(&payload); err != nil {
+        return eventbus.MarkPermanent(err)
+    }
+    return sendEmail(ctx, payload.To)
+}); err != nil {
+    return err
+}
+if err := bus.Start(ctx); err != nil {
+    return err
+}
+```
+
+A producer-only process still declares its topology, but does not attach a
+handler or call `Start`:
+
+```go
+if err := bus.DeclareTask("send_email"); err != nil {
+    return err
+}
+if err := bus.Enqueue(ctx, "send_email", payload); err != nil {
+    return err
+}
+```
+
+Declare fan-out events before subscribing or publishing. Each subscriber name
+identifies an independent consumer group:
+
+```go
+if err := bus.DeclareEvent("order_created"); err != nil {
+    return err
+}
+if err := bus.Subscribe("order_created", "send_receipt", receiptHandler); err != nil {
+    return err
+}
+if err := bus.Publish(ctx, "order_created", order); err != nil {
+    return err
+}
+```
+
+Handlers return ordinary `error` values. Use `MarkPermanent` for an immediate
+DLQ decision, `MarkRetryAfter` for an explicit retry time, and `MarkSkip` for an
+intentional acknowledgement. Returning any other non-nil error applies the
+configured retry policy.
+
+The core recovers panics from handlers and their middleware by default. A panic
+becomes `ErrHandlerPanic`, follows the normal retry policy, and goes directly to
+DLQ on the final permitted attempt. Worker goroutines remain available for later
+deliveries. Panicking with a `PermanentError` does not classify it as permanent;
+return `MarkPermanent(err)` explicitly for that outcome. Existing `Recoverer`
+middleware remains supported and can also protect handlers invoked outside the
+engine. An outer middleware may classify its returned `ErrHandlerPanic`.
+
+Recovery logs at most 32 stack frames / 8 KiB of function names and source
+locations, without argument values. The original panic value is not formatted,
+logged, or stored in retry/DLQ error metadata. Recovery covers the handler's
+calling goroutine; application-created goroutines need their own recovery.
+
+## Compatibility adapters
+
+Metrics/tracing now run throughout publish, processing, and settlement. Existing
+`Metrics` and `Tracer` implementations still compile; extended hooks use optional
+interfaces. `IncEnqueue` also receives `duplicate` for a skipped dedupe publish.
+See [OBSERVABILITY.md](OBSERVABILITY.md) for hook semantics, trace injection,
+stats availability flags, and concurrency requirements.
+
+The following APIs remain available so existing applications can migrate
+incrementally. New code should use the canonical replacement.
+
+| Legacy API | Replacement | Compatibility behavior |
+| --- | --- | --- |
+| `Register(name, handler, opts...)` | `DeclareTask`, then `HandleTask` | Adapter performs both operations and preserves sentinel error identity. |
+| `PublishEvent(ctx, name, payload, opts...)` | `Publish` | Adapter delegates directly to `Publish`. |
+| `Subscribe` on an undeclared name | `DeclareEvent`, then `Subscribe` | Implicit event declaration remains temporarily supported. |
+| `Config.AutoRegister` | Explicit declaration | Still supported, but deprecated. |
+| `Config.MaxDeliveries` | `Config.MaxAttempts` | Legacy value is normalized to total attempts. |
+| `WithMaxDeliveries(n)` | `WithMaxAttempts(n)` | Alias with total-attempt semantics. |
+| `Job.GetAttempt()` | `Job.Attempt()` | Delegating adapter. |
+| `Job.MaxRetry()` | `Job.MaxAttempts()` | Delegating adapter. |
+| `Codec.Encode(...)` | `Codec.EncodeTopology(...)` | Encodes a task topology for compatibility. |
+
+Continue to classify public failures with `errors.Is`; adapters preserve the
+existing sentinels:
+
+```go
+if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.ErrUnknownJobType) {
+    // Declare the event or correct the topology name.
+}
+```
+
+## Breaking changes without adapters
+
+- Kafka EventBus applications should prefer
+  `kafkadriver.NewWithConfig(kafka.Config)` for an owned transport or
+  `kafkadriver.NewWithClient(*kafka.Client)` for a connected caller-owned
+  client. Both paths propagate the complete broker/security/timeout snapshot to
+  internal main and delay consumers. The old `New(*kgo.Client, brokers)` remains
+  as a deprecated adapter and now clones the native client's effective options;
+  the broker slice is only an explicit seed override. Registry construction no
+  longer calls the panic-on-missing `kafka.Default`; a missing or disconnected
+  default returns an ordinary startup error. SASL protocols now reject a
+  missing mechanism or credentials, and OAuthBearer requires a static token
+  because token-URL exchange is not implemented.
+- EventBus jobs may now set `WithDedupeTTL`; the duration is persisted in the
+  v3 envelope as `dedupe_ttl_ns`. Omitting it retains the former 24-hour
+  default. A positive TTL without `WithDedupeKey`, or a negative TTL, is now an
+  invalid option.
+- NATS dedupe reservations now use the durable, topology-scoped
+  `eventbus_dedupe_v2` KV bucket with per-reservation expiry and CAS. The old
+  global `eventbus_dedupe` bucket is not migrated or read; during rollout, a
+  key reserved only by an old process may be accepted once by a new process.
+  Drain mixed-version producers when that duplicate window is unacceptable,
+  then remove the legacy bucket according to your broker retention policy.
+  NATS ordering keys no longer populate `Nats-Msg-Id`; distinct message IDs
+  sharing an ordering key are no longer collapsed. Consumers restore the
+  logical ID from `X-EventBus-Message-Id`, falling back to `Nats-Msg-Id` for
+  records produced before this change.
+- NATS delayed storage now uses collision-free `v2.<second>.<run-at>.<uuid>`
+  KV keys and wrapped scheduling records instead of raw payloads under
+  `<run-at>_<message-id>`. The scheduler migrates valid legacy entries with a
+  create-before-delete transfer, preserving payload and logical ID. Do not
+  delete the topology delay bucket during rollout. `nats.delay_batch_size`
+  controls successful publications per pass (default 100, range 1–1000), and
+  `nats.delay_lease` controls multi-instance claim recovery (default 30s).
+  Delayed transfer remains at-least-once: a crash after broker publish but
+  before KV deletion can redeliver after the lease and broker duplicate window.
+  See [driver/nats/SCHEDULER.md](driver/nats/SCHEDULER.md).
+- NATS deliveries now send `InProgress` at one third of consumer `AckWait`,
+  including a renewal before handler execution. Set `nats.ack_wait` high enough
+  for broker round trips; heartbeat failure cancels handling and deliberately
+  leaves the source unsettled. Retry/DLQ now use source-sequence-derived
+  transfer IDs and wait for durable destination acknowledgement before source
+  ACK/Term. Transfer identity includes the durable consumer, keeping event
+  subscriber outcomes isolated. DLQ uses terminal acknowledgement after transfer, so records that
+  previously relied on ordinary ACK redelivery behavior will no longer be
+  redelivered after successful dead-letter publication. The guarantee remains
+  at-least-once, not atomic or exactly-once.
+- NATS now advertises `transport.DLQAdmin`, `transport.CursorDLQAdmin`, and
+  `transport.StatsReader`. New DLQ entries are versioned wrappers that preserve
+  the original envelope plus failure and JetStream source metadata; DLQ entries
+  written by the earlier raw-payload format cannot be listed or requeued by the
+  new admin API and should be drained before upgrading. Use `DeadLetter.ID`
+  (the DLQ stream sequence), not the logical message ID, for requeue. Requeue is
+  publish-before-delete and duplicate-prone rather than atomic. Stats represent
+  per-consumer delivery obligations, so event lag can exceed retained message
+  count, while delayed and DLQ values remain separate.
+- NATS topology startup now reconciles existing main/DLQ stream configuration
+  and durable pull consumers. Compatible changes to EventBus-owned stream
+  fields, `AckWait`, and `MaxAckPending` are applied; incompatible storage or
+  consumer modes fail startup instead of being silently accepted. Consumer
+  `MaxAckPending` is now the effective topology `concurrency + prefetch`, not a
+  hard-coded 20,000. Review capacity and redelivery behavior before rollout.
+- Redis heartbeat now renews only the delivery's current consumer ownership;
+  lease loss returns `transport.ErrLeaseLost`. The engine renews before execution
+  and cancels processing on renewal failure, leaving the source unsettled.
+  Configure `redis.ack_wait` above prefetch/batch waiting time plus operational
+  margin. Renewal does not fence external handler side effects; keep handlers
+  idempotent. See the Redis key-layout guide for the full lease policy.
+- Redis reclaim now requires Redis 6.2+ (`XAUTOCLAIM`) and returns command errors
+  through the consume supervisor. Reclaim preserves stream identity/delivery
+  history; `redis.block` is capped at two seconds for reclaim progress. See
+  [KEY_LAYOUT.md](driver/redis/KEY_LAYOUT.md#reclaim) for idle/heartbeat policy.
+- Redis EventBus now uses the versioned, encoded topology key layout in
+  [driver/redis/KEY_LAYOUT.md](driver/redis/KEY_LAYOUT.md). Stream/delayed/DLQ/
+  metadata/dedupe keys share a cluster hash tag and dedupe is topology-scoped.
+  Drain/migrate old keys before switching; existing backlogs and consumer groups
+  are not automatically discovered by the new driver.
+- Redis `redis.delay_batch_size` is now bounded to 1–1000 (default 100).
+  Delayed dispatch does not trim the destination with `redis.maxlen`, avoiding
+  deletion of unprocessed work. Provision storage accordingly; other existing
+  publication paths retain their current retention behavior.
+- Redis retry/DLQ now use same-slot Lua settlement. Stale sources return
+  `transport.ErrDeliverySettled` without publishing another copy. DLQ settlement
+  no longer applies `redis.dlq_maxlen`; records remain until explicitly managed.
+  Retry deadlines already in the past still pass through the delayed sweeper.
+- Redis now advertises `transport.DLQAdmin` and
+  `transport.CursorDLQAdmin`. Prefer `ListPage` with its opaque Redis stream-ID
+  cursor when requeue can happen during a scan; positional `List` is retained
+  for compatibility. Requeue identifiers are `DeadLetter.ID` admin record IDs,
+  not envelope `DeadLetter.Message.ID` values. Requeue is a bounded same-slot
+  Lua transfer to the ready stream and is idempotent for repeated IDs. Purge is
+  topology-scoped and irreversible. See the Redis key-layout guide for limits
+  and durability details.
+- Redis now advertises `transport.StatsReader`. `Pending` counts ready delivery
+  obligations, `InFlight` counts pending-entry-list records, and `Lag` is their
+  sum; delayed and DLQ counts remain separate. Event values aggregate all
+  `subscriber:*` groups, so they can exceed physical stream length. Task streams
+  without a `workers` group are treated as entirely ready. Reads are
+  near-point-in-time rather than atomic; Redis 6.2-compatible servers may scan
+  the ready backlog in cancellable pages when Redis 7 lag metadata is absent.
+  See the Redis key-layout guide for full semantics and polling cost.
+- Successful envelope decoding now makes its ID, type, ordering key, dedupe key,
+  and headers authoritative over missing or stale broker metadata. Retry uses
+  these restored fields. Custom delivery implementations should use
+  `Decision.Source`, when non-nil, for DLQ source records; nil means decoding
+  failed or a caller settled directly, so retain the raw delivery message.
+  Source payload bytes remain unchanged. Never mutate the supplied metadata.
+- `Bus` now includes `Drain(ctx)`. Implementations and mocks must add it.
+  `Drain`, `Stop`, and `Close` share one terminal shutdown: stop intake, finish
+  accepted/prefetched deliveries and settlement within the first caller's grace
+  deadline, then close the transport. In-flight handler contexts and heartbeats
+  remain active during that window (their normal processing timeout still
+  applies). Deadline expiry cancels workers and settlement; unfinished sources
+  remain unacknowledged for redelivery by durable brokers. Handlers must observe
+  cancellation: Go cannot terminate a handler that ignores its context. A late
+  handler result after force cancellation is not settled by the engine.
+  Memory transport remains non-durable and does not guarantee redelivery.
+  Custom consumers that own per-session settlement clients must invoke
+  `Subscription.WaitForHandlers`, when non-nil, after stopping callbacks and
+  before closing those clients. Kafka uses this barrier to keep its offset
+  settlement client alive while draining. Brokers may still redeliver after
+  lease expiry or group changes; handlers must remain idempotent.
+- `Bus` now includes `Close(ctx)`. Implementations and mocks of `Bus` must add
+  this method; `Stop(ctx)` remains available and shares the same shutdown path.
+  Closing a producer-only or never-started bus now releases its transport too.
+  `Start` can be retried after provisioning failure, returns `ErrAlreadyStarted`
+  during startup/running, and returns `ErrBusClosed` after shutdown begins.
+  Concurrent shutdown calls share one transport close and its result. The first
+  caller supplies the cleanup deadline; later callers bound only their own wait.
+- Custom transport implementations must implement the new single-use
+  `Delivery.Settle` and `Delivery.Heartbeat` contract. The old Ack/Retry/DLQ
+  methods cannot coexist safely because they allow contradictory settlements.
+- New v3 envelopes use 1-based `attempt` and `max_attempts`. The codec upgrades
+  v2 envelopes automatically, but code that reads raw envelope JSON must be
+  updated.
+- Statistics, DLQ administration, deduplication, and pause/resume are optional
+  transport capabilities. A custom transport must implement the corresponding
+  optional interface or callers receive `ErrNotSupported`.
+- Strict validation now rejects blank or padded names, nil handlers/options,
+  invalid numeric values, conflicting schedule options, and driver options
+  unsupported by the selected transport. Values that were previously ignored
+  can now fail during declaration or publishing.
+- Handlers return `error`. Older documentation that mentioned `Outcome`,
+  `Success`, `Error`, or `Permanent` described APIs that do not exist; use the
+  error helpers listed above.
+
+## Migrating legacy queue applications
+
+1. Make every handler idempotent using a stable business key or message ID.
+2. Map legacy queue names to explicitly declared task names and move retry
+   counts to total-attempt semantics.
+3. Deploy EventBus consumers in shadow mode without real side effects and
+   compare decode results, attempts, latency, failures, and DLQ outcomes.
+4. Switch producers to EventBus behind a rollback flag. Avoid naive dual-write:
+   partial publish failures can produce divergent queues.
+5. Drain the legacy queues while their old consumers remain active.
+6. Enable EventBus side effects, stop legacy consumers, and retain rollback
+   capability through the agreed soak period.
+
+Do not run old and new consumers with the same real side effects unless both
+paths share a proven idempotency mechanism. Driver-specific topology options
+must only be supplied when that driver is selected.

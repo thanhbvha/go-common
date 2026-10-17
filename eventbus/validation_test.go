@@ -1,0 +1,193 @@
+package eventbus
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/thanhbvha/go-common/eventbus/transport"
+)
+
+func TestConfigRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "blank namespace", mutate: func(c *Config) { c.Namespace = "   " }},
+		{name: "namespace surrounding whitespace", mutate: func(c *Config) { c.Namespace = " app" }},
+		{name: "blank driver", mutate: func(c *Config) { c.Driver = " " }},
+		{name: "negative process timeout", mutate: func(c *Config) { c.ProcessTimeout = -time.Second }},
+		{name: "negative concurrency", mutate: func(c *Config) { c.Concurrency = -1 }},
+		{name: "negative prefetch", mutate: func(c *Config) { c.Prefetch = -1 }},
+		{name: "negative max attempts", mutate: func(c *Config) { c.MaxAttempts = -1 }},
+		{name: "negative legacy max deliveries", mutate: func(c *Config) { c.MaxDeliveries = -1 }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Validate error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
+func TestPublicAPIsRejectInvalidNames(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(Bus) error
+	}{
+		{name: "declare empty task", call: func(b Bus) error { return b.DeclareTask("") }},
+		{name: "declare blank event", call: func(b Bus) error { return b.DeclareEvent("  ") }},
+		{name: "register padded task", call: func(b Bus) error { return b.Register(" task", func(context.Context, Job) error { return nil }) }},
+		{name: "subscribe empty event", call: func(b Bus) error {
+			return b.Subscribe("", "subscriber", func(context.Context, Job) error { return nil })
+		}},
+		{name: "subscribe empty subscriber", call: func(b Bus) error { return b.Subscribe("event", "", func(context.Context, Job) error { return nil }) }},
+		{name: "enqueue empty task", call: func(b Bus) error { return b.Enqueue(context.Background(), "", nil) }},
+		{name: "publish blank event", call: func(b Bus) error { return b.Publish(context.Background(), " ", nil) }},
+		{name: "stats empty task", call: func(b Bus) error { _, err := b.Stats(context.Background(), ""); return err }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := tt.call(instance); !errors.Is(err, ErrInvalidName) {
+				t.Fatalf("error = %v, want ErrInvalidName", err)
+			}
+		})
+	}
+}
+
+func TestRegistrationRejectsNilHandlersWithoutMutation(t *testing.T) {
+	instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := instance.Register("task", nil); !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Register error = %v, want ErrNilHandler", err)
+	}
+	concrete := instance.(*bus)
+	if _, exists := concrete.engine.taskTopologies["task"]; exists {
+		t.Fatal("nil Register partially declared the task")
+	}
+	if err := instance.DeclareTask("declared"); err != nil {
+		t.Fatalf("DeclareTask: %v", err)
+	}
+	if err := instance.HandleTask("declared", nil); !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("HandleTask error = %v, want ErrNilHandler", err)
+	}
+	if err := instance.Subscribe("event", "subscriber", nil); !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Subscribe error = %v, want ErrNilHandler", err)
+	}
+	if _, exists := concrete.engine.eventTopologies["event"]; exists {
+		t.Fatal("nil Subscribe partially declared the event")
+	}
+}
+
+func TestHandlePropagatesNilTypedHandlersToRegistrationValidation(t *testing.T) {
+	instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var typed TypedHandler[string]
+	if err := instance.Register("task", Handle(typed)); !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Register error = %v, want ErrNilHandler", err)
+	}
+}
+
+type rejectingTopologyTransport struct {
+	benchmarkTransport
+}
+
+func (*rejectingTopologyTransport) ValidateTopology(transport.Topology) error {
+	return fmt.Errorf("driver rejected topology")
+}
+
+func TestDeclarationInvokesDriverTopologyValidator(t *testing.T) {
+	instance, err := Open(DefaultConfig(), WithTransport(&rejectingTopologyTransport{}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := instance.DeclareTask("task"); !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("DeclareTask error = %v, want ErrInvalidOption", err)
+	}
+}
+
+func TestTopologyOptionsAreStrictlyValidated(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []TopologyOption
+	}{
+		{name: "zero concurrency", opts: []TopologyOption{WithConcurrency(0)}},
+		{name: "negative concurrency", opts: []TopologyOption{WithConcurrency(-1)}},
+		{name: "zero prefetch", opts: []TopologyOption{WithPrefetch(0)}},
+		{name: "negative prefetch", opts: []TopologyOption{WithPrefetch(-1)}},
+		{name: "zero max attempts", opts: []TopologyOption{WithMaxAttempts(0)}},
+		{name: "negative max attempts", opts: []TopologyOption{WithMaxAttempts(-1)}},
+		{name: "nil option", opts: []TopologyOption{nil}},
+		{name: "empty option key", opts: []TopologyOption{WithOption("", 1)}},
+		{name: "unknown core option", opts: []TopologyOption{WithOption("eventbus.unknown", 1)}},
+		{name: "wrong core option type", opts: []TopologyOption{WithOption("eventbus.concurrency", "ten")}},
+		{name: "option for another driver", opts: []TopologyOption{WithOption("redis.maxlen", int64(100))}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := instance.DeclareTask("task", tt.opts...); !errors.Is(err, ErrInvalidOption) {
+				t.Fatalf("DeclareTask error = %v, want ErrInvalidOption", err)
+			}
+		})
+	}
+}
+
+func TestJobOptionsAreStrictlyValidated(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []JobOption
+	}{
+		{name: "negative delay", opts: []JobOption{WithDelay(-time.Second)}},
+		{name: "delay and run-at", opts: []JobOption{WithDelay(time.Second), WithRunAt(time.Now().Add(time.Hour))}},
+		{name: "nil option", opts: []JobOption{nil}},
+		{name: "empty header key", opts: []JobOption{WithHeader("", "value")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := instance.DeclareTask("task"); err != nil {
+				t.Fatalf("DeclareTask: %v", err)
+			}
+			if err := instance.Enqueue(context.Background(), "task", "payload", tt.opts...); !errors.Is(err, ErrInvalidOption) {
+				t.Fatalf("Enqueue error = %v, want ErrInvalidOption", err)
+			}
+		})
+	}
+}
+
+func TestCodecRejectsInvalidTopologyMetadata(t *testing.T) {
+	codec := NewCodec(nil)
+	if _, _, err := codec.Encode("", nil, 1); !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("empty topology error = %v, want ErrInvalidName", err)
+	}
+	if _, _, err := codec.EncodeTopology(TopologyKind(99), "task", nil, 1); !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("invalid kind error = %v, want ErrInvalidOption", err)
+	}
+	if _, _, err := codec.Encode("task", nil, -1); !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("negative max attempts error = %v, want ErrInvalidOption", err)
+	}
+}

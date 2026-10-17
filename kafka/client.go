@@ -2,16 +2,12 @@ package kafka
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"net"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl/oauth"
-	"github.com/twmb/franz-go/pkg/sasl/plain"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 // Client wraps a franz-go kgo.Client with lifecycle management, a periodic
@@ -171,6 +167,18 @@ func (c *Client) Ping(ctx context.Context) error {
 	return kc.Ping(ctx)
 }
 
+// Config returns a copy of the configuration used to create this client.
+func (c *Client) Config() Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	cfg := c.cfg
+	cfg.Brokers = slices.Clone(c.cfg.Brokers)
+	if c.cfg.TLSConfig != nil {
+		cfg.TLSConfig = c.cfg.TLSConfig.Clone()
+	}
+	return cfg
+}
+
 // Native returns the underlying *kgo.Client for advanced operations not
 // covered by this wrapper. Use with care and avoid closing the raw client
 // directly.
@@ -218,110 +226,15 @@ func Close() error {
 // buildOptions converts Config into a []kgo.Opt, applying TLS and SASL
 // settings based on SecurityProtocol and SASLMechanism.
 func (c *Client) buildOptions() ([]kgo.Opt, error) {
-	cfg := c.cfg
-
-	if len(cfg.Brokers) == 0 {
-		cfg.Brokers = []string{"localhost:9092"}
-	}
-
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.ClientID(cfg.ClientID),
-		kgo.DialTimeout(cfg.DialTimeout),
-		kgo.RequestTimeoutOverhead(cfg.WriteTimeout),
-	}
-
-	// --- TLS ---
-	if cfg.SecurityProtocol == SSL || cfg.SecurityProtocol == SASLSSL {
-		tlsCfg := cfg.TLSConfig
-		if tlsCfg == nil {
-			tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
-		}
-		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
-	}
-
-	// --- SASL ---
-	switch cfg.SASLMechanism {
-	case SASLPlain:
-		opts = append(opts, kgo.SASL(plain.Auth{
-			User: cfg.SASLUsername,
-			Pass: cfg.SASLPassword,
-		}.AsMechanism()))
-
-	case SASLSCRAMSHA256:
-		auth := scram.Auth{User: cfg.SASLUsername, Pass: cfg.SASLPassword}
-		opts = append(opts, kgo.SASL(auth.AsSha256Mechanism()))
-
-	case SASLSCRAMSHA512:
-		auth := scram.Auth{User: cfg.SASLUsername, Pass: cfg.SASLPassword}
-		opts = append(opts, kgo.SASL(auth.AsSha512Mechanism()))
-
-	case SASLOAuthBearer:
-		if cfg.SASLToken == "" && cfg.SASLTokenURL == "" {
-			return nil, fmt.Errorf("kafka: SASLOAuthBearer requires SASLToken or SASLTokenURL")
-		}
-		staticToken := cfg.SASLToken
-		opts = append(opts, kgo.SASL(oauth.Oauth(func(ctx context.Context) (oauth.Auth, error) {
-			return oauth.Auth{Token: staticToken}, nil
-		})))
-	}
-
-	// --- Producer options ---
-	compressionOpts, err := buildCompressionOpt(cfg.ProducerCompression)
+	factory, err := NewNativeClientFactory(c.cfg)
 	if err != nil {
 		return nil, err
 	}
-	opts = append(opts, compressionOpts)
-
-	opts = append(opts,
-		kgo.ProduceRequestTimeout(cfg.ProducerTimeout),
-		kgo.RecordRetries(cfg.ProducerMaxRetries),
-		kgo.RetryBackoffFn(exponentialBackoff(cfg.ProducerRetryBackoff, 30*time.Second)),
-		kgo.MaxBufferedBytes(cfg.ProducerBatchSize),
-		kgo.ProducerBatchMaxBytes(int32(cfg.ProducerBatchSize)),
-		kgo.ProducerLinger(cfg.ProducerBatchMaxWait),
-	)
-
-	if cfg.ProducerIdempotent && cfg.ProducerAcks == -1 {
-		opts = append(opts, kgo.RequiredAcks(kgo.AllISRAcks()))
-		opts = append(opts, kgo.RecordPartitioner(kgo.StickyKeyPartitioner(nil)))
-	} else {
-		switch cfg.ProducerAcks {
-		case 0:
-			opts = append(opts, kgo.RequiredAcks(kgo.NoAck()))
-		case 1:
-			opts = append(opts, kgo.RequiredAcks(kgo.LeaderAck()))
-		default:
-			opts = append(opts, kgo.RequiredAcks(kgo.AllISRAcks()))
-		}
+	opts := append(slices.Clone(factory.base), factory.producer...)
+	if c.cfg.ConsumerGroup != "" {
+		opts = append(opts, factory.consumer...)
+		opts = append(opts, kgo.ConsumerGroup(c.cfg.ConsumerGroup))
 	}
-
-	// --- Consumer options ---
-	if cfg.ConsumerGroup != "" {
-		resetOffset := kgo.NewOffset().AtStart()
-		if cfg.ConsumerAutoOffsetReset == "latest" {
-			resetOffset = kgo.NewOffset().AtEnd()
-		}
-		opts = append(opts,
-			kgo.ConsumerGroup(cfg.ConsumerGroup),
-			kgo.ConsumeResetOffset(resetOffset),
-			kgo.SessionTimeout(cfg.ConsumerSessionTimeout),
-			kgo.HeartbeatInterval(cfg.ConsumerHeartbeat),
-			kgo.FetchMaxWait(cfg.ConsumerFetchMaxWait),
-		)
-
-		if cfg.ConsumerCommitInterval > 0 {
-			opts = append(opts, kgo.AutoCommitInterval(cfg.ConsumerCommitInterval))
-			opts = append(opts, kgo.AutoCommitMarks())
-		} else {
-			opts = append(opts, kgo.DisableAutoCommit())
-		}
-	}
-
-	// Custom dialer to apply DialTimeout on TCP level.
-	dialer := &net.Dialer{Timeout: cfg.DialTimeout}
-	opts = append(opts, kgo.Dialer(dialer.DialContext))
-
 	return opts, nil
 }
 

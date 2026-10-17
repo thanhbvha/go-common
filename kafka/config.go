@@ -130,7 +130,8 @@ type Config struct {
 	SASLToken string
 
 	// SASLTokenURL is the OAuth 2.0 token endpoint URL.
-	// When set, the client fetches and refreshes tokens automatically.
+	// Automatic token endpoint exchange is not currently implemented; a URL
+	// without SASLToken is rejected rather than silently sending an empty token.
 	SASLTokenURL string
 
 	// --- Producer ---

@@ -14,6 +14,9 @@ A production-ready Apache Kafka client for `go-common`, built on top of
 - **Structured logging** — pluggable `Logger` interface (compatible with `go-common/logger`)
 - **Graceful shutdown** — `Flush` before `Close` to avoid data loss
 
+- **Native client factory** — role-specific clients inherit one immutable
+  broker, TLS/SASL, client-ID, timeout, retry, and batching configuration
+
 ## Quick start
 
 ```go
@@ -44,6 +47,22 @@ cfg.SecurityProtocol    = kafka.SASLSSL          // TLS + SASL
 cfg.SASLMechanism       = kafka.SASLSCRAMSHA256  // recommended
 cfg.SASLUsername        = os.Getenv("KAFKA_USER")
 cfg.SASLPassword        = os.Getenv("KAFKA_PASSWORD")
+```
+
+`SASLOAuthBearer` currently supports a static `SASLToken`. A configured token
+URL without a static token is rejected; automatic token-endpoint exchange is
+not implemented.
+
+Use `NewNativeClientFactory` when a framework integration needs separate
+producer and consumer instances without duplicating security options:
+
+```go
+factory, err := kafka.NewNativeClientFactory(cfg)
+producer, err := factory.NewProducer()
+consumer, err := factory.NewConsumer(
+    kgo.ConsumerGroup("workers"),
+    kgo.ConsumeTopics("jobs"),
+)
 ```
 
 ## Configuration reference
