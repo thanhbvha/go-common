@@ -1,6 +1,6 @@
 # EventBus Refactor Execution Plan
 
-> Status: Phase 5 verified complete; P5.1-P5.8 complete
+> Status: Phase 6 verified complete; Phase 6.7 hardening planned; Phase 7 not started
 > Scope: `eventbus`, `redis`, `kafka`, `nats`, `queue`, `queue_kafka`, `queue_nats`  
 > Primary goal: turn `eventbus` into a production-grade, transport-agnostic task queue with explicit event fan-out support.  
 > Delivery guarantee: at-least-once. Exactly-once is not promised.
@@ -507,9 +507,204 @@ Dependencies: Phases 3, 4, and 5 complete.
 - [x] Resource use remains bounded under delayed and retry-heavy workloads.
 - [x] Operational APIs have examples and integration tests.
 
-## 13. Phase 7 - Migration and legacy deprecation
+## 13. Phase 6.7 - Pre-migration safety and production hardening
 
 Dependencies: Phase 6 complete.
+
+This phase resolves the findings in
+[`PRE_PHASE7_REVIEW.md`](PRE_PHASE7_REVIEW.md) before compatibility adapters or
+shadow production traffic make the remaining behavior harder to change. Finding
+IDs below refer to that review. Complete the tasks in order unless a task notes
+otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
+
+- [ ] **P6.7.1 Close no-loss and routing invariant gaps**
+  - Fix the dedupe reserve/publish/release ambiguity (EB-01). A failed publish
+    plus failed reservation cleanup must never turn a later retry into a
+    successful duplicate response when no durable message exists. Cleanup must
+    be time-bounded and its ambiguous outcome observable.
+  - Remove unsafe ready-stream trimming from Redis immediate publication or
+    replace it with an observable retention process proven safe against every
+    relevant task/event consumer group (EB-02). Lossy retention must be an
+    explicit, separately named mode and cannot advertise the durable contract.
+  - Replace separator-joined broker resource names with a versioned, injective
+    component encoding and document migration/alias handling for existing
+    Memory, NATS, and Kafka resources (EB-03).
+  - Add deterministic fault tests for dedupe cleanup, Redis backlog retention,
+    and hostile topology names.
+  - Acceptance: every successful publication is observable by every intended
+    group, and distinct `(namespace, kind, name, subscriber)` tuples cannot map
+    to the same physical resource.
+  - Notes:
+
+- [ ] **P6.7.2 Harden Memory and define its parity boundary**
+  - Treat Memory as a bounded, process-local reference transport. It must match
+    all transport-independent EventBus semantics that it advertises, but must
+    not claim broker durability, restart recovery, cross-process coordination,
+    or distributed ordering (EB-04).
+  - Replace the fixed, silently dropping channel behavior with configurable
+    per-topology/group capacity and one documented policy: a stable typed
+    capacity error or context-bounded backpressure. A `nil` publish result must
+    mean the message is observable by every intended group; partial fan-out and
+    ambiguous acceptance must be returned explicitly and covered by retry-safe
+    tests.
+  - Provision declared event subscriber groups before publication rather than
+    when `Consume` first starts. Define declaration/redeclaration behavior so an
+    event published after successful setup cannot disappear merely because its
+    local consume session has not started yet.
+  - Replace one goroutine/timer per delayed message with a single owned,
+    capacity-bounded scheduler (for example, a priority queue plus timer). Make
+    scheduler admission errors synchronous, surface dispatch failures, and join
+    the scheduler on `Drain`/`Close`; document that accepted delayed entries are
+    still process-local and do not survive process termination.
+  - Scope dedupe reservations by physical topology and expiry, and apply the
+    same reserve/publish/release ambiguity rules as other dedupe drivers. Do not
+    let two tasks/events sharing a caller key suppress each other.
+  - Verify real in-process retry, delayed delivery, DLQ list/count/requeue/purge,
+    stats, settlement/redelivery, fan-out isolation, and lifecycle behavior.
+    Return `ErrNotSupported` for any broker/distributed operation Memory cannot
+    implement instead of returning a successful zero value.
+  - Add deterministic tests for capacity saturation and cancellation, atomic or
+    explicitly ambiguous fan-out, publish-before-consume, concurrent publish,
+    topology-scoped dedupe, delayed capacity/order/close, retry and DLQ identity,
+    stats, drain, and post-close behavior. Include Memory in every applicable
+    shared contract test, while capability-gating durable-only scenarios.
+  - Update `CAPABILITIES.md`, `TESTING.md`, examples, and benchmarks to separate
+    API/semantic parity from durability. State that Memory is intended for
+    tests, local development, and explicitly accepted ephemeral workloads—not
+    as a durable substitute for Redis, NATS, or Kafka.
+  - Acceptance: Memory has no silent-success loss path, resource use and
+    goroutine count remain bounded, every advertised in-process capability has
+    contract evidence, unsupported distributed guarantees are machine-readable,
+    and restart loss is explicit in documentation and examples.
+  - Notes:
+
+- [ ] **P6.7.3 Correct and observe durable schedulers**
+  - Redesign Kafka delayed scheduling so a far-future partition head cannot
+    indefinitely block a later near-future deadline, or explicitly reject the
+    unsupported deadline pattern and narrow the advertised guarantee (EB-05).
+  - Add tests with far-future then near-future records in the same Kafka
+    partition and verify the documented delivery bound under bounded backlog.
+  - Expose Redis, NATS, and Kafka scheduler poll/dispatch/transfer/commit errors,
+    retry counts, last-success time, and degraded health through bounded
+    observability hooks (EB-08). Scheduler loops must not silently discard
+    non-cancellation errors.
+  - Make Redis cancellation join every topology sweeper within the caller's
+    shutdown deadline, matching the NATS/Kafka lifecycle contract (EB-09).
+  - Acceptance: advertised precision states all preconditions, scheduler faults
+    are alertable, and `Close` cannot return while an owned scheduler is still
+    using broker resources.
+  - Notes:
+
+- [ ] **P6.7.4 Harden envelope, retry, error, and DLQ boundaries**
+  - Validate every decoded v3 envelope before handler invocation: nonempty and
+    bounded ID, exact topology kind/type match, attempts, timestamps, headers,
+    and required metadata (EB-06). Route mismatches go to DLQ with stable,
+    sanitized reasons.
+  - Make public outcome error types nil-safe; safely render arbitrary handler
+    errors; recover panics from caller-provided extension points such as retry
+    policies without exposing panic values (EB-07).
+  - Reject or clamp negative, overflowing, NaN-equivalent, and otherwise
+    pathological retry delays from `RetryPolicy` and `MarkRetryAfter`.
+  - Bound and sanitize reason/error metadata before logs, traces, and DLQ
+    wrappers. Enforce a final encoded DLQ record limit so poison metadata cannot
+    cause infinite settlement failure or leak credentials/personal data.
+  - Acceptance: hostile error implementations, malformed envelopes, oversized
+    error strings, wrong route metadata, and invalid retry delays have
+    deterministic non-panicking tests across the core and applicable drivers.
+  - Notes:
+
+- [ ] **P6.7.5 Complete administration and Kafka topology reconciliation**
+  - Add kind-explicit task/event statistics and stable Bus-level DLQ
+    list/count/requeue/purge APIs, including cursor pagination where supported
+    (EB-10). Preserve `ErrNotSupported` and keep destructive actions explicit.
+  - Reconcile safety-critical configuration for existing Kafka main, DLQ, and
+    delay topics instead of accepting `TopicAlreadyExists` after checking only
+    partitions (EB-11). Validate replication, retention, and owned topic
+    settings; reject unsafe `cleanup.policy=compact` for queue records.
+  - Design an explicit Kafka partition-expansion operation that expands main,
+    DLQ, and all delay topics, rejects decreases, reports partial admin success,
+    and documents ordering-key remapping. Ordinary startup must not silently
+    change partition counts.
+  - Serialize or fence Kafka DLQ administration across processes, or provide a
+    documented single-operator lease rather than relying only on a process-local
+    mutex.
+  - Acceptance: public admin examples no longer require access to a concrete
+    transport; existing-topic mismatch/repair and partial partition expansion
+    have deterministic plus live Kafka tests.
+  - Notes:
+
+- [ ] **P6.7.6 Complete contract coverage and production-scale evidence**
+  - Expand `transport/contracttest.Run` so every applicable item in the shared
+    transport contract checklist has an executable capability-gated scenario
+    (EB-12). Map each checklist row to exact tests in `CONTRACT_TESTS.md` and
+    mark it complete only after every enabled durable driver passes.
+  - Add the combined dedupe fault window, topology-name collision, envelope
+    route mismatch, scheduler health, Redis retention, and Kafka delayed
+    head-of-line regressions discovered by the pre-Phase 7 review.
+  - Run 100,000- and 1,000,000-message backlogs on disposable broker
+    infrastructure with immediate, delayed, 10% retry, and 50% retry workloads
+    (EB-13). Include restarts, reconnects, Kafka rebalances, scheduler ownership
+    changes, and settlement ambiguity.
+  - Run a sustained pre-production soak and record broker versions/config,
+    throughput, p50/p95/p99 latency, CPU, RSS/heap, disk, lag, duplicate rate,
+    DLQ outcomes, goroutine growth, and cleanup procedure.
+  - Acceptance: there is no unexplained loss, resource growth is bounded, every
+    advertised guarantee has contract evidence, and unavailable infrastructure
+    is recorded as an open gate rather than silently skipped.
+  - Notes:
+
+- [ ] **P6.7.7 Finalize the API and scalability model before adapters**
+  - Make all public operations return deterministic lifecycle errors while
+    preserving the documented producer-only flow before `Start` (EB-14).
+  - Separate declaration/provisioning options from subscriber/runtime options;
+    reject ignored driver options, conflicting redeclarations, and duplicate
+    subscriber replacement (EB-15). Plan removal of implicit event declaration.
+  - Add result-returning enqueue/publish APIs exposing stable accepted message
+    IDs and durable-prefix batch results while retaining error-only compatibility
+    adapters (EB-16).
+  - Separate the local concurrency/admission key from the broker partition or
+    ordering key so keyed concurrency is not accidentally Kafka-only (EB-17).
+  - Make delay infrastructure opt-in or share scheduler resources where the
+    broker contract permits; document topology × tier × partition/client costs
+    and enforce practical bounds (EB-18).
+  - Add an explicit per-topology Kafka capacity model to examples. Do not use
+    one global helper that demonstrates concurrency 4 with only 3 partitions;
+    document `ceil(partitions / planned instances)` as a starting point, not a
+    universal rule (EB-19).
+  - Replace the two-field capability descriptor with structured durability,
+    ordering scope, settlement guarantee, dedupe, heartbeat, admin, pause,
+    payload, and scheduler-health declarations; keep code, docs, dashboards,
+    and tests synchronized (EB-20).
+  - Acceptance: the API needed by P7.1-P7.3 is stable, compiling migration
+    examples cover old and new entry points, and no Phase 7 adapter must depend
+    on an ambiguous or silently ignored option.
+  - Notes:
+
+### Phase 6.7 exit criteria
+
+- [ ] All P0 and P1 findings in `PRE_PHASE7_REVIEW.md` are closed with
+  regression tests; any deferred P2 finding has an explicit compatibility and
+  release decision.
+- [ ] Successful publication on a durable driver cannot be reproduced without
+  durable acceptance, and all physical topology/group names are collision-free
+  under supported inputs.
+- [ ] Memory has no silent-success loss path, uses bounded queues and delayed
+  scheduling, provisions event groups before publish, and passes every shared
+  contract scenario applicable to its declared process-local capabilities.
+- [ ] Durable schedulers meet their documented deadline/lifecycle guarantees and
+  expose actionable failures.
+- [ ] Public task/event stats and DLQ administration work without concrete
+  transport access.
+- [ ] Every applicable shared transport contract row maps to passing tests for
+  Memory, Redis, NATS, and Kafka, capability-gating durable-only behavior.
+- [ ] Disposable 100k/1m backlog runs and a sustained pre-production soak are
+  recorded with no unexplained loss and bounded resources.
+- [ ] Phase 7-facing publication identities, options, capabilities, and
+  lifecycle semantics are finalized and documented.
+
+## 14. Phase 7 - Migration and legacy deprecation
+
+Dependencies: Phase 6.7 complete.
 
 - [ ] **P7.1 Build adapters for legacy queue APIs**
   - Cover `queue`, `queue_kafka`, and `queue_nats` registration/enqueue patterns where practical.
@@ -548,7 +743,7 @@ Dependencies: Phase 6 complete.
 - [ ] Legacy backlog is zero.
 - [ ] Rollback and deprecation decisions are recorded.
 
-## 14. Shared transport contract test suite
+## 15. Shared transport contract test suite
 
 Every durable driver must pass the same behavioral tests where its capability matrix says supported:
 
@@ -578,7 +773,7 @@ Every durable driver must pass the same behavioral tests where its capability ma
 
 Use channels, fake clocks, and observable hooks instead of fixed sleeps wherever possible.
 
-## 15. Verification commands
+## 16. Verification commands
 
 Run commands appropriate to the changed scope. In restricted Windows environments, use a workspace-local Go cache:
 
@@ -598,10 +793,11 @@ go vet ./redis ./kafka ./nats ./queue ./queue_kafka ./queue_nats
 
 Before completing a transport phase, also run its integration suite using the build tag and environment documented by Phase 0. Do not silently skip unavailable integration infrastructure; record the skipped verification in the relevant Notes section.
 
-## 16. Production release gates
+## 17. Production release gates
 
 All gates are mandatory:
 
+- [ ] Phase 6.7 exit criteria are complete.
 - [ ] No unresolved P0 defect.
 - [ ] Core and all enabled driver contract tests pass.
 - [ ] Default tests are hermetic.
@@ -616,7 +812,7 @@ All gates are mandatory:
 - [ ] Benchmarks and soak-test results are recorded.
 - [ ] Migration rollback procedure has been exercised.
 
-## 17. Current verification snapshot
+## 18. Current verification snapshot
 
 Recorded before refactor implementation:
 
