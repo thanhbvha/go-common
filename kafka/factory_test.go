@@ -215,3 +215,25 @@ func TestFactoryExplicitManualConsumerOverridesAutoCommitConfig(t *testing.T) {
 	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
 	assertKafkaOpt(t, client, kgo.SessionTimeout, cfg.ConsumerSessionTimeout)
 }
+
+func TestFactoryDirectReaderOmitsConsumerGroupCommitOptions(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ConsumerCommitInterval <= 0 {
+		t.Fatal("test requires automatic commits in the input config")
+	}
+	factory, err := NewNativeClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := factory.NewReader(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+		"dlq": {0: kgo.NewOffset().AtStart()},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	assertKafkaOpt(t, client, kgo.ConsumerGroup, "")
+	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
+	assertKafkaOpt(t, client, kgo.SessionTimeout, cfg.ConsumerSessionTimeout)
+	assertKafkaOpt(t, client, kgo.FetchMaxWait, cfg.ConsumerFetchMaxWait)
+}

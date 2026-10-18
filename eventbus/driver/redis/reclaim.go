@@ -14,9 +14,13 @@ func (t *redisTransport) reclaimPage(ctx context.Context, sub transport.Subscrip
 	if value, ok := sub.Topology.Options["redis.ack_wait"].(time.Duration); ok {
 		idle = value
 	}
+	limit := int64(100)
+	if capacity := int64(sub.Concurrency + sub.Prefetch); capacity > 0 {
+		limit = min(limit, capacity)
+	}
 	messages, next, err := t.rc.XAutoClaim(ctx, &goredis.XAutoClaimArgs{
 		Stream: t.streamKey(sub.Topology), Group: t.groupName(sub), Consumer: consumer,
-		Start: cursor, MinIdle: idle, Count: 100,
+		Start: cursor, MinIdle: idle, Count: limit,
 	}).Result()
 	if err != nil {
 		return cursor, err

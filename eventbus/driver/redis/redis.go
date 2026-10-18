@@ -192,10 +192,7 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		return fmt.Errorf("redis Consume XGROUP CREATE: %w", err)
 	}
 
-	batchSize := int64(1)
-	if val, ok := sub.Topology.Options["redis.batch_size"].(int64); ok && val > 0 {
-		batchSize = val
-	}
+	batchSize := consumerBatchSize(sub)
 
 	blockTime := 2 * time.Second
 	if val, ok := sub.Topology.Options["redis.block"].(time.Duration); ok && val > 0 {
@@ -246,6 +243,17 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		}
 	}
 	return ctx.Err()
+}
+
+func consumerBatchSize(sub transport.Subscription) int64 {
+	batchSize := int64(1)
+	if val, ok := sub.Topology.Options["redis.batch_size"].(int64); ok && val > 0 {
+		batchSize = val
+	}
+	if capacity := int64(sub.Concurrency + sub.Prefetch); capacity > 0 {
+		batchSize = min(batchSize, capacity)
+	}
+	return batchSize
 }
 
 func generateID() string {

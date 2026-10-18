@@ -21,6 +21,7 @@ type NativeClientFactory struct {
 	producer       []kgo.Opt
 	consumer       []kgo.Opt
 	manualConsumer []kgo.Opt
+	reader         []kgo.Opt
 }
 
 // NewNativeClientFactory snapshots cfg and validates the common TLS/SASL
@@ -42,6 +43,7 @@ func NewNativeClientFactory(cfg Config) (*NativeClientFactory, error) {
 		cfg: cfg, base: base, producer: producer,
 		consumer:       nativeConsumerOptions(cfg),
 		manualConsumer: nativeManualConsumerOptions(cfg),
+		reader:         nativeConsumerBaseOptions(cfg),
 	}, nil
 }
 
@@ -54,7 +56,9 @@ func NewNativeClientFactoryFromClient(client *kgo.Client, overrides ...kgo.Opt) 
 		return nil, fmt.Errorf("kafka: native client is nil")
 	}
 	base := append(slices.Clone(client.Opts()), overrides...)
-	return &NativeClientFactory{base: base, manualConsumer: []kgo.Opt{kgo.DisableAutoCommit()}}, nil
+	return &NativeClientFactory{
+		base: base, manualConsumer: []kgo.Opt{kgo.DisableAutoCommit()},
+	}, nil
 }
 
 // New creates a client with common connection and security settings plus opts.
@@ -88,6 +92,14 @@ func (f *NativeClientFactory) NewConsumer(opts ...kgo.Opt) (*kgo.Client, error) 
 func (f *NativeClientFactory) NewManualConsumer(opts ...kgo.Opt) (*kgo.Client, error) {
 	consumer := append(slices.Clone(f.manualConsumer), opts...)
 	return f.New(consumer...)
+}
+
+// NewReader creates a direct partition reader without consumer-group commit
+// options while retaining connection, security, reset, and fetch settings.
+// Callers must supply ConsumePartitions or another non-group assignment.
+func (f *NativeClientFactory) NewReader(opts ...kgo.Opt) (*kgo.Client, error) {
+	reader := append(slices.Clone(f.reader), opts...)
+	return f.New(reader...)
 }
 
 // LookupDefault returns the process-wide default without panicking. Libraries

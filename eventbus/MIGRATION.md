@@ -123,6 +123,16 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
 
 ## Breaking changes without adapters
 
+- `Bus` now includes `Pause`, `Resume`, and `DrainTopology`. Implementations and
+  mocks must add these methods. The controls are process-local: pause stops new
+  intake for all local task/subscriber sessions of the named topology, topology
+  drain waits for their accepted work to settle, and resume reconnects them.
+  Publication and other application instances continue normally.
+- `Bus.EnqueueBatch` accepts at most 1,000 `BatchJob` values. It preserves input
+  order but is intentionally non-atomic: `BatchError.Index` identifies the first
+  failed item, earlier items may already be durable, and later items are not
+  attempted. Retry the failed suffix with idempotency or dedupe keys.
+
 - Kafka EventBus main and delay consumers now own synchronous source commits;
   `ConsumerCommitInterval=0` is accepted and no longer controls their
   settlement. The standalone Kafka wrapper retains its configured behavior for
@@ -168,6 +178,19 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   duplicate after an ambiguous publish/commit boundary. Retention must cover
   maximum delay plus outage time. See the Kafka
   [scheduler guide](driver/kafka/SCHEDULER.md).
+  New writes carry the deadline in a private transport header, allowing
+  `PublishAt` to preserve arbitrary payload bytes; the scheduler still reads
+  the previous envelope-embedded deadline during rolling upgrades.
+- Kafka now advertises `transport.DLQAdmin` and `transport.StatsReader`. New DLQ
+  entries are versioned wrappers containing failure and source Kafka metadata;
+  older raw entries are not administrable through the new API. `DeadLetter.ID`
+  is `<partition>:<offset>`. Because Kafka logs are append-only, requeue only
+  accepts complete per-partition prefixes and advances a logical admin cursor
+  after confirmed publication; purge advances that cursor without deleting
+  physical bytes. Response ambiguity can duplicate requeues, and operators must
+  serialize admin mutations across processes. Stats use end minus committed
+  offsets; all main lag is `Pending` because Kafka offsets cannot expose the
+  in-flight split. See the Kafka [admin guide](driver/kafka/ADMIN.md).
 - EventBus jobs may now set `WithDedupeTTL`; the duration is persisted in the
   v3 envelope as `dedupe_ttl_ns`. Omitting it retains the former 24-hour
   default. A positive TTL without `WithDedupeKey`, or a negative TTL, is now an

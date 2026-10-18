@@ -29,6 +29,7 @@ type engine struct {
 	taskTopologies  map[string]Topology
 	eventTopologies map[string]Topology
 	subTopologies   map[string]map[string]Topology
+	controls        map[consumerKey]*consumerControl
 
 	state        int32
 	ctx          context.Context // intake context: polling, reconnect, provisioning
@@ -54,6 +55,7 @@ func newEngine(cfg Config, t transport.Transport, codec *Codec) *engine {
 		taskTopologies:  make(map[string]Topology),
 		eventTopologies: make(map[string]Topology),
 		subTopologies:   make(map[string]map[string]Topology),
+		controls:        make(map[consumerKey]*consumerControl),
 		state:           stateNew,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -279,6 +281,7 @@ func (e *engine) Start(ctx context.Context) (err error) {
 
 	// Start consumers for Work-Queue
 	for jobType, handler := range e.handlers {
+		e.controls[consumerKey{kind: TaskTopology, name: jobType}] = newConsumerControl()
 		e.wg.Add(1)
 		go e.consumeLoop(TaskTopology, jobType, "", handler)
 	}
@@ -286,6 +289,7 @@ func (e *engine) Start(ctx context.Context) (err error) {
 	// Start consumers for Pub-Sub
 	for eventName, handlers := range e.subscribers {
 		for handlerName, handler := range handlers {
+			e.controls[consumerKey{kind: EventTopology, name: eventName, group: handlerName}] = newConsumerControl()
 			e.wg.Add(1)
 			go e.consumeLoop(EventTopology, eventName, handlerName, handler)
 		}
@@ -296,6 +300,7 @@ func (e *engine) Start(ctx context.Context) (err error) {
 
 func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName string, handler Handler) {
 	defer e.wg.Done()
+	control := e.controlFor(consumerKey{kind: kind, name: jobType, group: handlerName})
 
 	e.mu.RLock()
 	var topo Topology
@@ -314,10 +319,16 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 		Jitter:  true,
 	}
 	for attempt := 1; e.ctx.Err() == nil; {
+		if !control.waitReady(e.ctx) {
+			return
+		}
 		started := time.Now()
 		err := e.consumeSession(sub, handler)
 		if e.ctx.Err() != nil || atomic.LoadInt32(&e.state) != stateRunning {
 			return
+		}
+		if control.isPaused() {
+			continue
 		}
 		// A session-local cancellation is reconnectable while the engine is
 		// alive. Even a nil return needs backoff to avoid a hot reconnect loop.
@@ -350,7 +361,12 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 func (e *engine) consumeSession(sub transport.Subscription, handler Handler) error {
 	topo := sub.Topology
 	kind, jobType, handlerName := topo.Kind, topo.JobType, sub.Group
-	ctx, cancel := context.WithCancel(e.ctx)
+	control := e.controlFor(consumerKey{kind: kind, name: jobType, group: handlerName})
+	ctx, cancel, finish, ok := control.begin(e.ctx)
+	if !ok {
+		return context.Canceled
+	}
+	defer finish()
 	defer cancel()
 
 	// Each task/subscriber owns a fixed worker pool and a bounded intake queue.
@@ -768,6 +784,24 @@ func (e *engine) shutdown(ctx context.Context, startDone <-chan struct{}) {
 
 func (e *engine) Enqueue(ctx context.Context, jobType string, payload any, opts ...JobOption) error {
 	return e.publish(ctx, TaskTopology, jobType, payload, opts...)
+}
+
+func (e *engine) EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error {
+	if len(jobs) == 0 {
+		return fmt.Errorf("%w: batch must contain at least one job", ErrInvalidOption)
+	}
+	if len(jobs) > MaxBatchJobs {
+		return fmt.Errorf("%w: batch has %d jobs, maximum is %d", ErrInvalidOption, len(jobs), MaxBatchJobs)
+	}
+	for index, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return &BatchError{Index: index, Err: err}
+		}
+		if err := e.publish(ctx, TaskTopology, jobType, job.Payload, job.Options...); err != nil {
+			return &BatchError{Index: index, Err: err}
+		}
+	}
+	return nil
 }
 
 func (e *engine) PublishEvent(ctx context.Context, eventName string, payload any, opts ...JobOption) error {

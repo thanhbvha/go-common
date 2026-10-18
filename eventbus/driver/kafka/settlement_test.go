@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	commonkafka "github.com/thanhbvha/go-common/kafka"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -173,9 +175,23 @@ func TestKafkaSettlementRoutingAndMetadata(t *testing.T) {
 				}
 			}
 			backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
-				want := &kgo.Record{Topic: wantTopic, Key: []byte(wantMsg.OrderingKey), Value: wantMsg.Payload, Headers: []kgo.RecordHeader{{Key: "correlation-id", Value: []byte("synthetic-correlation")}}}
-				if !reflect.DeepEqual(record, want) {
-					t.Fatalf("%s: record = %+v", scenario, record)
+				wantHeaders := []kgo.RecordHeader{{Key: "correlation-id", Value: []byte("synthetic-correlation")}}
+				if scenario == "retry delayed" {
+					wantHeaders = append(wantHeaders, kgo.RecordHeader{Key: kafkaRunAtHeader, Value: []byte(strconv.FormatInt(decision.RetryAt.UnixMilli(), 10))})
+				}
+				if record.Topic != wantTopic || string(record.Key) != wantMsg.OrderingKey || !reflect.DeepEqual(record.Headers, wantHeaders) {
+					t.Fatalf("%s: record routing = %+v", scenario, record)
+				}
+				if decision.Kind == transport.DecisionDeadLetter {
+					var wrapped kafkaDLQRecord
+					if err := json.Unmarshal(record.Value, &wrapped); err != nil {
+						t.Fatalf("%s: decode DLQ wrapper: %v", scenario, err)
+					}
+					if !reflect.DeepEqual(wrapped.Message, wantMsg) || wrapped.SourceTopic != "jobs" || wrapped.SourcePartition != 0 || wrapped.SourceOffset != 1 {
+						t.Fatalf("%s: DLQ wrapper = %+v", scenario, wrapped)
+					}
+				} else if !reflect.DeepEqual(record.Value, wantMsg.Payload) {
+					t.Fatalf("%s: payload = %q", scenario, record.Value)
 				}
 				return nil
 			})

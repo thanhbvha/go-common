@@ -48,6 +48,11 @@ type Bus interface {
 	// Enqueue adds a job to the queue.
 	Enqueue(ctx context.Context, jobType string, payload any, opts ...JobOption) error
 
+	// EnqueueBatch publishes tasks in input order. It is bounded and non-atomic:
+	// on failure, earlier items may already be durable and later items are not
+	// attempted. BatchError identifies the failed index.
+	EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error
+
 	// PublishEvent publishes an event to multiple subscribers.
 	//
 	// Deprecated: use Publish.
@@ -66,6 +71,17 @@ type Bus interface {
 
 	// Ping checks the health of the underlying transport.
 	Ping(ctx context.Context) error
+
+	// Pause stops new local intake for every consumer of a declared topology.
+	// Accepted deliveries continue handling and settlement.
+	Pause(ctx context.Context, name string) error
+
+	// Resume restarts local intake for a paused topology.
+	Resume(ctx context.Context, name string) error
+
+	// DrainTopology pauses local intake and waits for all accepted deliveries
+	// for that topology to finish. It does not close the bus or transport.
+	DrainTopology(ctx context.Context, name string) error
 }
 
 type bus struct {
@@ -156,6 +172,10 @@ func (b *bus) Enqueue(ctx context.Context, jobType string, payload any, opts ...
 	return b.engine.Enqueue(ctx, jobType, payload, opts...)
 }
 
+func (b *bus) EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error {
+	return b.engine.EnqueueBatch(ctx, jobType, jobs)
+}
+
 // PublishEvent publishes an event to multiple subscribers.
 //
 // Deprecated: use Publish.
@@ -194,4 +214,16 @@ func (b *bus) Ping(ctx context.Context) error {
 		return ErrBusClosed
 	}
 	return b.transport.Ping(ctx)
+}
+
+func (b *bus) Pause(ctx context.Context, name string) error {
+	return b.engine.Pause(ctx, name)
+}
+
+func (b *bus) Resume(ctx context.Context, name string) error {
+	return b.engine.Resume(ctx, name)
+}
+
+func (b *bus) DrainTopology(ctx context.Context, name string) error {
+	return b.engine.DrainTopology(ctx, name)
 }

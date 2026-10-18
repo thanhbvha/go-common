@@ -219,10 +219,7 @@ func (t *natsTransport) Consume(ctx context.Context, sub transport.Subscription,
 	// subscription without deleting that durable consumer on the server.
 	defer nsub.Unsubscribe()
 
-	batchSize := 1
-	if val, ok := sub.Topology.Options["nats.batch_size"].(int); ok && val > 0 {
-		batchSize = val
-	}
+	batchSize := consumerBatchSize(sub)
 
 	fetchTimeout := 2 * time.Second
 	if val, ok := sub.Topology.Options["nats.fetch_timeout"].(time.Duration); ok && val > 0 {
@@ -279,6 +276,17 @@ func (t *natsTransport) Consume(ctx context.Context, sub transport.Subscription,
 			}
 		}
 	}
+}
+
+func consumerBatchSize(sub transport.Subscription) int {
+	batchSize := 1
+	if val, ok := sub.Topology.Options["nats.batch_size"].(int); ok && val > 0 {
+		batchSize = val
+	}
+	if capacity := sub.Concurrency + sub.Prefetch; capacity > 0 {
+		batchSize = min(batchSize, capacity)
+	}
+	return batchSize
 }
 
 func (t *natsTransport) Reserve(ctx context.Context, key string, ttl time.Duration) (bool, error) {

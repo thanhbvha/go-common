@@ -41,6 +41,15 @@ Integration prerequisites:
   ordering-key/header transfer. Tagged scheduler tests reject related-topic
   partition mismatches and exercise a live five-record burst with a two-record
   sweep bound while verifying stable ordering-key partitioning.
+  P5.7 default tests cover versioned failure/source metadata, append-only logical
+  cursors, prefix-only requeue, logical purge, offset-derived task/event/delay
+  lag, and group filtering. The tagged admin test verifies real broker offsets,
+  DLQ list/count/requeue/purge, and post-requeue task lag.
+  P5.8 adds `TestKafkaTransportContract`, which runs every applicable shared
+  transport scenario against the live broker (dedupe is skipped because Kafka
+  does not advertise it). TLS/SASL construction tests cover producer, grouped
+  and manual consumers, scheduler consumers, and the direct DLQ reader through
+  both supported factories and the deprecated raw-client adapter.
 - NATS driver and spike tests start an in-process JetStream server and do not
   require a separately installed NATS server. The suite includes the shared
   transport contract plus restart/reconnect, `AckWait`, heartbeat,

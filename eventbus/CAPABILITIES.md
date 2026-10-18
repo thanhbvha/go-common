@@ -28,8 +28,8 @@ Legend:
 | Atomic DLQ settlement | No | Yes, same-slot Lua (P3.3) | No | No |
 | Confirmed publish-before-commit retry/DLQ | N/A | Atomic Lua | Yes | Yes, synchronous fallback (P5.5) |
 | DLQ write | Test only | Yes | Yes | Yes |
-| DLQ list/requeue/purge/count | Test only | Yes, cursor + atomic requeue (P3.6) | Yes, cursor + publish-before-delete requeue (P4.5) | No |
-| Queue stats | Test only | Yes | Yes | No |
+| DLQ list/requeue/purge/count | Test only | Yes, cursor + atomic requeue (P3.6) | Yes, cursor + publish-before-delete requeue (P4.5) | Yes, logical append-only cursor (P5.7) |
+| Queue stats | Test only | Yes | Yes | Yes |
 | Pause/resume | No | No | No | No |
 | Payload size enforcement | No | No | No | No |
 | Production readiness | No | No | No | No |
@@ -50,7 +50,20 @@ methods.
 | Memory | yes | yes | yes | no |
 | Redis | yes | yes | yes | no |
 | NATS | yes | yes | yes | no |
-| Kafka | no | no | no | no |
+| Kafka | no | yes | yes | no |
+
+Transport-level `Pauser` remains unadvertised. P6.1 instead provides portable
+local intake controls on `Bus`: `Pause` cancels active consumer sessions while
+allowing accepted work to settle, `DrainTopology` waits for that settlement,
+and `Resume` starts fresh sessions. These controls affect only consumers in the
+current process; they do not pause other instances or broker publication.
+
+P6.2 bounds `EnqueueBatch` to 1,000 ordered, individually confirmed task
+publications and reports the first partial failure. Consumer sessions remain
+bounded by `Concurrency + Prefetch`: Redis caps both fresh reads and reclaim
+claims to that capacity, NATS caps pull batches, and Kafka already caps poll
+records. Settlement remains per-delivery and broker-confirmed; no driver claims
+an atomic multi-message batch.
 
 The compact `transport.Capabilities` descriptor still exposes delay precision
 and ordering for fast publish-path checks:
@@ -106,8 +119,21 @@ rewound instead of retained by process-local timers. Lower-tier/main publication
 is broker-confirmed before a synchronous source commit. Publish/commit ambiguity
 can duplicate but cannot intentionally lose work. Ordering keys and headers are
 preserved, and startup rejects unequal partition counts across main, DLQ, and
-delay topics. See [SCHEDULER.md](driver/kafka/SCHEDULER.md). Full shared-contract
-promotion remains P5.8.
+delay topics. See [SCHEDULER.md](driver/kafka/SCHEDULER.md).
+
+Kafka P5.7 stores versioned DLQ wrappers with failure time/reason/error and
+source topic/partition/offset/timestamp. `DLQAdmin` uses a dedicated consumer
+group offset as a logical cursor because Kafka cannot remove arbitrary records:
+requeue is confirmed publish-before-cursor-commit and accepts only complete
+per-partition prefixes, while purge advances the cursor without physically
+deleting log bytes. Both operations can duplicate after an ambiguous boundary
+and must be serialized across administrator processes. `StatsReader` calculates
+main and scheduler lag from end offsets and committed group offsets. Kafka
+cannot derive the fetched/uncommitted split from those offsets, so all main lag
+is reported as `Pending` and `InFlight` remains zero. See
+[ADMIN.md](driver/kafka/ADMIN.md). P5.8 runs Kafka through the complete shared
+contract; the dedupe scenario is capability-gated because Kafka does not
+implement `TopologyDeduper`.
 
 All delivery implementations expose one terminal `Settle(Decision)` operation
 guarded by the shared single-use state machine. A failed settlement reopens the

@@ -127,6 +127,34 @@ func TestDelaySchedulerTransfersDownTiersAndPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestDelaySchedulerUsesTransportHeaderForOpaquePayload(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "opaque"}
+	backend := &kafkaTransport{}
+	var produced *kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
+		produced = record
+		return nil
+	})
+	client := &fakeDelayConsumer{}
+	source := scheduledMessageRecord(backend.delayTopic(topo, time.Minute), transport.Message{
+		Payload: []byte("opaque-payload"), Headers: map[string]string{"traceparent": "synthetic"},
+	}, now)
+	source.Partition, source.Offset = 0, 4
+	if err := backend.processDelayBatch(context.Background(), topo, time.Minute, client, []*kgo.Record{source}, now); err != nil {
+		t.Fatal(err)
+	}
+	if produced == nil || produced.Topic != backend.mainTopic(topo) || string(produced.Value) != "opaque-payload" {
+		t.Fatalf("produced = %#v", produced)
+	}
+	if got := recordMessage(produced).Headers; !reflect.DeepEqual(got, map[string]string{"traceparent": "synthetic"}) {
+		t.Fatalf("headers = %#v", got)
+	}
+	if len(client.commits) != 1 || client.commits[0] != source {
+		t.Fatal("opaque delayed source was not committed after confirmed transfer")
+	}
+}
+
 func TestDelaySchedulerFailureNeverCommitsAndBlocksLaterPartitionOffset(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	topo := transport.Topology{Namespace: "test", JobType: "jobs"}

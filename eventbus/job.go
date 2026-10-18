@@ -92,6 +92,27 @@ type JobOptions struct {
 // JobOption is a functional option for customizing JobOptions.
 type JobOption func(*JobOptions)
 
+const MaxBatchJobs = 1000
+
+// BatchJob is one task publication in EnqueueBatch.
+type BatchJob struct {
+	Payload any
+	Options []JobOption
+}
+
+// BatchError reports the first failed item in a non-atomic batch. Items before
+// Index may already be durable; items at and after Index were not all accepted.
+type BatchError struct {
+	Index int
+	Err   error
+}
+
+func (e *BatchError) Error() string {
+	return fmt.Sprintf("eventbus: batch item %d: %v", e.Index, e.Err)
+}
+
+func (e *BatchError) Unwrap() error { return e.Err }
+
 func applyJobOptions(options *JobOptions, opts []JobOption) error {
 	for _, opt := range opts {
 		if opt == nil {

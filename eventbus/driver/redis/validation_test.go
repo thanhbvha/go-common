@@ -32,3 +32,13 @@ func TestValidateTopologyRejectsInvalidRedisOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumerBatchSizeIsBoundedByCoreCapacity(t *testing.T) {
+	sub := transport.Subscription{
+		Topology:    transport.Topology{Options: map[string]any{"redis.batch_size": int64(100)}},
+		Concurrency: 3, Prefetch: 5,
+	}
+	if got := consumerBatchSize(sub); got != 8 {
+		t.Fatalf("consumer batch size = %d, want 8", got)
+	}
+}

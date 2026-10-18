@@ -35,7 +35,9 @@ Implement the optional `RuntimeMetrics` interface on the same object to receive:
   age only when their `LagKnown`/`OldestAgeKnown` flags are true. Unknown is not
   zero. Redis calculates both measurements. NATS reports oldest age only when
   it can derive it without confusing retained acknowledged history with lag;
-  unsupported built-in drivers remain tracked in later transport phases.
+  Kafka reports oldest age only for an empty main-topic lag; nonempty age is
+  unknown because offset metadata alone does not identify the oldest retained
+  delivery obligation.
 
 There is no hidden background stats poller. An application can call
 `bus.Stats(ctx, "send_email")` at its preferred scrape interval. Unsupported
@@ -58,6 +60,13 @@ durable subscriber consumer. A producer-only task has no consumer yet, so its
 retained main-stream messages are reported as pending. Delayed values are
 streamed from the topology KV key index and DLQ values come from DLQ stream
 state. Acknowledged records retained by the main stream are not counted as lag.
+
+Kafka statistics calculate lag from topic end offsets and committed consumer
+group offsets. Kafka does not expose whether an uncommitted offset has already
+been fetched, so the driver reports all main-topic lag as `Pending`, reports
+`InFlight` as zero, and sets `Lag = Pending`. Delayed and logical DLQ counts are
+separate. Event aggregation requires permission to list consumer groups. See
+[driver/kafka/ADMIN.md](driver/kafka/ADMIN.md).
 
 Names are registered topology names; subscriber processing retains the legacy
 `event_subscriber` metric name. Do not attach job IDs, payloads, arbitrary headers,

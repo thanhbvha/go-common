@@ -25,12 +25,19 @@ For each source partition, records are examined in offset order:
 4. Only after Kafka confirms destination publication is the source offset
    committed synchronously.
 
+The transport records the deadline in its private `X-EventBus-Run-At` header,
+so `PublishAt` treats the message payload as opaque bytes. The scheduler removes
+that header before publishing to the main topic and preserves it while moving a
+record between tiers. Records written by older versions remain readable through
+the legacy envelope deadline fallback.
+
 A publish failure never requests a source commit. A commit failure rewinds the
 source, so retry can duplicate a confirmed destination record but cannot
 silently discard the source. This is the same loss-safe, duplicate-prone
 publish-before-commit boundary documented in [SETTLEMENT.md](SETTLEMENT.md).
-Malformed envelopes and unexpected source topics remain uncommitted and block
-only their source partition; Kafka DLQ wrapping and administration are P5.7.
+Records with neither a valid scheduling header nor a legacy envelope deadline,
+and records from unexpected source topics, remain uncommitted and block only
+their source partition.
 
 The main, DLQ, and all delay-tier topics must have the same positive partition
 count. Provisioning waits for newly created topic metadata to become visible,

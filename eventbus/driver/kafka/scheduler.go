@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -180,18 +181,22 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 				failures = append(failures, fmt.Errorf("kafka: delay tier %s received unexpected topic %q", tier, record.Topic))
 				break
 			}
-			var envelope eventbus.Envelope
-			if err := json.Unmarshal(record.Value, &envelope); err != nil {
+			runAt, err := delayedRecordRunAt(record)
+			if err != nil {
 				setDelayRewind(rewind, record)
 				failures = append(failures, fmt.Errorf("kafka: decode delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
 				break
 			}
-			target := t.delayDestination(topo, time.UnixMilli(envelope.RunAt), now)
+			target := t.delayDestination(topo, runAt, now)
 			if target == record.Topic {
 				setDelayRewind(rewind, record)
 				break
 			}
-			if err := t.produceConfirmed(ctx, messageRecord(target, recordMessage(record))); err != nil {
+			message := recordMessage(record)
+			if target == t.mainTopic(topo) {
+				removeMessageHeader(&message, kafkaRunAtHeader)
+			}
+			if err := t.produceConfirmed(ctx, messageRecord(target, message)); err != nil {
 				setDelayRewind(rewind, record)
 				failures = append(failures, fmt.Errorf("kafka: forward delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
 				break
@@ -207,6 +212,24 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 		client.SetOffsets(rewind)
 	}
 	return errors.Join(failures...)
+}
+
+func delayedRecordRunAt(record *kgo.Record) (time.Time, error) {
+	for index := len(record.Headers) - 1; index >= 0; index-- {
+		if record.Headers[index].Key != kafkaRunAtHeader {
+			continue
+		}
+		millis, err := strconv.ParseInt(string(record.Headers[index].Value), 10, 64)
+		if err != nil || millis <= 0 {
+			return time.Time{}, fmt.Errorf("invalid %s header", kafkaRunAtHeader)
+		}
+		return time.UnixMilli(millis), nil
+	}
+	var envelope eventbus.Envelope
+	if err := json.Unmarshal(record.Value, &envelope); err != nil || envelope.RunAt <= 0 {
+		return time.Time{}, fmt.Errorf("missing schedule metadata")
+	}
+	return time.UnixMilli(envelope.RunAt), nil
 }
 
 func (t *kafkaTransport) delayDestination(topo transport.Topology, runAt, now time.Time) string {

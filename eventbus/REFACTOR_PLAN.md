@@ -1,6 +1,6 @@
 # EventBus Refactor Execution Plan
 
-> Status: Phase 5 in progress; P5.1-P5.6 complete; Phase 4 verified complete
+> Status: Phase 5 verified complete; P5.1-P5.8 complete
 > Scope: `eventbus`, `redis`, `kafka`, `nats`, `queue`, `queue_kafka`, `queue_nats`  
 > Primary goal: turn `eventbus` into a production-grade, transport-agnostic task queue with explicit event fan-out support.  
 > Delivery guarantee: at-least-once. Exactly-once is not promised.
@@ -458,33 +458,35 @@ Dependencies: Phase 2 complete; Phase 3 contract suite reusable.
   - Validate partition counts across related topics.
   - Notes: Replaced the per-record `time.AfterFunc` path with three durable Kafka delay tiers (`5s`, `1m`, and `5m`) and one periodic manual-commit worker per tier/topology. Each sweep polls at most `kafka.delay_batch_size` records (default 100, validated range 1-1000); records that still belong in the current tier are rewound and retained in Kafka rather than held by process-local timers. Partition queues are processed in offset order, and malformed/current-tier/publish-failed/commit-failed records stop only their source partition for that sweep. Transfers preserve the exact envelope bytes, broker headers, and ordering key, synchronously confirm the lower-tier/main publish, and only then synchronously commit the source; ambiguous commit windows remain duplicate-prone but loss-safe. `EnsureTopology` waits for metadata visibility and rejects unequal partition counts across main, DLQ, and every delay tier before starting workers. Shutdown cancels and joins all tier workers within the caller's context. Added `driver/kafka/SCHEDULER.md` and updated capability, migration, testing, and wrapper documentation. Deterministic tests cover tier boundaries, bounded polling, shutdown joining, rewinds, publish/commit failures, malformed records, metadata preservation, and option validation. Live Kafka tests verify partition-mismatch rejection and a bounded five-record burst with stable ordering-key partitioning. The Kafka unit suite passed 20 consecutive runs; the full tagged Kafka suite, integration-tag compilation, EventBus/legacy tests and vet, core/Kafka race tests with command-local CGO/MinGW, and sequential full-repository tests/vet passed on 2026-10-18. One initial full EventBus run missed the unrelated C8 shutdown timing threshold by less than one millisecond; its focused test passed three consecutive runs and the complete suite then passed on rerun.
 
-- [ ] **P5.7 Implement Kafka DLQ admin and stats**
+- [x] **P5.7 Implement Kafka DLQ admin and stats**
   - DLQ record includes source topic, partition, offset, timestamp, reason, and error.
   - Lag is calculated from end offsets and committed group offsets.
   - Document limitations of purge/requeue on append-only logs.
-  - Notes:
+  - Notes: Kafka DLQ settlement now writes a versioned wrapper containing the normalized/original message, reason, error, attempts, failure time, and source topic/partition/offset/record timestamp. Kafka advertises real `DLQAdmin` and `StatsReader` implementations. DLQ administration uses stable `<partition>:<offset>` IDs and a dedicated consumer-group offset as an append-only logical cursor: list/count exclude already administered prefixes, requeue requires complete per-partition prefixes and confirms every main-topic publish before advancing the cursor, and purge advances a snapshot cursor without claiming physical log deletion. Publish or cursor-commit ambiguity remains duplicate-prone but loss-safe; cross-process admin mutations must be serialized. Stats calculate task/event and durable-delay lag from end offsets minus committed group offsets, clamp absent/expired commits to log starts, aggregate event subscriber groups, and keep delayed/DLQ separate. Kafka cannot distinguish fetched-uncommitted from never-fetched records through group offsets, so main lag is reported as `Pending`, `InFlight` is zero, and nonempty oldest age is unknown. Added `driver/kafka/ADMIN.md` plus deterministic coverage for wrapper/source metadata, bounded positional scans, prefix/idempotency rules, publish/commit failures, logical purge, task/event/delay lag, and group filtering. The Kafka unit suite passed 20 consecutive runs; default EventBus and legacy tests/vet, integration-tag compilation, the Kafka race suite with command-local CGO/MinGW, and sequential full-repository tests/vet passed on 2026-10-18. The focused live P5.7 admin/stats test subsequently passed against `localhost:9092` during P5.8 verification.
 
-- [ ] **P5.8 Add Kafka contract, rebalance, and fault tests**
+- [x] **P5.8 Add Kafka contract, rebalance, and fault tests**
   - TLS/SASL construction test.
   - Rebalance during processing.
   - Broker failure between produce and commit.
   - Out-of-order handler completion.
   - Transaction abort/retry where supported.
-  - Notes:
+  - Notes: Added a live Kafka harness for the complete shared transport contract, with autonomous tier workers stopped for deterministic due-time dispatch and exact test-topic cleanup after transport shutdown. The capability-gated dedupe scenario is skipped because Kafka does not advertise `TopologyDeduper`; every applicable publish/consume/ACK, retry, DLQ admin/requeue, delayed delivery, event fan-out, stats, and opaque malformed-payload scenario passes. The shared harness now keeps session-owned consumers alive through settlement and evaluates due deadlines at the transport's advertised precision, preserving NATS coverage. Contract testing exposed and fixed two Kafka boundary defects: direct DLQ readers now use a group-free factory role while retaining TLS/SASL and timeout options, and delayed scheduling stores its deadline in a private transport header so arbitrary payload bytes remain opaque (with legacy envelope fallback). TLS/SASL construction is covered for producer, grouped/manual/delay consumers, and direct readers through supported and deprecated constructors. Existing live tests cover out-of-order contiguous commits, in-flight rebalance/drain/partition transfer, and eight retry/DLQ broker fault windows before/after produce and commit. Transactions remain explicitly unsupported and unsafe transactional producers are rejected, so transaction abort/retry is not applicable. Twenty repeated Kafka/Redis/factory unit runs, the NATS and Kafka shared contracts, the complete tagged Kafka suite, integration-tag compilation, default EventBus tests/vet, focused integration race tests, and sequential full-repository tests/vet passed on 2026-10-18 against `localhost:9092`.
 
 ### Phase 5 exit criteria
 
-- [ ] Kafka passes the complete transport contract suite.
-- [ ] No offset is committed past an unsettled lower offset.
-- [ ] Consumers work with configured TLS/SASL.
-- [ ] Retry/DLQ publish failure cannot cause source commit.
+- [x] Kafka passes the complete transport contract suite.
+- [x] No offset is committed past an unsettled lower offset.
+- [x] Consumers work with configured TLS/SASL.
+- [x] Retry/DLQ publish failure cannot cause source commit.
 
 ## 12. Phase 6 - Administration and performance
 
 Dependencies: Phases 3, 4, and 5 complete.
 
-- [ ] **P6.1 Add pause, resume, and topology drain**
-- [ ] **P6.2 Add batch enqueue and bounded batch consume/settlement**
+- [x] **P6.1 Add pause, resume, and topology drain**
+  - Notes: Added portable process-local `Bus.Pause`, `Bus.Resume`, and `Bus.DrainTopology` controls backed by one concurrency-safe session controller per task or event subscriber. Pause cancels broker intake without canceling accepted handler/settlement contexts; topology drain waits until each affected session has joined its bounded worker pool, while a caller deadline returns without falsely marking work complete. Resume wakes paused supervisors and creates fresh consume sessions without restarting the bus. Producer-only topologies return `ErrNotSupported`, pre-start calls return `ErrBusNotRunning`, and global drain still wakes paused supervisors. Deterministic tests cover pre-start rejection, no reconnect while paused, resumed session creation, accepted-handler drain/settlement, and continued bus operation; 20 repeated runs plus focused race, default EventBus/example tests, and vet passed on 2026-10-18.
+- [x] **P6.2 Add batch enqueue and bounded batch consume/settlement**
+  - Notes: Added ordered `Bus.EnqueueBatch` with a hard 1,000-item bound and explicit non-atomic `BatchError.Index` semantics: each item uses the normal validation, tracing, dedupe, delay, and broker-confirmed publish path; processing stops at the first failure so the durable prefix and unattempted suffix are unambiguous. Consumer-side batches cannot exceed the core `Concurrency + Prefetch` bound: Redis caps fresh `XREADGROUP` and `XAUTOCLAIM` pages, NATS caps pull fetches, Kafka retains its existing `PollRecords` capacity limit, and every record remains settled independently. Deterministic tests cover empty/oversized batches, ordered success, partial failure, and Redis/NATS capacity clamping; focused tests passed 20 consecutive runs and default EventBus/example tests and vet passed on 2026-10-18.
 - [ ] **P6.3 Add rate limits and optional per-ordering-key concurrency limits**
 - [ ] **P6.4 Add payload-size validation and limits**
 - [ ] **P6.5 Add operational dashboards/examples for metrics and tracing**
@@ -691,3 +693,21 @@ Update this snapshot only after completing a phase; do not erase historical fail
   embedded-NATS integration suite, and core/default/focused-integration race
   suites pass. NATS remains at-least-once and advertises neither ordering nor
   atomic retry/DLQ settlement.
+
+### Phase 5 completion snapshot (2026-10-18)
+
+- Kafka uses one immutable client factory across producer, grouped/manual
+  consumers, delay workers, direct readers, and administration; TLS/SASL and
+  timeout settings survive both supported constructors and the legacy adapter.
+- Main delivery is bounded and partition-serialized. Session-owned synchronous
+  commits advance only through contiguous settled offsets, and rebalance drains,
+  rewinds undispatched records, and fences revoked ownership.
+- Retry, DLQ, and delay transfer use confirmed publish-before-commit. Fault-window
+  tests demonstrate the documented duplicate windows without silent source loss;
+  unsafe unacknowledged and transactional producers are rejected.
+- Durable bounded delay tiers preserve opaque payloads, keys, and public headers.
+  Versioned DLQ administration and offset-derived statistics expose real broker
+  state with append-only-log limitations documented for operators.
+- Kafka passes every applicable shared transport contract scenario against the
+  live broker. Unit repetition, the complete tagged Kafka suite, integration-tag
+  compilation, focused race tests, and default/full-repository tests and vet pass.

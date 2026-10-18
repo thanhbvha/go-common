@@ -56,6 +56,19 @@ func TestNewWithConfigPropagatesFactoryToInternalConsumers(t *testing.T) {
 	if got := consumer.OptValue(kgo.RequestTimeoutOverhead); got != cfg.ReadTimeout {
 		t.Fatalf("consumer request timeout = %v", got)
 	}
+	reader, err := backend.newReader(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+		"eventbus-dlq": {0: kgo.NewOffset().AtStart()},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if reader.OptValue(kgo.DialTLSConfig) == nil || reader.OptValue(kgo.SASL) == nil {
+		t.Fatal("internal DLQ reader did not inherit TLS/SASL")
+	}
+	if got := reader.OptValue(kgo.ConsumerGroup); got != "" {
+		t.Fatalf("DLQ reader consumer group = %#v, want empty", got)
+	}
 }
 
 func TestMainConsumerOverridesFactoryAutoCommit(t *testing.T) {
@@ -140,6 +153,19 @@ func TestLegacyNewCopiesNativeSecurityOptions(t *testing.T) {
 	}
 	if got := manual.OptValue(kgo.DisableAutoCommit); got != true {
 		t.Fatalf("legacy manual consumer DisableAutoCommit = %#v, want true", got)
+	}
+	reader, err := backend.newReader(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+		"legacy-dlq": {0: kgo.NewOffset().AtStart()},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if reader.OptValue(kgo.DialTLSConfig) == nil || reader.OptValue(kgo.SASL) == nil {
+		t.Fatal("legacy direct reader dropped native TLS/SASL options")
+	}
+	if got := reader.OptValue(kgo.ConsumerGroup); got != "" {
+		t.Fatalf("legacy direct reader consumer group = %#v, want empty", got)
 	}
 }
 

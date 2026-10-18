@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"time"
 
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+const kafkaRunAtHeader = "X-EventBus-Run-At"
 
 type recordProducer interface {
 	ProduceSync(context.Context, ...*kgo.Record) kgo.ProduceResults
@@ -43,6 +47,30 @@ func messageRecord(topic string, msg transport.Message) *kgo.Record {
 		record.Headers = append(record.Headers, kgo.RecordHeader{Key: key, Value: []byte(msg.Headers[key])})
 	}
 	return record
+}
+
+func scheduledMessageRecord(topic string, msg transport.Message, runAt time.Time) *kgo.Record {
+	record := messageRecord(topic, msg)
+	headers := record.Headers[:0]
+	for _, header := range record.Headers {
+		if header.Key != kafkaRunAtHeader {
+			headers = append(headers, header)
+		}
+	}
+	record.Headers = append(headers, kgo.RecordHeader{
+		Key: kafkaRunAtHeader, Value: []byte(strconv.FormatInt(runAt.UnixMilli(), 10)),
+	})
+	return record
+}
+
+func removeMessageHeader(msg *transport.Message, key string) {
+	if msg.Headers == nil {
+		return
+	}
+	delete(msg.Headers, key)
+	if len(msg.Headers) == 0 {
+		msg.Headers = nil
+	}
 }
 
 func recordMessage(record *kgo.Record) transport.Message {

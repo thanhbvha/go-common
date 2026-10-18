@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ type Harness struct {
 // reconnect, and drain semantics once a transport honors this boundary.
 func Run(t *testing.T, h Harness) {
 	t.Helper()
-	if h.New == nil || h.Topology == nil || h.DispatchDue == nil || h.ExpireDedupe == nil {
+	if h.New == nil || h.Topology == nil || h.DispatchDue == nil {
 		t.Fatal("contracttest: incomplete harness")
 	}
 	if h.ReceiveWithin <= 0 {
@@ -40,13 +41,15 @@ func Run(t *testing.T, h Harness) {
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
 		mustPublish(t, ctx, tr, topo, "ack")
-		delivery := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		delivery := active.Delivery
 		if string(delivery.Message().Payload) != "ack" || delivery.DeliveryAttempt() < 1 {
 			t.Fatalf("delivery = %#v, attempt %d", delivery.Message(), delivery.DeliveryAttempt())
 		}
 		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 		assertStats(t, ctx, tr, topo, 0, 0, 0, 0)
 	})
 
@@ -56,24 +59,28 @@ func Run(t *testing.T, h Harness) {
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
 		mustPublish(t, ctx, tr, topo, "source")
-		delivery := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
-		retryAt := time.Now()
+		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		delivery := active.Delivery
+		retryAt := time.Now().Add(time.Minute)
 		if err := delivery.Settle(ctx, transport.Decision{
 			Kind: transport.DecisionRetry, Next: transport.Message{Payload: []byte("retry")}, RetryAt: retryAt,
 		}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 		assertStats(t, ctx, tr, topo, 0, 1, 0, 0)
-		if moved, err := h.DispatchDue(ctx, tr, topo, retryAt); err != nil || moved != 1 {
+		if moved, err := h.DispatchDue(ctx, tr, topo, retryAt.Add(delayPrecision(tr))); err != nil || moved != 1 {
 			t.Fatalf("dispatch due = %d, %v", moved, err)
 		}
-		retried := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active = receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		retried := active.Delivery
 		if string(retried.Message().Payload) != "retry" {
 			t.Fatalf("retry payload = %q", retried.Message().Payload)
 		}
 		if err := retried.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 	})
 
 	t.Run("dead_letter_admin", func(t *testing.T) {
@@ -82,12 +89,14 @@ func Run(t *testing.T, h Harness) {
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
 		mustPublish(t, ctx, tr, topo, "dead")
-		delivery := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		delivery := active.Delivery
 		if err := delivery.Settle(ctx, transport.Decision{
 			Kind: transport.DecisionDeadLetter, Reason: "contract", Cause: errors.New("synthetic"), Attempts: 1,
 		}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 		admin, ok := tr.(transport.DLQAdmin)
 		if !ok {
 			t.Fatal("DLQAdmin not advertised")
@@ -105,13 +114,15 @@ func Run(t *testing.T, h Harness) {
 		if count, err := admin.Count(ctx, topo); err != nil || count != 0 {
 			t.Fatalf("DLQ after requeue = %d, %v", count, err)
 		}
-		requeued := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active = receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		requeued := active.Delivery
 		if string(requeued.Message().Payload) != "dead" {
 			t.Fatalf("requeued payload = %q", requeued.Message().Payload)
 		}
 		if err := requeued.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 	})
 
 	t.Run("delayed_delivery", func(t *testing.T) {
@@ -123,20 +134,23 @@ func Run(t *testing.T, h Harness) {
 		if err := tr.PublishAt(ctx, topo, transport.Message{Payload: []byte("later")}, runAt); err != nil {
 			t.Fatal(err)
 		}
-		if moved, err := h.DispatchDue(ctx, tr, topo, runAt.Add(-time.Millisecond)); err != nil || moved != 0 {
+		earlyBy := delayPrecision(tr)
+		if moved, err := h.DispatchDue(ctx, tr, topo, runAt.Add(-earlyBy)); err != nil || moved != 0 {
 			t.Fatalf("early dispatch = %d, %v", moved, err)
 		}
 		assertStats(t, ctx, tr, topo, 0, 1, 0, 0)
-		if moved, err := h.DispatchDue(ctx, tr, topo, runAt); err != nil || moved != 1 {
+		if moved, err := h.DispatchDue(ctx, tr, topo, runAt.Add(earlyBy)); err != nil || moved != 1 {
 			t.Fatalf("due dispatch = %d, %v", moved, err)
 		}
-		delivery := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		delivery := active.Delivery
 		if string(delivery.Message().Payload) != "later" {
 			t.Fatalf("delayed payload = %q", delivery.Message().Payload)
 		}
 		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 	})
 
 	t.Run("event_fanout_groups", func(t *testing.T) {
@@ -146,13 +160,15 @@ func Run(t *testing.T, h Harness) {
 		mustEnsure(t, ctx, tr, topo)
 		mustPublish(t, ctx, tr, topo, "event")
 		for _, group := range []string{"alpha", "beta"} {
-			delivery := receive(t, tr, transport.Subscription{Topology: topo, Group: group}, h.ReceiveWithin)
+			active := receive(t, tr, transport.Subscription{Topology: topo, Group: group}, h.ReceiveWithin)
+			delivery := active.Delivery
 			if string(delivery.Message().Payload) != "event" {
 				t.Fatalf("subscriber %s payload = %q", group, delivery.Message().Payload)
 			}
 			if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 				t.Fatal(err)
 			}
+			active.Close()
 		}
 		assertStats(t, ctx, tr, topo, 0, 0, 0, 0)
 	})
@@ -161,7 +177,10 @@ func Run(t *testing.T, h Harness) {
 		tr := h.New(t)
 		deduper, ok := tr.(transport.TopologyDeduper)
 		if !ok {
-			t.Fatal("TopologyDeduper not advertised")
+			t.Skip("transport does not advertise deduplication")
+		}
+		if h.ExpireDedupe == nil {
+			t.Fatal("contracttest: dedupe transport requires ExpireDedupe")
 		}
 		ctx := context.Background()
 		first := h.Topology(t.Name()+"-first", transport.TaskTopology)
@@ -197,15 +216,25 @@ func Run(t *testing.T, h Harness) {
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
 		mustPublish(t, ctx, tr, topo, "{not-json")
-		delivery := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		delivery := active.Delivery
 		if string(delivery.Message().Payload) != "{not-json" {
 			t.Fatal("transport altered malformed payload")
 		}
 		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionDeadLetter, Reason: "decode"}); err != nil {
 			t.Fatal(err)
 		}
+		active.Close()
 		assertStats(t, ctx, tr, topo, 0, 0, 0, 1)
 	})
+}
+
+func delayPrecision(tr transport.Transport) time.Duration {
+	precision := tr.Capabilities().DelayPrecision
+	if precision <= 0 {
+		return time.Millisecond
+	}
+	return precision
 }
 
 func mustEnsure(t *testing.T, ctx context.Context, tr transport.Transport, topo transport.Topology) {
@@ -222,7 +251,14 @@ func mustPublish(t *testing.T, ctx context.Context, tr transport.Transport, topo
 	}
 }
 
-func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, timeout time.Duration) transport.Delivery {
+type activeDelivery struct {
+	transport.Delivery
+	close func()
+}
+
+func (d *activeDelivery) Close() { d.close() }
+
+func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, timeout time.Duration) *activeDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	deliveries := make(chan transport.Delivery, 1)
@@ -238,7 +274,6 @@ func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, t
 	var delivery transport.Delivery
 	select {
 	case delivery = <-deliveries:
-		cancel()
 	case err := <-done:
 		cancel()
 		t.Fatalf("consume ended before delivery: %v", err)
@@ -246,15 +281,23 @@ func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, t
 		cancel()
 		t.Fatal("timed out waiting for delivery")
 	}
-	select {
-	case err := <-done:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("consume shutdown: %v", err)
-		}
-	case <-time.After(timeout):
-		t.Fatal("consume did not stop after cancellation")
+	var once sync.Once
+	active := &activeDelivery{Delivery: delivery}
+	active.close = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("consume shutdown: %v", err)
+				}
+			case <-time.After(timeout):
+				t.Error("consume did not stop after cancellation")
+			}
+		})
 	}
-	return delivery
+	t.Cleanup(active.Close)
+	return active
 }
 
 func assertStats(t *testing.T, ctx context.Context, tr transport.Transport, topo transport.Topology, pending, delayed, inFlight, dlq int64) {

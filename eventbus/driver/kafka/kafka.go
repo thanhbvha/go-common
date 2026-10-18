@@ -35,11 +35,13 @@ var delayTiers = []time.Duration{
 
 type kafkaTransport struct {
 	cl            *kgo.Client
-	adm           *kadm.Client
+	adm           kafkaAdmin
 	factory       *commonkafka.NativeClientFactory
 	producerOwned bool
 	producer      recordProducer
 	producerErr   error
+	scanDLQ       dlqPartitionScanner
+	dlqAdminMu    sync.Mutex
 
 	mu       sync.Mutex
 	sweepers map[string]*delaySchedulerHandle
@@ -48,6 +50,8 @@ type kafkaTransport struct {
 var (
 	_ transport.Transport         = (*kafkaTransport)(nil)
 	_ transport.TopologyValidator = (*kafkaTransport)(nil)
+	_ transport.DLQAdmin          = (*kafkaTransport)(nil)
+	_ transport.StatsReader       = (*kafkaTransport)(nil)
 	_ transport.Delivery          = (*kafkaDelivery)(nil)
 )
 
@@ -105,11 +109,13 @@ func NewWithConfig(cfg commonkafka.Config) (transport.Transport, error) {
 }
 
 func newKafkaTransport(base *kgo.Client, factory *commonkafka.NativeClientFactory, producerOwned bool) *kafkaTransport {
-	return &kafkaTransport{
+	t := &kafkaTransport{
 		cl: base, adm: kadm.NewClient(base), factory: factory,
 		producer: base, producerErr: validateSettlementProducer(base),
 		producerOwned: producerOwned, sweepers: make(map[string]*delaySchedulerHandle),
 	}
+	t.scanDLQ = t.scanDLQPartition
+	return t
 }
 
 func (t *kafkaTransport) Name() string { return "kafka" }
@@ -212,7 +218,11 @@ func (t *kafkaTransport) Publish(ctx context.Context, topo transport.Topology, m
 }
 
 func (t *kafkaTransport) PublishAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
-	return t.produceConfirmed(ctx, messageRecord(t.delayDestination(topo, runAt, time.Now()), msg))
+	topic := t.delayDestination(topo, runAt, time.Now())
+	if topic == t.mainTopic(topo) {
+		return t.produceConfirmed(ctx, messageRecord(topic, msg))
+	}
+	return t.produceConfirmed(ctx, scheduledMessageRecord(topic, msg, runAt))
 }
 
 func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
@@ -321,6 +331,13 @@ func (t *kafkaTransport) newManualConsumer(opts ...kgo.Opt) (*kgo.Client, error)
 	return t.factory.NewManualConsumer(opts...)
 }
 
+func (t *kafkaTransport) newReader(opts ...kgo.Opt) (*kgo.Client, error) {
+	if t.factory == nil {
+		return nil, fmt.Errorf("kafka: internal client factory is unavailable")
+	}
+	return t.factory.NewReader(opts...)
+}
+
 func (t *kafkaTransport) Ping(ctx context.Context) error { return t.cl.Ping(ctx) }
 func (t *kafkaTransport) Close(ctx context.Context) error {
 	t.mu.Lock()
@@ -372,7 +389,13 @@ func (d *kafkaDelivery) deadLetter(ctx context.Context, decision transport.Decis
 	if decision.Source != nil {
 		msg = *decision.Source
 	}
-	err := d.transport.produceConfirmed(ctx, messageRecord(d.transport.dlqTopic(d.topo), msg))
+	payload, err := d.deadLetterRecord(msg, decision)
+	if err != nil {
+		return err
+	}
+	dlqMessage := msg
+	dlqMessage.Payload = payload
+	err = d.transport.produceConfirmed(ctx, messageRecord(d.transport.dlqTopic(d.topo), dlqMessage))
 	if err != nil {
 		return err
 	}

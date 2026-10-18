@@ -28,6 +28,9 @@ var (
 	// ErrBusClosed is returned when an operation is performed on a stopped bus.
 	ErrBusClosed = errors.New("eventbus: bus is closed")
 
+	// ErrBusNotRunning is returned by operational controls before Start.
+	ErrBusNotRunning = errors.New("eventbus: bus is not running")
+
 	// ErrTopologyKindConflict is returned when one logical name is registered
 	// as both a competing-consumer task and a fan-out event.
 	ErrTopologyKindConflict = errors.New("eventbus: topology kind conflict")

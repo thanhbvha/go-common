@@ -2,206 +2,135 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus"
-
-	// Import all drivers to register them
-	_ "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	_ "github.com/thanhbvha/go-common/eventbus/driver/memory"
-	_ "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	_ "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	redisopts "github.com/thanhbvha/go-common/eventbus/driver/redis"
-
-	"github.com/thanhbvha/go-common/kafka"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/nats"
-	"github.com/thanhbvha/go-common/redis"
-	"github.com/thanhbvha/go-common/utils/graceful"
+	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
 )
 
-// Example Payload
-type UserCreatedEvent struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
+func main() {
+	if err := run(context.Background(), os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "eventbus example:", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
-	driverName := flag.String("driver", "redis", "Tên driver muốn sử dụng (memory, redis, nats, kafka)")
-	flag.Parse()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// 1. Initialize Logger
-	logOpts := logger.DefaultOptions()
-	logOpts.Level = 0 // Info
-	logOpts.StdOut = true
-	sysLogger := logger.New(logOpts)
-	logger.SetDefault(sysLogger)
-	defer logger.Close()
-
-	// 2. Tắt hệ thống Graceful
-	sd := graceful.NewShutdown(15 * time.Second)
-
-	// 3. Setup Driver (Cấu hình Connection cho từng loại Broker)
-	switch *driverName {
-	case "redis":
-		sysLogger.Info("Khởi tạo Redis Connection...")
-		redisCfg := redis.DefaultConfig()
-		redisCfg.Host = "127.0.0.1"
-		redisCfg.Port = 6379
-		redisClient := redis.MustConnect(ctx, redisCfg)
-		redis.SetDefault(redisClient) // Cắm vào biến toàn cục để Eventbus lấy ra xài
-
-		sd.Register(func(ctx context.Context) error {
-			sysLogger.Info("🛑 Đóng kết nối Redis...")
-			return redisClient.Close()
-		})
-
-	case "nats":
-		sysLogger.Info("Khởi tạo NATS Connection...")
-		natsCfg := nats.DefaultConfig()
-		natsCfg.URLs = []string{"nats://127.0.0.1:4222"}
-		natsClient := nats.MustConnect(ctx, natsCfg)
-		nats.SetDefault(natsClient)
-
-		sd.Register(func(ctx context.Context) error {
-			sysLogger.Info("🛑 Đóng kết nối NATS...")
-			return natsClient.Close()
-		})
-
-	case "kafka":
-		sysLogger.Info("Khởi tạo Kafka Connection...")
-		kafkaCfg := kafka.DefaultConfig()
-		kafkaCfg.Brokers = []string{"127.0.0.1:9092"}
-		kafkaClient := kafka.MustConnect(ctx, kafkaCfg)
-		kafka.SetDefault(kafkaClient)
-
-		sd.Register(func(ctx context.Context) error {
-			sysLogger.Info("🛑 Đóng kết nối Kafka...")
-			kafkaClient.Close()
-			return nil
-		})
-
-	case "memory":
-		sysLogger.Info("Sử dụng Memory Driver (Không cần external connection)")
-	default:
-		sysLogger.Error("Driver không được hỗ trợ", "driver", *driverName)
-		os.Exit(1)
+func run(ctx context.Context, args []string) (returnErr error) {
+	cfg := demo.DefaultConfig()
+	fs := flag.NewFlagSet("eventbus", flag.ContinueOnError)
+	demo.BindFlags(fs, &cfg)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 
-	// 4. Initialize the EventBus
-	bus, err := eventbus.Open(
-		eventbus.Config{
-			Driver:        *driverName,
-			Namespace:     "demo",
-			Concurrency:   5,
-			MaxDeliveries: 6,
-			Logger:        sysLogger,
-		},
-	)
+	logger := demo.NewLogger("quickstart")
+	metrics := demo.NewMetrics()
+	rt, err := demo.OpenRuntime(ctx, cfg, logger)
 	if err != nil {
-		sysLogger.Error("Failed to open eventbus", "err", err)
-		os.Exit(1)
+		return err
 	}
-
-	// ---------------------------------------------------------
-	// KỊCH BẢN 1: WORK-QUEUE (1 Event -> 1 Worker xử lý)
-	// Đảm bảo event được xử lý độc quyền (không trùng lặp)
-	// ---------------------------------------------------------
-	bus.Register("send_welcome_email",
-		eventbus.Handle(func(ctx context.Context, job eventbus.Job, evt UserCreatedEvent) error {
-			sysLogger.Info("[Work-Queue] Sending welcome email...", "email", evt.Email)
-
-			// Giả lập lỗi mạng rớt -> Cần retry
-			if time.Now().UnixNano()%2 == 0 {
-				sysLogger.Warn("[Work-Queue] Network error, will retry later!")
-				// Báo lỗi để EventBus tự động retry theo RetryPolicy (Exponential Backoff)
-				return errors.New("smtp connection timeout")
-			}
-
-			if evt.Email == "" {
-				return eventbus.MarkPermanent(errors.New("invalid email format")) // Sai định dạng -> Vứt thẳng vào DLQ
-			}
-
-			sysLogger.Info("[Work-Queue] Email sent successfully", "email", evt.Email)
-			return nil
-		}),
-		eventbus.WithConcurrency(20), // Override Global Concurrency (5) -> Local (20)
-		eventbus.WithMaxDeliveries(5),
-		redisopts.WithBatchSize(20), // Kéo 20 tin nhắn mỗi lần cho khớp với Concurrency
-		redisopts.WithBlock(2*time.Second),
-	)
-
-	// ---------------------------------------------------------
-	// KỊCH BẢN 2: FAN-OUT (PUB/SUB) (1 Event -> N Handler xử lý)
-	// Mỗi Handler sẽ nhận được 1 bản sao của Event để xử lý độc lập
-	// ---------------------------------------------------------
-
-	// Handler 1: Gửi Notification
-	bus.Subscribe("user.registered", "notification_service",
-		eventbus.Handle(func(ctx context.Context, job eventbus.Job, evt UserCreatedEvent) error {
-			sysLogger.Info("[Pub/Sub - Handler 1] Pushing notification", "user_id", evt.UserID)
-			return nil
-		}),
-		eventbus.WithConcurrency(3),
-	)
-
-	// Handler 2: Cập nhật CRM
-	bus.Subscribe("user.registered", "crm_service",
-		eventbus.Handle(func(ctx context.Context, job eventbus.Job, evt UserCreatedEvent) error {
-			sysLogger.Info("[Pub/Sub - Handler 2] Syncing User to CRM system", "user_id", evt.UserID)
-			return nil
-		}),
-	)
-
-	// 3. Khởi động EventBus (Bắt đầu lắng nghe các Queue và Subscription)
-	sysLogger.Info("🚀 Starting EventBus...")
-	if err := bus.Start(ctx); err != nil {
-		sysLogger.Error("Failed to start eventbus", "err", err)
-		os.Exit(1)
-	}
-
-	// 4. Test chức năng Publish (Gửi Event)
-	go func() {
-		// Đợi Bus start xong
-		time.Sleep(1 * time.Second)
-
-		evt := UserCreatedEvent{UserID: "u123", Email: "demo@example.com"}
-
-		// A. Gửi vào Work-Queue ngay lập tức
-		sysLogger.Info(">>> Publishing to Work-Queue (send_welcome_email)")
-		err := bus.Enqueue(ctx, "send_welcome_email", evt)
-		if err != nil {
-			sysLogger.Error("Publish error", "err", err)
-		}
-
-		// B. Publish dạng Pub/Sub Fan-out
-		sysLogger.Info(">>> Publishing to Pub/Sub (user.registered)")
-		err = bus.PublishEvent(ctx, "user.registered", evt)
-		if err != nil {
-			sysLogger.Error("Publish error", "err", err)
-		}
-
-		// C. Gửi Job Delay (Hẹn giờ chạy sau 5 giây)
-		sysLogger.Info(">>> Publishing Delayed Job (send_welcome_email in 5s)")
-		evt.Email = "emaildelay@mail.com"
-		err = bus.Enqueue(ctx, "send_welcome_email", evt, eventbus.WithDelay(5*time.Second))
-		if err != nil {
-			sysLogger.Error("PublishDelay error", "err", err)
-		}
+	var bus eventbus.Bus
+	defer func() {
+		returnErr = join(returnErr, demo.CloseAll(bus, rt))
 	}()
 
-	// 5. Chờ tín hiệu tắt từ Hệ Điều Hành (Graceful Shutdown)
-	sd.Register(func(ctx context.Context) error {
-		sysLogger.Info("🛑 Shutting down EventBus...")
-		return bus.Stop(ctx)
-	})
+	bus, err = demo.NewBus(cfg, rt, logger, metrics, demo.NewTracer(logger))
+	if err != nil {
+		return err
+	}
+	if err := demo.DeclareTask(bus, cfg.Driver, true, logger); err != nil {
+		return err
+	}
+	if err := demo.DeclareEvent(bus, cfg.Driver); err != nil {
+		return err
+	}
+	if err := bus.Subscribe(demo.EventName, "notification", demo.EventHandler("notification", logger)); err != nil {
+		return err
+	}
+	if err := bus.Subscribe(demo.EventName, "audit", demo.EventHandler("audit", logger)); err != nil {
+		return err
+	}
+	if err := demo.Start(ctx, bus); err != nil {
+		return err
+	}
 
-	sd.Wait()
-	sysLogger.Info("Goodbye!")
+	base := demo.UserMessage{UserID: "user-123", Email: "demo@example.invalid"}
+	if err := enqueueScenarios(ctx, bus, rt.Transport, base, logger); err != nil {
+		return err
+	}
+	if err := bus.Publish(ctx, demo.EventName, base, eventbus.WithHeader("source", "quickstart")); err != nil {
+		return fmt.Errorf("publish event: %w", err)
+	}
+
+	wait := cfg.DemoWait(2 * time.Second)
+	logger.Info("waiting for deterministic scenarios", "duration", wait)
+	select {
+	case <-time.After(wait):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	stats, err := bus.Stats(ctx, demo.TaskName)
+	if err != nil {
+		return fmt.Errorf("read stats: %w", err)
+	}
+	logger.Info("task stats", "pending", stats.Pending, "delayed", stats.Delayed, "in_flight", stats.InFlight, "dlq", stats.DLQ, "lag_known", stats.LagKnown)
+	logger.Info("metric counters", "values", metrics.Snapshot())
+	return nil
+}
+
+func enqueueScenarios(ctx context.Context, bus eventbus.Bus, tr transport.Transport, base demo.UserMessage, logger *demo.Logger) error {
+	scenarios := []demo.UserMessage{
+		base,
+		{UserID: "user-retry", Email: "retry@example.invalid", Mode: "retry"},
+		{UserID: "user-permanent", Email: "permanent@example.invalid", Mode: "permanent"},
+		{UserID: "user-skip", Email: "skip@example.invalid", Mode: "skip"},
+	}
+	for _, payload := range scenarios {
+		opts := []eventbus.JobOption{eventbus.WithHeader("source", "quickstart")}
+		if demo.SupportsOrdering(tr) {
+			opts = append(opts, eventbus.WithOrderingKey(payload.UserID))
+		}
+		if err := bus.Enqueue(ctx, demo.TaskName, payload, opts...); err != nil {
+			return fmt.Errorf("enqueue %s: %w", payload.Mode, err)
+		}
+	}
+	if !demo.SupportsOrdering(tr) {
+		logger.Info("ordering-key scenario skipped", "reason", "transport does not advertise ordering")
+	}
+	delayed := demo.UserMessage{UserID: "user-delayed", Email: "delay@example.invalid"}
+	if err := bus.Enqueue(ctx, demo.TaskName, delayed, eventbus.WithDelay(2*time.Second)); err != nil {
+		return fmt.Errorf("enqueue delayed task: %w", err)
+	}
+	runAt := demo.UserMessage{UserID: "user-run-at", Email: "run-at@example.invalid"}
+	if err := bus.Enqueue(ctx, demo.TaskName, runAt, eventbus.WithRunAt(time.Now().Add(2*time.Second))); err != nil {
+		return fmt.Errorf("enqueue run-at task: %w", err)
+	}
+	if demo.SupportsDedupe(tr) {
+		dedupe := demo.UserMessage{UserID: "user-dedupe", Email: "dedupe@example.invalid"}
+		for range 2 {
+			if err := bus.Enqueue(ctx, demo.TaskName, dedupe, eventbus.WithDedupeKey("welcome:user-dedupe"), eventbus.WithDedupeTTL(time.Minute)); err != nil {
+				return fmt.Errorf("enqueue deduplicated task: %w", err)
+			}
+		}
+	} else {
+		logger.Info("dedupe scenario skipped", "reason", "transport does not advertise TopologyDeduper")
+	}
+	return nil
+}
+
+func join(current, cleanup error) error {
+	if current != nil && cleanup != nil {
+		return fmt.Errorf("%v; cleanup: %w", current, cleanup)
+	}
+	if current != nil {
+		return current
+	}
+	return cleanup
 }

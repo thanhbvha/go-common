@@ -7,7 +7,11 @@ statistics, and malformed payload settlement. Redis runs the same suite against
 miniredis by default and against live Redis 7 single-node and Cluster fixtures
 under the `integration` build tag. NATS runs it against an embedded, file-backed
 JetStream server under the same tag; its scheduler is stopped by the harness so
-due-time dispatch remains deterministic.
+due-time dispatch remains deterministic. Kafka runs every applicable scenario
+against `localhost:9092`; its tier workers are likewise stopped so the harness
+can advance due time deterministically. Capability-dependent scenarios are
+skipped only when the transport does not advertise that optional interface, as
+with Kafka deduplication.
 
 Core runtime behavior is transport-independent and remains covered by the root
 EventBus tests. A durable driver is considered contract-complete only when both
@@ -28,7 +32,7 @@ the shared driver suite and the applicable core tests pass.
 | Graceful/forced drain | `TestDrainPreservesHandlersAndSettlesPrefetch`; `TestDrainDeadlineLeavesSourcesUnsettled` |
 | Reconnect without session leak | `TestSupervisorReconnectAndCancellation`; `TestSupervisorJoinsSessionBeforeReconnect`; `TestNATSDisconnectReconnectResumesConsumer` |
 | Task/event and subscriber isolation | `TestTaskAndEventPublishUseIsolatedTopologies`; `contracttest/event_fanout_groups` |
-| Ordering when advertised | Not applicable: Redis and NATS advertise no ordering guarantee |
+| Ordering when advertised | Kafka deterministic/live contiguous-offset and rebalance tests; Redis and NATS advertise no ordering guarantee |
 | Stats accuracy | `contracttest` stats assertions; `TestRedisStats*`; `TestNATSStatsUseConsumerObligations` |
 | DLQ list/requeue/purge/count | `contracttest/dead_letter_admin`; `TestRedisDLQ*`; `TestNATSDLQAdminPreservesMetadataAndRequeues` |
 | Malformed transport message | `contracttest/malformed_payload_remains_settleable`; `TestReclaimSkipsActiveAndMalformedRecordsRemainPending` |
