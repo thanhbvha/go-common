@@ -12,6 +12,9 @@ import (
 var kafkaTopicName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
+	if t.producerErr != nil {
+		return t.producerErr
+	}
 	if err := topology.Validate(); err != nil {
 		return fmt.Errorf("kafka: %w", err)
 	}
@@ -40,6 +43,11 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 			v, ok := value.(int32)
 			if !ok || v <= 0 {
 				return fmt.Errorf("kafka: %s must be a positive int32", key)
+			}
+		case "kafka.delay_batch_size":
+			v, ok := value.(int)
+			if !ok || v < 1 || v > maxDelayBatchSize {
+				return fmt.Errorf("kafka: %s must be an int between 1 and %d", key, maxDelayBatchSize)
 			}
 		case "kafka.topic_configs":
 			configs, ok := value.(map[string]string)

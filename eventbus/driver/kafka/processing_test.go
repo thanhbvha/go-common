@@ -14,15 +14,40 @@ import (
 
 type processingConsumer struct {
 	mu      sync.Mutex
-	marked  []*kgo.Record
+	commits [][]*kgo.Record
 	polls   []int
 	records []*kgo.Record
+	allowed int
+	rewinds []map[string]map[int32]kgo.EpochOffset
 }
 
-func (c *processingConsumer) MarkCommitRecords(records ...*kgo.Record) {
+func (c *processingConsumer) AllowRebalance() {
+	c.mu.Lock()
+	c.allowed++
+	c.mu.Unlock()
+}
+
+func (c *processingConsumer) SetOffsets(offsets map[string]map[int32]kgo.EpochOffset) {
+	c.mu.Lock()
+	c.rewinds = append(c.rewinds, offsets)
+	c.mu.Unlock()
+}
+
+func (c *processingConsumer) CommitRecords(_ context.Context, records ...*kgo.Record) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.marked = append(c.marked, records...)
+	c.commits = append(c.commits, append([]*kgo.Record(nil), records...))
+	return nil
+}
+
+func (c *processingConsumer) committedCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, records := range c.commits {
+		count += len(records)
+	}
+	return count
 }
 
 func (c *processingConsumer) PollRecords(ctx context.Context, limit int) kgo.Fetches {
@@ -49,18 +74,254 @@ func processingRecord(partition int32, offset int64) *kgo.Record {
 	return &kgo.Record{Topic: "jobs", Partition: partition, Offset: offset, Value: []byte(`{"v":3,"attempt":1}`)}
 }
 
+func TestOffsetCoordinatorCommitsOnlyContiguousSettlements(t *testing.T) {
+	// DS-41/51: a higher completed offset cannot advance the group past a
+	// lower unsettled offset, while an independent partition can commit.
+	synctest.Test(t, func(t *testing.T) {
+		client := &processingConsumer{}
+		coordinator := newOffsetCoordinator(client, 3)
+		defer coordinator.close()
+		low := processingRecord(0, 10)
+		high := processingRecord(0, 12) // compacted logs may contain gaps.
+		other := processingRecord(1, 30)
+		if err := coordinator.register(context.Background(), []*kgo.Record{low, high, other}); err != nil {
+			t.Fatal(err)
+		}
+
+		highDone := make(chan error, 1)
+		go func() { highDone <- coordinator.settle(context.Background(), high) }()
+		synctest.Wait()
+		if client.committedCount() != 0 {
+			t.Fatal("higher offset committed before the lower offset settled")
+		}
+		if err := coordinator.settle(context.Background(), other); err != nil {
+			t.Fatal(err)
+		}
+		if client.committedCount() != 1 {
+			t.Fatal("independent partition did not commit")
+		}
+		if err := coordinator.settle(context.Background(), low); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-highDone; err != nil {
+			t.Fatal(err)
+		}
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		if len(client.commits) != 2 || len(client.commits[1]) != 1 || client.commits[1][0] != high {
+			t.Fatal("coordinator did not commit the highest contiguous record")
+		}
+	})
+}
+
+type blockingCommitter struct {
+	started chan *kgo.Record
+	release chan error
+}
+
+func (c *blockingCommitter) CommitRecords(_ context.Context, records ...*kgo.Record) error {
+	c.started <- records[len(records)-1]
+	return <-c.release
+}
+
+func TestOffsetCoordinatorWaitsForBrokerConfirmation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		committer := &blockingCommitter{started: make(chan *kgo.Record, 1), release: make(chan error, 1)}
+		coordinator := newOffsetCoordinator(committer, 1)
+		defer coordinator.close()
+		record := processingRecord(0, 1)
+		if err := coordinator.register(context.Background(), []*kgo.Record{record}); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- coordinator.settle(context.Background(), record) }()
+		if committed := <-committer.started; committed != record {
+			t.Fatal("coordinator committed the wrong record")
+		}
+		synctest.Wait()
+		if len(done) != 0 {
+			t.Fatal("settlement completed before Kafka confirmed the commit")
+		}
+		committer.release <- nil
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestOffsetCoordinatorCommitFailureDoesNotAdvance(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		committer := &blockingCommitter{started: make(chan *kgo.Record, 1), release: make(chan error, 1)}
+		coordinator := newOffsetCoordinator(committer, 1)
+		defer coordinator.close()
+		record := processingRecord(0, 1)
+		if err := coordinator.register(context.Background(), []*kgo.Record{record}); err != nil {
+			t.Fatal(err)
+		}
+		commitErr := errors.New("commit failed")
+		first := make(chan error, 1)
+		go func() { first <- coordinator.settle(context.Background(), record) }()
+		<-committer.started
+		committer.release <- commitErr
+		if err := <-first; !errors.Is(err, commitErr) {
+			t.Fatalf("first settlement = %v, want commit failure", err)
+		}
+
+		second := make(chan error, 1)
+		go func() { second <- coordinator.settle(context.Background(), record) }()
+		if retried := <-committer.started; retried != record {
+			t.Fatal("failed commit advanced past its source record")
+		}
+		committer.release <- nil
+		if err := <-second; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestOffsetCoordinatorFencesRevokedAndLostPartitions(t *testing.T) {
+	client := &processingConsumer{}
+	coordinator := newOffsetCoordinator(client, 2)
+	defer coordinator.close()
+	coordinator.trackOwnership()
+	assignment := map[string][]int32{"jobs": {0}}
+	if err := coordinator.assign(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked := processingRecord(0, 1)
+	if err := coordinator.register(context.Background(), []*kgo.Record{revoked}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.revoke(context.Background(), assignment, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.settle(context.Background(), revoked); !errors.Is(err, errPartitionRevoked) {
+		t.Fatalf("revoked settlement = %v, want partition-revoked fence", err)
+	}
+	if client.committedCount() != 0 {
+		t.Fatal("revoked partition committed a stale delivery")
+	}
+	if err := coordinator.register(context.Background(), []*kgo.Record{processingRecord(0, 2)}); !errors.Is(err, errPartitionRevoked) {
+		t.Fatalf("registration after revoke = %v", err)
+	}
+
+	if err := coordinator.assign(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	lost := processingRecord(0, 3)
+	if err := coordinator.register(context.Background(), []*kgo.Record{lost}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.revoke(context.Background(), assignment, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.settle(context.Background(), lost); !errors.Is(err, errPartitionLost) {
+		t.Fatalf("lost settlement = %v, want partition-lost fence", err)
+	}
+}
+
+func TestRebalanceStopsNewPartitionIntakeAndDrainsInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &processingConsumer{}
+		coordinator := newOffsetCoordinator(client, 2)
+		defer coordinator.close()
+		rebalances := newRebalanceController()
+		rebalances.bind(coordinator)
+		assignment := map[string][]int32{"jobs": {0}}
+		if err := rebalances.assigned(context.Background(), assignment); err != nil {
+			t.Fatal(err)
+		}
+
+		received := make(chan transport.Delivery, 2)
+		type dispatchResult struct {
+			rewind map[string]map[int32]kgo.EpochOffset
+			err    error
+		}
+		done := make(chan dispatchResult, 1)
+		go func() {
+			rewind, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, coordinator, rebalances,
+				[]*kgo.Record{processingRecord(0, 0), processingRecord(0, 1)}, func(d transport.Delivery) { received <- d })
+			done <- dispatchResult{rewind: rewind, err: err}
+		}()
+		first := <-received
+		rebalances.block()
+		synctest.Wait()
+		if len(received) != 0 {
+			t.Fatal("rebalance signal admitted another record")
+		}
+		if err := first.Settle(context.Background(), transport.Decision{Kind: transport.DecisionAck}); err != nil {
+			t.Fatal(err)
+		}
+		result := <-done
+		if !errors.Is(result.err, errRebalanceRequested) {
+			t.Fatalf("dispatch result = %v, want rebalance drain", result.err)
+		}
+		if got := result.rewind["jobs"][0].Offset; got != 1 {
+			t.Fatalf("rewind offset = %d, want first undispatched offset 1", got)
+		}
+		if len(received) != 0 || client.committedCount() != 1 {
+			t.Fatal("rebalance did not drain exactly the in-flight record")
+		}
+		if err := rebalances.revoked(context.Background(), assignment, false); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestConsumeAllowsRebalanceOnlyAfterSettlement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		client := &processingConsumer{records: []*kgo.Record{processingRecord(0, 0)}}
+		coordinator := newOffsetCoordinator(client, 1)
+		defer coordinator.close()
+		received := make(chan transport.Delivery, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Topology{}, client, coordinator, nil, 1, func(d transport.Delivery) { received <- d })
+		}()
+		delivery := <-received
+		synctest.Wait()
+		client.mu.Lock()
+		allowedBefore := client.allowed
+		client.mu.Unlock()
+		if allowedBefore != 0 {
+			t.Fatal("rebalance allowed before in-flight settlement")
+		}
+		if err := delivery.Settle(context.Background(), transport.Decision{Kind: transport.DecisionAck}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		client.mu.Lock()
+		allowedAfter := client.allowed
+		client.mu.Unlock()
+		if allowedAfter != 1 {
+			t.Fatalf("AllowRebalance calls = %d, want 1 after settlement", allowedAfter)
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestPartitionProcessingOrderAndConcurrency(t *testing.T) {
 	// DS-51/53: a slow lower offset blocks only its own partition.
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		client := &processingConsumer{}
+		coordinator := newOffsetCoordinator(client, 4)
+		defer coordinator.close()
 		received := make(chan *kafkaDelivery, 4)
 		done := make(chan error, 1)
 		go func() {
-			done <- (&kafkaTransport{}).dispatchBatch(ctx, transport.Topology{}, client,
+			_, err := (&kafkaTransport{}).dispatchBatch(ctx, transport.Topology{}, coordinator, nil,
 				[]*kgo.Record{processingRecord(0, 10), processingRecord(0, 12), processingRecord(1, 30), processingRecord(1, 31)},
 				func(d transport.Delivery) { received <- d.(*kafkaDelivery) })
+			done <- err
 		}()
 		first, other := <-received, <-received
 		if first.record.Partition != 0 || first.record.Offset != 10 || other.record.Partition != 1 {
@@ -105,10 +366,12 @@ func TestPartitionProcessingBoundsPollingAndCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		client := &processingConsumer{records: []*kgo.Record{processingRecord(0, 0), processingRecord(0, 1), processingRecord(1, 0), processingRecord(1, 1), processingRecord(2, 0)}}
+		coordinator := newOffsetCoordinator(client, 3)
+		defer coordinator.close()
 		received := make(chan transport.Delivery, 5)
 		done := make(chan error, 1)
 		go func() {
-			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Topology{}, client, 3, func(d transport.Delivery) { received <- d })
+			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Topology{}, client, coordinator, nil, 3, func(d transport.Delivery) { received <- d })
 		}()
 		synctest.Wait()
 		if len(client.polls) != 1 || client.polls[0] != 3 || len(client.records) != 2 || len(received) != 2 {
@@ -124,7 +387,7 @@ func TestPartitionProcessingBoundsPollingAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if len(client.marked) != 2 {
+		if client.committedCount() != 2 {
 			t.Fatal("late settlement did not retain its client")
 		}
 	})
@@ -133,11 +396,14 @@ func TestPartitionProcessingBoundsPollingAndCancellation(t *testing.T) {
 func TestPartitionProcessingSettlementFailureStopsLaterOffsets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client := &processingConsumer{}
+		coordinator := newOffsetCoordinator(client, 2)
+		defer coordinator.close()
 		received := make(chan transport.Delivery, 2)
 		done := make(chan error, 1)
 		go func() {
-			done <- (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, client,
+			_, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, coordinator, nil,
 				[]*kgo.Record{processingRecord(0, 0), processingRecord(0, 1)}, func(d transport.Delivery) { received <- d })
+			done <- err
 		}()
 		delivery := <-received
 		failed, cancel := context.WithCancel(context.Background())
@@ -148,7 +414,7 @@ func TestPartitionProcessingSettlementFailureStopsLaterOffsets(t *testing.T) {
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-		if len(client.marked) != 0 || len(received) != 0 {
+		if client.committedCount() != 0 || len(received) != 0 {
 			t.Fatal("failed settlement advanced the partition")
 		}
 	})
@@ -174,6 +440,12 @@ func TestSubscriptionCapacity(t *testing.T) {
 	}
 }
 
+func TestKafkaAdvertisesPartitionOrderingAfterSafeRebalance(t *testing.T) {
+	if !(&kafkaTransport{}).Capabilities().Ordering {
+		t.Fatal("Kafka partition ordering was not advertised after contiguous commits and safe ownership transfer")
+	}
+}
+
 type engineProcessingTransport struct {
 	*kafkaTransport
 	client *processingConsumer
@@ -187,10 +459,12 @@ func (t *engineProcessingTransport) Consume(ctx context.Context, sub transport.S
 	if err != nil {
 		return err
 	}
-	err = t.consumeRecords(ctx, sub.Topology, t.client, capacity, deliver)
+	coordinator := newOffsetCoordinator(t.client, capacity)
+	err = t.consumeRecords(ctx, sub.Topology, t.client, coordinator, nil, capacity, deliver)
 	if sub.WaitForHandlers != nil {
 		sub.WaitForHandlers()
 	}
+	coordinator.close()
 	return err
 }
 
@@ -252,7 +526,7 @@ func TestPartitionProcessingThroughEngineWorkers(t *testing.T) {
 		if err := bus.Drain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if len(client.marked) != 4 {
+		if client.committedCount() != 4 {
 			t.Fatal("engine did not settle all records")
 		}
 	})

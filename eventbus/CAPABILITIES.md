@@ -18,14 +18,15 @@ Legend:
 | Durable acceptance | No | Yes | Yes | Yes |
 | Work-queue delivery | Test only | Yes | Yes | Partial |
 | Event fan-out groups | Test only | Yes | Yes | Partial |
-| Delayed delivery | Test only, process-local | Partial, ZSET sweeper | Partial, KV sweeper | Partial, tier topics/timers |
+| Delayed delivery | Test only, process-local | Partial, ZSET sweeper | Partial, KV sweeper | Partial, durable bounded tier sweeps (P5.6) |
 | Reported delay precision | 1 ms | 1 s | 1 s | 5 s |
-| Ordering | No | No | No | **No until P5.2/P5.3** |
+| Ordering | No | No | No | Yes, within a source partition |
 | Dedupe | Test only | Partial | Partial | No |
 | Heartbeat/lease extension | No-op | Yes, ownership-checked idle renewal (P3.5) | Yes (`InProgress`) | Not applicable in the same model |
 | Poison delivery count | Process-local | Yes, XPENDING count preserved on direct reclaim | Yes | Envelope-derived only |
 | Atomic retry settlement | No | Yes, same-slot Lua (P3.3) | No | No |
 | Atomic DLQ settlement | No | Yes, same-slot Lua (P3.3) | No | No |
+| Confirmed publish-before-commit retry/DLQ | N/A | Atomic Lua | Yes | Yes, synchronous fallback (P5.5) |
 | DLQ write | Test only | Yes | Yes | Yes |
 | DLQ list/requeue/purge/count | Test only | Yes, cursor + atomic requeue (P3.6) | Yes, cursor + publish-before-delete requeue (P4.5) | No |
 | Queue stats | Test only | Yes | Yes | No |
@@ -59,7 +60,7 @@ and ordering for fast publish-path checks:
 | Memory | 1 ms | false |
 | Redis | 1 s | false |
 | NATS | 1 s | false |
-| Kafka | 5 s | false |
+| Kafka | 5 s | true |
 
 Kafka P5.2 serializes delivery within each topic/partition through successful
 settlement while allowing different partition heads into the engine worker pool
@@ -71,10 +72,42 @@ A slow partition can therefore delay the next batch for all partitions. A failed
 settlement ends the consume session without dispatching later records from that
 partition. Accepted handlers can still settle during graceful drain.
 
-Ordering remains deliberately unadvertised: broker-confirmed contiguous offset
-coordination and safe rebalance handling still need P5.3/P5.4 verification.
-The current mark-for-auto-commit settlement is not broker confirmation. Retries
-can reorder relative to later source records, as specified by DS-52.
+Kafka P5.3 disables auto-commit for main consumers and routes every handler
+settlement through a session-owned offset coordinator. The coordinator tracks
+the fetched order independently for each topic/partition, synchronously commits
+only the highest consecutively settled record, and does not report settlement
+success until Kafka confirms the commit. A higher completed offset waits while
+any lower fetched offset remains unsettled; compacted offset gaps are valid.
+Commit failure reopens settlement and never advances the coordinator. Delay
+consumers also use synchronous manual commits under the P5.6 scheduler.
+
+Kafka P5.4 gates group callbacks with `BlockRebalanceOnPoll`. A blocked callback
+stops dispatching new records while already accepted handlers drain under the
+engine's processing and settlement deadlines. The driver rewinds each retained
+partition to its first polled-but-undispatched record before `AllowRebalance`,
+preventing local fetch positions from skipping work. Revoked and lost partitions
+are fenced in the coordinator, so stale deliveries cannot commit after ownership
+changes. Main-consumer shutdown also keeps the coordinator alive through the
+final revoke callback. Kafka therefore advertises source-partition ordering.
+Retries can still reorder relative to later source records, as specified by
+DS-52; this is not arbitrary side-effect or retry-chain ordering.
+
+Kafka P5.5 explicitly selects synchronous publish-before-commit settlement.
+Retry/DLQ production must be broker-confirmed before the contiguous coordinator
+can commit the source; failed or ambiguous publication never requests a commit.
+Failed/ambiguous commits and process crashes can duplicate the destination.
+`acks=0` and externally transactional producers are rejected. Transactions are
+not implemented or advertised; see [SETTLEMENT.md](driver/kafka/SETTLEMENT.md)
+for the fallback choice, crash windows, and broker durability prerequisites.
+The P5.6 scheduler uses three durable delay topics and exactly one periodic
+worker per tier/topology. Each sweep polls at most `kafka.delay_batch_size`
+(default 100, range 1–1000); records that still belong in their current tier are
+rewound instead of retained by process-local timers. Lower-tier/main publication
+is broker-confirmed before a synchronous source commit. Publish/commit ambiguity
+can duplicate but cannot intentionally lose work. Ordering keys and headers are
+preserved, and startup rejects unequal partition counts across main, DLQ, and
+delay topics. See [SCHEDULER.md](driver/kafka/SCHEDULER.md). Full shared-contract
+promotion remains P5.8.
 
 All delivery implementations expose one terminal `Settle(Decision)` operation
 guarded by the shared single-use state machine. A failed settlement reopens the

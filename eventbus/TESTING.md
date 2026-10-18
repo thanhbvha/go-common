@@ -22,7 +22,25 @@ Integration prerequisites:
   `go test -tags=integration ./eventbus/driver/kafka -count=1` includes a unique
   two-partition topic test. Default Kafka tests use deterministic `synctest`
   coverage for partition serialization, cross-partition concurrency through the
-  engine, bounded polling, cancellation, and settlement failure.
+  engine, bounded polling, cancellation, and settlement failure. The tagged
+  `TestKafkaOffsetCoordinator_ContiguousBrokerCommit` reads real consumer-group
+  offsets and proves that a higher completed record cannot advance the broker
+  commit past a lower unsettled record. The tagged
+  `TestKafkaRebalanceDrainsAndTransfersPartitions` forces a two-member partition
+  transfer while work is in flight and verifies drain-before-release plus
+  loss-free rewind of polled-but-undispatched records.
+  `TestKafkaSettlementBrokerFaultWindows` injects failures before destination
+  production, after its broker response, before source commit, and after its
+  broker response. It checks real group offsets and destination log counts for
+  both retry and DLQ, including the fallback's expected duplicate windows.
+  Default `TestKafkaSettlement*` and `TestKafkaFailedTransferBlocksHigherCommit`
+  tests cover confirmation barriers, cancellation, failed transfer fencing,
+  metadata/routing, single-use settlement, and unsafe producer rejection.
+  P5.6 default tests cover tier selection, bounded polling, shutdown joining,
+  offset rewind, publish/commit failures, malformed envelopes, and exact
+  ordering-key/header transfer. Tagged scheduler tests reject related-topic
+  partition mismatches and exercise a live five-record burst with a two-record
+  sweep bound while verifying stable ordering-key partitioning.
 - NATS driver and spike tests start an in-process JetStream server and do not
   require a separately installed NATS server. The suite includes the shared
   transport contract plus restart/reconnect, `AckWait`, heartbeat,

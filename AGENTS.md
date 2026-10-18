@@ -27,6 +27,6 @@
 - `graft grep "<literal>" --fixed` — every literal occurrence in indexed files, rather than ranked top-N results; use ordinary search for unindexed files.
 - `graft skeleton <file>` — the file's API signatures and spans without reading all bodies.
 - `graft callers <symbol>` — indexed callers; add `--depth all` for the transitive blast radius before refactoring, or `--direction out` for callees. Structural edges are best-effort, not compiler-verified.
-- `graft build` — refresh after large changes or create the graph on a fresh clone; structural indexing needs no API key or model. `graft/` is an ignored, regenerable local cache: never commit or hand-edit it.
+- `graft build` — refresh after large changes or create the graph on a fresh clone; structural indexing needs no API key or model. After completing and verifying each implementation task or plan section, run `graft build` before reporting completion so the graph includes the latest mappings. If the rebuild fails, report the failure explicitly rather than silently relying on stale graph data. `graft/` is an ignored, regenerable local cache: never commit or hand-edit it.
 - Windows setup: graft is installed through Scoop's Node.js LTS under `%USERPROFILE%\scoop\apps\nodejs-lts\current\bin`. Reopen the terminal after installation to refresh PATH. Native dependency installation needs real Python and Visual C++ Build Tools; Windows Store Python aliases do not suffice.
 <!-- graft:end -->

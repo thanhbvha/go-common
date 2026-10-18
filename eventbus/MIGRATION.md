@@ -123,11 +123,10 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
 
 ## Breaking changes without adapters
 
-- Kafka EventBus `NewWithConfig`/`NewWithClient` require a positive
-  `ConsumerCommitInterval`. Zero/negative intervals return an error matching
-  `ErrNotSupported` at construction, since manual source-offset settlement is
-  not implemented by this driver. The standalone Kafka wrapper retains its
-  manual-commit configuration. Producer configuration now honors
+- Kafka EventBus main and delay consumers now own synchronous source commits;
+  `ConsumerCommitInterval=0` is accepted and no longer controls their
+  settlement. The standalone Kafka wrapper retains its configured behavior for
+  consumers created directly by callers. Producer configuration now honors
   `ProducerIdempotent=false`; enabling it requires `ProducerAcks=-1`, and ACK
   values outside -1/0/1 are rejected. `kafka.New` snapshots its input broker
   slice and TLS config so later caller mutation cannot split producer and
@@ -141,8 +140,14 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   deliveries before receiving their partition's successor. Negative subscription
   bounds and integer overflow are rejected; omitted bounds default to 10/20.
   Cancellation stops intake while accepted handlers retain their settlement
-  client through the existing drain barrier. `Ordering` remains false pending
-  contiguous commit/rebalance work; source ordering does not imply retry ordering.
+  coordinator through the existing drain barrier. Main-consumer auto-commit is
+  disabled: settlement waits for a synchronous, contiguous offset commit, and a
+  higher completed offset never commits past a lower unsettled fetched record.
+  During rebalance, new intake stops, accepted handlers drain under their normal
+  deadlines, undispatched fetched records are rewound, and revoked/lost
+  partitions are fenced before ownership is released. Kafka now advertises
+  source-partition ordering; source ordering still does not imply retry-chain
+  ordering.
 - Kafka EventBus applications should prefer
   `kafkadriver.NewWithConfig(kafka.Config)` for an owned transport or
   `kafkadriver.NewWithClient(*kafka.Client)` for a connected caller-owned
@@ -154,6 +159,15 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   default returns an ordinary startup error. SASL protocols now reject a
   missing mechanism or credentials, and OAuthBearer requires a static token
   because token-URL exchange is not implemented.
+- Kafka delayed delivery now uses durable `5s`, `1m`, and `5m` topic tiers with
+  one bounded periodic worker per tier instead of a timer per record. Configure
+  `kafka.delay_batch_size` from 1–1000 (default 100). Main, DLQ, and every delay
+  topic must have the configured `kafka.partitions` count; startup rejects an
+  existing mismatch before scheduling begins. The scheduler preserves envelope
+  bytes, broker headers, and ordering keys, publishes before committing, and can
+  duplicate after an ambiguous publish/commit boundary. Retention must cover
+  maximum delay plus outage time. See the Kafka
+  [scheduler guide](driver/kafka/SCHEDULER.md).
 - EventBus jobs may now set `WithDedupeTTL`; the duration is persisted in the
   v3 envelope as `dedupe_ttl_ns`. Omitting it retains the former 24-hour
   default. A positive TTL without `WithDedupeKey`, or a negative TTL, is now an
@@ -288,6 +302,19 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   error helpers listed above.
 
 ## Migrating legacy queue applications
+
+Kafka P5.5 uses synchronous publish-before-commit for retry/DLQ. Destination
+failure leaves the source uncommitted; a crash or ambiguous broker response can
+create duplicate destination records. Retain idempotent handlers. EventBus now
+rejects `ProducerAcks=0` with `ErrNotSupported`; use the default `-1` (preferred)
+or `1` with its weaker replication guarantee. The deprecated raw constructor
+reports this error during validation/publish/consume. Raw transactional
+producers are also rejected: transaction settlement is unavailable in this
+version, with no automatic downgrade. See the Kafka
+[settlement guide](driver/kafka/SETTLEMENT.md) for failure windows and scope.
+Delayed retries use the bounded tier scheduler described in the Kafka
+[scheduler guide](driver/kafka/SCHEDULER.md); drain inconsistent old related
+topics before enabling it.
 
 1. Make every handler idempotent using a stable business key or message ID.
 2. Map legacy queue names to explicitly declared task names and move retry

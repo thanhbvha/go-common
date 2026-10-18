@@ -11,10 +11,11 @@ import (
 
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-func TestNewWithClientSnapshotAndCommitPolicy(t *testing.T) {
+func TestNewWithClientSnapshotAndManualCommitPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	probe, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
@@ -35,16 +36,10 @@ func TestNewWithClientSnapshotAndCommitPolicy(t *testing.T) {
 		defer wrapper.Close()
 		cfg.Brokers[0] = "mutated.invalid:9092"
 		backend, err := NewWithClient(wrapper)
-		if interval == 0 {
-			if backend != nil || !errors.Is(err, transport.ErrNotSupported) {
-				t.Fatalf("manual policy error = %v", err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		consumer, err := backend.(*kafkaTransport).newConsumer(kgo.ConsumerGroup("snapshot-review"), kgo.AutoCommitMarks())
+		consumer, err := backend.(*kafkaTransport).newManualConsumer(kgo.ConsumerGroup("snapshot-review"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,10 +139,8 @@ func TestKafkaTransport_Delay(t *testing.T) {
 	trans.EnsureTopology(ctx, topo)
 	time.Sleep(1 * time.Second)
 
-	// Since Envelope is parsed in the delay consumer to find RunAt, we must serialize a proper Envelope
-	// But kafkaTransport doesn't use the JSON's RunAt directly for Pause!
-	// Wait, in `kafka.go`, delayConsumer does: `if err := json.Unmarshal(record.Value, &env); err != nil { ... cl.MarkCommitRecords }`
-	// It relies on `eventbus.Envelope`! So we MUST publish an `eventbus.Envelope` JSON.
+	// The durable tier scheduler reads RunAt from the envelope, so publish a
+	// complete envelope rather than an arbitrary payload.
 
 	payload := `{"id":"123","type":"testjob_kafka_delay","payload":"\"hello\"","run_at":` + fmt.Sprintf("%d", time.Now().Add(3*time.Second).UnixMilli()) + `}`
 
@@ -248,5 +241,273 @@ func TestKafkaTransport_PartitionProcessing(t *testing.T) {
 	}
 	if counts[0] != 2 || counts[1] != 2 {
 		t.Fatal("not all partitions processed")
+	}
+}
+
+func TestKafkaOffsetCoordinator_ContiguousBrokerCommit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	producer, err := kgo.NewClient(
+		kgo.SeedBrokers("localhost:9092"),
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	if err := producer.Ping(ctx); err != nil {
+		t.Skipf("Kafka not available: %v", err)
+	}
+
+	backend := New(producer, nil).(*kafkaTransport)
+	topic := fmt.Sprintf("eventbus-p53-%d", time.Now().UnixNano())
+	group := topic + "-group"
+	created, err := backend.adm.CreateTopics(ctx, 1, 1, nil, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, response := range created {
+		if response.Err != nil {
+			t.Fatal(response.Err)
+		}
+	}
+	defer backend.adm.DeleteTopics(context.Background(), topic)
+
+	for i := range 2 {
+		if err := producer.ProduceSync(ctx, &kgo.Record{
+			Topic: topic, Partition: 0, Value: []byte(fmt.Sprintf("record-%d", i)),
+		}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	opts := mainConsumerOptions(topic, group, transport.Topology{})
+	opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	consumer, err := backend.newManualConsumer(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.CloseAllowingRebalance()
+
+	var records []*kgo.Record
+	for len(records) < 2 {
+		fetches := consumer.PollRecords(ctx, 2-len(records))
+		if err := fetches.Err(); err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, fetches.Records()...)
+	}
+	low, high := records[0], records[1]
+	if low.Partition != high.Partition || low.Offset >= high.Offset {
+		t.Fatalf("unexpected fetched offsets: %d/%d partitions %d/%d", low.Offset, high.Offset, low.Partition, high.Partition)
+	}
+
+	coordinator := newOffsetCoordinator(consumer, 2)
+	defer coordinator.close()
+	if err := coordinator.register(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+	highRequest := &offsetCommitRequest{ctx: ctx, record: high, result: make(chan error, 1)}
+	select {
+	case coordinator.commands <- highRequest:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	// A subsequent registration is a barrier proving the coordinator has
+	// observed the higher completion before the broker offset is inspected.
+	if err := coordinator.register(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	committedOffset := func() int64 {
+		t.Helper()
+		offsets, err := backend.adm.FetchOffsetsForTopics(ctx, group, topic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset, ok := offsets.Lookup(topic, 0)
+		if !ok || offset.Err != nil {
+			t.Fatalf("committed offset lookup: found=%t error=%v", ok, offset.Err)
+		}
+		return offset.At
+	}
+	if got := committedOffset(); got != -1 {
+		t.Fatalf("higher settled offset advanced broker commit to %d before lower offset settled", got)
+	}
+
+	if err := coordinator.settle(ctx, low); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-highRequest.result; err != nil {
+		t.Fatal(err)
+	}
+	if got, want := committedOffset(), high.Offset+1; got != want {
+		t.Fatalf("broker committed offset = %d, want highest contiguous offset %d", got, want)
+	}
+}
+
+func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	producer, err := kgo.NewClient(
+		kgo.SeedBrokers("localhost:9092"),
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	if err := producer.Ping(ctx); err != nil {
+		t.Skipf("Kafka not available: %v", err)
+	}
+
+	backend := New(producer, nil).(*kafkaTransport)
+	topic := fmt.Sprintf("eventbus-p54-%d", time.Now().UnixNano())
+	group := topic + "-group"
+	created, err := backend.adm.CreateTopics(ctx, 2, 1, nil, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, response := range created {
+		if response.Err != nil {
+			t.Fatal(response.Err)
+		}
+	}
+	defer backend.adm.DeleteTopics(context.Background(), topic)
+	produce := func(record *kgo.Record) error {
+		for {
+			err := producer.ProduceSync(ctx, record).FirstErr()
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, kerr.UnknownTopicOrPartition) && !errors.Is(err, kerr.LeaderNotAvailable) {
+				return err
+			}
+			producer.ForceMetadataRefresh()
+			timer := time.NewTimer(25 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	for partition := int32(0); partition < 2; partition++ {
+		for offset := range 2 {
+			if err := produce(&kgo.Record{
+				Topic: topic, Partition: partition, Value: []byte(fmt.Sprintf("p%d-%d", partition, offset)),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	type session struct {
+		client      *kgo.Client
+		coordinator *offsetCoordinator
+		cancel      context.CancelFunc
+		done        chan error
+		deliveries  chan *kafkaDelivery
+	}
+	startSession := func(onBlocked func()) *session {
+		t.Helper()
+		rebalances := newRebalanceController()
+		rebalances.onBlocked = onBlocked
+		opts := mainConsumerOptions(topic, group, transport.Topology{})
+		opts = append(opts,
+			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+			kgo.Balancers(kgo.RangeBalancer()),
+		)
+		opts = append(opts, rebalances.options()...)
+		client, err := backend.newManualConsumer(opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator := newOffsetCoordinator(client, 4)
+		rebalances.bind(coordinator)
+		sessionCtx, stop := context.WithCancel(ctx)
+		s := &session{
+			client: client, coordinator: coordinator, cancel: stop,
+			done: make(chan error, 1), deliveries: make(chan *kafkaDelivery, 4),
+		}
+		go func() {
+			s.done <- backend.consumeRecords(sessionCtx, transport.Topology{}, client, coordinator, rebalances, 4,
+				func(delivery transport.Delivery) { s.deliveries <- delivery.(*kafkaDelivery) })
+		}()
+		return s
+	}
+	stopSession := func(s *session) {
+		s.cancel()
+		if err := <-s.done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("consume session: %v", err)
+		}
+		s.client.CloseAllowingRebalance()
+		s.coordinator.close()
+	}
+
+	blocked := make(chan struct{}, 1)
+	first := startSession(func() {
+		select {
+		case blocked <- struct{}{}:
+		default:
+		}
+	})
+	defer stopSession(first)
+	initial := make([]*kafkaDelivery, 0, 2)
+	for len(initial) < 2 {
+		select {
+		case delivery := <-first.deliveries:
+			initial = append(initial, delivery)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+
+	second := startSession(nil)
+	defer stopSession(second)
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal("rebalance did not block on the first member's in-flight work")
+	}
+	select {
+	case delivery := <-first.deliveries:
+		t.Fatalf("first member admitted %q after rebalance was requested", delivery.Message().Payload)
+	case delivery := <-second.deliveries:
+		t.Fatalf("second member received %q before the first member drained", delivery.Message().Payload)
+	default:
+	}
+	for _, delivery := range initial {
+		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := make(map[string]bool)
+	secondReceived := false
+	for len(seen) < 2 {
+		var delivery *kafkaDelivery
+		select {
+		case delivery = <-first.deliveries:
+		case delivery = <-second.deliveries:
+			secondReceived = true
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for post-rebalance records")
+		}
+		payload := string(delivery.Message().Payload)
+		if seen[payload] {
+			t.Fatalf("duplicate post-rebalance delivery %q", payload)
+		}
+		seen[payload] = true
+		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !seen["p0-1"] || !seen["p1-1"] {
+		t.Fatalf("post-rebalance records = %#v", seen)
+	}
+	if !secondReceived {
+		t.Fatal("new group member did not receive an assigned partition")
 	}
 }

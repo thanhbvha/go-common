@@ -65,6 +65,11 @@ consumer, err := factory.NewConsumer(
 )
 ```
 
+Integrations that coordinate offsets themselves should use
+`NewManualConsumer`; it preserves the same connection, security, session, and
+fetch settings while disabling auto-commit. The caller must commit with
+franz-go's synchronous commit APIs only after processing succeeds.
+
 ## Configuration reference
 
 | Field | Default | Description |
@@ -80,6 +85,11 @@ consumer, err := factory.NewConsumer(
 | `ConsumerAutoOffsetReset` | `"earliest"` | `"earliest"` / `"latest"` |
 | `ConsumerCommitInterval` | `1s` | Auto-commit interval; `0` = manual commit |
 | `MaxConnRetries` | `3` | Connection attempts before error |
+
+The EventBus Kafka adapter always uses manual, synchronous commits for main and
+delay consumers, regardless of `ConsumerCommitInterval`. Its delayed scheduler
+uses three durable tier topics and a bounded per-sweep batch; see
+`eventbus/driver/kafka/SCHEDULER.md` in this module.
 
 ## Admin operations
 

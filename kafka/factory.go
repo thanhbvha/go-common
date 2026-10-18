@@ -16,10 +16,11 @@ import (
 // NativeClientFactory creates role-specific franz-go clients from one immutable
 // connection/security configuration. It is safe for concurrent use.
 type NativeClientFactory struct {
-	cfg      Config
-	base     []kgo.Opt
-	producer []kgo.Opt
-	consumer []kgo.Opt
+	cfg            Config
+	base           []kgo.Opt
+	producer       []kgo.Opt
+	consumer       []kgo.Opt
+	manualConsumer []kgo.Opt
 }
 
 // NewNativeClientFactory snapshots cfg and validates the common TLS/SASL
@@ -39,7 +40,8 @@ func NewNativeClientFactory(cfg Config) (*NativeClientFactory, error) {
 	}
 	return &NativeClientFactory{
 		cfg: cfg, base: base, producer: producer,
-		consumer: nativeConsumerOptions(cfg),
+		consumer:       nativeConsumerOptions(cfg),
+		manualConsumer: nativeManualConsumerOptions(cfg),
 	}, nil
 }
 
@@ -52,7 +54,7 @@ func NewNativeClientFactoryFromClient(client *kgo.Client, overrides ...kgo.Opt) 
 		return nil, fmt.Errorf("kafka: native client is nil")
 	}
 	base := append(slices.Clone(client.Opts()), overrides...)
-	return &NativeClientFactory{base: base}, nil
+	return &NativeClientFactory{base: base, manualConsumer: []kgo.Opt{kgo.DisableAutoCommit()}}, nil
 }
 
 // New creates a client with common connection and security settings plus opts.
@@ -77,6 +79,14 @@ func (f *NativeClientFactory) NewProducer(opts ...kgo.Opt) (*kgo.Client, error) 
 // and a narrower fetch bound.
 func (f *NativeClientFactory) NewConsumer(opts ...kgo.Opt) (*kgo.Client, error) {
 	consumer := append(slices.Clone(f.consumer), opts...)
+	return f.New(consumer...)
+}
+
+// NewManualConsumer creates a consumer with automatic commits disabled while
+// retaining the factory's connection, security, session, heartbeat, reset, and
+// fetch configuration. The caller owns all offset commits.
+func (f *NativeClientFactory) NewManualConsumer(opts ...kgo.Opt) (*kgo.Client, error) {
+	consumer := append(slices.Clone(f.manualConsumer), opts...)
 	return f.New(consumer...)
 }
 
@@ -180,6 +190,18 @@ func nativeProducerOptions(cfg Config) ([]kgo.Opt, error) {
 }
 
 func nativeConsumerOptions(cfg Config) []kgo.Opt {
+	opts := nativeConsumerBaseOptions(cfg)
+	if cfg.ConsumerCommitInterval > 0 {
+		return append(opts, kgo.AutoCommitInterval(cfg.ConsumerCommitInterval), kgo.AutoCommitMarks())
+	}
+	return append(opts, kgo.DisableAutoCommit())
+}
+
+func nativeManualConsumerOptions(cfg Config) []kgo.Opt {
+	return append(nativeConsumerBaseOptions(cfg), kgo.DisableAutoCommit())
+}
+
+func nativeConsumerBaseOptions(cfg Config) []kgo.Opt {
 	resetOffset := kgo.NewOffset().AtStart()
 	if cfg.ConsumerAutoOffsetReset == "latest" {
 		resetOffset = kgo.NewOffset().AtEnd()
@@ -190,8 +212,5 @@ func nativeConsumerOptions(cfg Config) []kgo.Opt {
 		kgo.HeartbeatInterval(cfg.ConsumerHeartbeat),
 		kgo.FetchMaxWait(cfg.ConsumerFetchMaxWait),
 	}
-	if cfg.ConsumerCommitInterval > 0 {
-		return append(opts, kgo.AutoCommitInterval(cfg.ConsumerCommitInterval), kgo.AutoCommitMarks())
-	}
-	return append(opts, kgo.DisableAutoCommit())
+	return opts
 }

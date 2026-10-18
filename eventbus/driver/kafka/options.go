@@ -18,18 +18,25 @@ func WithReplicationFactor(replFactor int16) eventbus.TopologyOption {
 	return eventbus.WithOption("kafka.replication_factor", replFactor)
 }
 
-// WithFetchMaxWait sets the maximum amount of time the broker will wait to fill 
+// WithFetchMaxWait sets the maximum amount of time the broker will wait to fill
 // the fetch request before returning.
 // Default is 500ms.
 func WithFetchMaxWait(d time.Duration) eventbus.TopologyOption {
 	return eventbus.WithOption("kafka.fetch_max_wait", d)
 }
 
-// WithFetchMaxBytes sets the maximum amount of data the server should return 
+// WithFetchMaxBytes sets the maximum amount of data the server should return
 // for a fetch request.
 // Default is 50MB.
 func WithFetchMaxBytes(bytes int32) eventbus.TopologyOption {
 	return eventbus.WithOption("kafka.fetch_max_bytes", bytes)
+}
+
+// WithDelayBatchSize bounds the records each delay tier examines per sweep.
+// The default is 100 and the maximum is 1000. Remaining records stay durable
+// in Kafka for a later sweep.
+func WithDelayBatchSize(size int) eventbus.TopologyOption {
+	return eventbus.WithOption("kafka.delay_batch_size", size)
 }
 
 // WithRetention sets the retention time for messages in the Kafka topics.

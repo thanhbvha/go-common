@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"testing"
 	"time"
 
@@ -59,6 +58,48 @@ func TestNewWithConfigPropagatesFactoryToInternalConsumers(t *testing.T) {
 	}
 }
 
+func TestMainConsumerOverridesFactoryAutoCommit(t *testing.T) {
+	cfg := commonkafka.DefaultConfig()
+	if cfg.ConsumerCommitInterval <= 0 {
+		t.Fatal("test requires the default auto-commit policy")
+	}
+	factory, err := commonkafka.NewNativeClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := factory.NewManualConsumer(mainConsumerOptions("jobs", "workers", transport.Topology{})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if got := client.OptValue(kgo.DisableAutoCommit); got != true {
+		t.Fatalf("DisableAutoCommit = %#v, want true", got)
+	}
+	if got := client.OptValue(kgo.AutoCommitMarks); got != false {
+		t.Fatalf("AutoCommitMarks = %#v, want false", got)
+	}
+}
+
+func TestDelayConsumerOverridesFactoryAutoCommit(t *testing.T) {
+	cfg := commonkafka.DefaultConfig()
+	factory, err := commonkafka.NewNativeClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := factory.NewManualConsumer(
+		kgo.ConsumerGroup("delay-workers"),
+		kgo.ConsumeTopics("jobs.delay-5s"),
+		kgo.BlockRebalanceOnPoll(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if got := client.OptValue(kgo.DisableAutoCommit); got != true {
+		t.Fatalf("DisableAutoCommit = %#v, want true", got)
+	}
+}
+
 func TestLegacyNewCopiesNativeSecurityOptions(t *testing.T) {
 	cfg := commonkafka.DefaultConfig()
 	cfg.Brokers = []string{"secure:9093"}
@@ -89,6 +130,17 @@ func TestLegacyNewCopiesNativeSecurityOptions(t *testing.T) {
 	if got := consumer.OptValue(kgo.ClientID); got != cfg.ClientID {
 		t.Fatalf("legacy consumer client ID = %v", got)
 	}
+	manual, err := backend.newManualConsumer(kgo.ConsumerGroup("legacy-manual"), kgo.ConsumeTopics("legacy-topic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manual.Close()
+	if manual.OptValue(kgo.DialTLSConfig) == nil || manual.OptValue(kgo.SASL) == nil {
+		t.Fatal("legacy manual consumer dropped native TLS/SASL options")
+	}
+	if got := manual.OptValue(kgo.DisableAutoCommit); got != true {
+		t.Fatalf("legacy manual consumer DisableAutoCommit = %#v, want true", got)
+	}
 }
 
 func TestDefaultTransportWithoutRegisteredClientReturnsError(t *testing.T) {
@@ -112,13 +164,16 @@ func TestNewWithClientRejectsDisconnectedClient(t *testing.T) {
 	}
 }
 
-func TestNewWithConfigRejectsUnsupportedCommitPolicy(t *testing.T) {
+func TestNewWithConfigAcceptsManualCommitPolicy(t *testing.T) {
 	for _, interval := range []time.Duration{0, -time.Second} {
 		cfg := commonkafka.DefaultConfig()
 		cfg.ConsumerCommitInterval = interval
 		backend, err := NewWithConfig(cfg)
-		if backend != nil || !errors.Is(err, transport.ErrNotSupported) {
-			t.Fatalf("unsupported commit policy: transport=%T error=%v", backend, err)
+		if err != nil {
+			t.Fatalf("manual commit policy: %v", err)
+		}
+		if err := backend.Close(context.Background()); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

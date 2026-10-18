@@ -196,3 +196,22 @@ func TestFactoryManualCommitConsumerStillConstructs(t *testing.T) {
 	assertKafkaOpt(t, client, kgo.DisableAutoCommit, true)
 	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
 }
+
+func TestFactoryExplicitManualConsumerOverridesAutoCommitConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ConsumerCommitInterval <= 0 {
+		t.Fatal("test requires automatic commits in the input config")
+	}
+	factory, err := NewNativeClientFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := factory.NewManualConsumer(kgo.ConsumerGroup("coordinated"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	assertKafkaOpt(t, client, kgo.DisableAutoCommit, true)
+	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
+	assertKafkaOpt(t, client, kgo.SessionTimeout, cfg.ConsumerSessionTimeout)
+}
