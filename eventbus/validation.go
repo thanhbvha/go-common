@@ -56,6 +56,21 @@ func validateTopology(topology Topology, backend transport.Transport) error {
 			if !ok || v <= 0 {
 				return fmt.Errorf("%w: %s must be a positive int", ErrInvalidOption, key)
 			}
+		case "eventbus.rate_limit":
+			v, ok := value.(RateLimit)
+			if !ok || v.PerSecond <= 0 || v.Burst <= 0 {
+				return fmt.Errorf("%w: %s requires positive rate and burst", ErrInvalidOption, key)
+			}
+		case "eventbus.ordering_key_concurrency":
+			v, ok := value.(int)
+			if !ok || v <= 0 {
+				return fmt.Errorf("%w: %s must be a positive int", ErrInvalidOption, key)
+			}
+		case "eventbus.max_payload_bytes":
+			v, ok := value.(int)
+			if !ok || v <= 0 {
+				return fmt.Errorf("%w: %s must be a positive int", ErrInvalidOption, key)
+			}
 		default:
 			if strings.HasPrefix(key, "eventbus.") {
 				return fmt.Errorf("%w: unknown core option %q", ErrInvalidOption, key)

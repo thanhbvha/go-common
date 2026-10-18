@@ -31,7 +31,7 @@ Legend:
 | DLQ list/requeue/purge/count | Test only | Yes, cursor + atomic requeue (P3.6) | Yes, cursor + publish-before-delete requeue (P4.5) | Yes, logical append-only cursor (P5.7) |
 | Queue stats | Test only | Yes | Yes | Yes |
 | Pause/resume | No | No | No | No |
-| Payload size enforcement | No | No | No | No |
+| Payload size enforcement | Yes, core | Yes, core | Yes, core | Yes, core |
 | Production readiness | No | No | No | No |
 
 `Partial` is not an advertised guarantee. It records implementation work that
@@ -64,6 +64,23 @@ bounded by `Concurrency + Prefetch`: Redis caps both fresh reads and reclaim
 claims to that capacity, NATS caps pull batches, and Kafka already caps poll
 records. Settlement remains per-delivery and broker-confirmed; no driver claims
 an atomic multi-message batch.
+
+P6.3 adds process-local admission policies to each task or subscriber.
+`WithRateLimit` applies a token bucket to handler starts, and
+`WithOrderingKeyConcurrency` limits simultaneous handlers that share the same
+nonempty ordering key. Different keys remain independent and empty keys bypass
+the keyed limit. Policy waits retain the delivery lease, do not consume the
+handler processing timeout, and are canceled during shutdown. These controls do
+not coordinate quotas between processes and do not promote a driver's broker
+ordering guarantee.
+
+P6.4 enforces a 1 MiB default limit on the complete serialized envelope for
+every driver. `Config.MaxPayloadBytes` sets the global limit and
+`WithMaxPayloadBytes` overrides it per topology. Producers check the final wire
+bytes after trace propagation but before dedupe reservation or broker publish.
+Consumers check raw wire length before JSON decoding; oversized records are
+settled to DLQ with reason `payload_too_large`. The core limit is independent of
+and may need to be lower than a broker's own record-size limit.
 
 The compact `transport.Capabilities` descriptor still exposes delay precision
 and ordering for fast publish-path checks:

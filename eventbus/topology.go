@@ -49,6 +49,29 @@ func WithMaxAttempts(max int) TopologyOption {
 	return WithOption("eventbus.max_attempts", max)
 }
 
+// RateLimit configures a local token bucket for one task or subscriber.
+type RateLimit struct {
+	PerSecond float64
+	Burst     int
+}
+
+// WithRateLimit bounds handler starts per second in this process. It does not
+// coordinate a distributed quota across EventBus instances.
+func WithRateLimit(perSecond float64, burst int) TopologyOption {
+	return WithOption("eventbus.rate_limit", RateLimit{PerSecond: perSecond, Burst: burst})
+}
+
+// WithOrderingKeyConcurrency bounds simultaneous handlers sharing one nonempty
+// ordering key. Keys are isolated per local task or subscriber session.
+func WithOrderingKeyConcurrency(limit int) TopologyOption {
+	return WithOption("eventbus.ordering_key_concurrency", limit)
+}
+
+// WithMaxPayloadBytes overrides the serialized envelope limit for one topology.
+func WithMaxPayloadBytes(max int) TopologyOption {
+	return WithOption("eventbus.max_payload_bytes", max)
+}
+
 // WithMaxDeliveries overrides the global MaxAttempts for this specific topology.
 //
 // Deprecated: use WithMaxAttempts.

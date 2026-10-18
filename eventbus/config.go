@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// DefaultMaxPayloadBytes bounds the complete serialized EventBus envelope.
+const DefaultMaxPayloadBytes = 1024 * 1024
+
 // Config configures the Event Bus.
 type Config struct {
 	// Namespace is used to segregate topologies for different apps sharing a broker.
@@ -43,6 +46,11 @@ type Config struct {
 	// Default: 5.
 	MaxAttempts int
 
+	// MaxPayloadBytes is the maximum serialized envelope size accepted for
+	// publication or processing. A topology can lower or raise this limit.
+	// Default: 1 MiB.
+	MaxPayloadBytes int
+
 	// MaxDeliveries is the legacy name for MaxAttempts. When greater than zero,
 	// it overrides MaxAttempts during validation.
 	//
@@ -66,15 +74,16 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Namespace:      DefaultNamespace,
-		ProcessTimeout: 30 * time.Second,
-		Concurrency:    10,
-		Prefetch:       20,
-		MaxAttempts:    5,
-		RetryPolicy:    DefaultExponentialBackoff(),
-		Logger:         noopLogger{},
-		Metrics:        noopMetrics{},
-		Tracer:         noopTracer{},
+		Namespace:       DefaultNamespace,
+		ProcessTimeout:  30 * time.Second,
+		Concurrency:     10,
+		Prefetch:        20,
+		MaxAttempts:     5,
+		MaxPayloadBytes: DefaultMaxPayloadBytes,
+		RetryPolicy:     DefaultExponentialBackoff(),
+		Logger:          noopLogger{},
+		Metrics:         noopMetrics{},
+		Tracer:          noopTracer{},
 	}
 }
 
@@ -117,6 +126,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = 5
+	}
+	if c.MaxPayloadBytes < 0 {
+		return fmt.Errorf("%w: max payload bytes must not be negative", ErrInvalidConfig)
+	}
+	if c.MaxPayloadBytes == 0 {
+		c.MaxPayloadBytes = DefaultMaxPayloadBytes
 	}
 	if c.RetryPolicy == nil {
 		c.RetryPolicy = DefaultExponentialBackoff()

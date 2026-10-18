@@ -22,6 +22,7 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 		{name: "negative concurrency", mutate: func(c *Config) { c.Concurrency = -1 }},
 		{name: "negative prefetch", mutate: func(c *Config) { c.Prefetch = -1 }},
 		{name: "negative max attempts", mutate: func(c *Config) { c.MaxAttempts = -1 }},
+		{name: "negative max payload bytes", mutate: func(c *Config) { c.MaxPayloadBytes = -1 }},
 		{name: "negative legacy max deliveries", mutate: func(c *Config) { c.MaxDeliveries = -1 }},
 	}
 
@@ -132,6 +133,14 @@ func TestTopologyOptionsAreStrictlyValidated(t *testing.T) {
 		{name: "negative prefetch", opts: []TopologyOption{WithPrefetch(-1)}},
 		{name: "zero max attempts", opts: []TopologyOption{WithMaxAttempts(0)}},
 		{name: "negative max attempts", opts: []TopologyOption{WithMaxAttempts(-1)}},
+		{name: "zero rate", opts: []TopologyOption{WithRateLimit(0, 1)}},
+		{name: "negative rate", opts: []TopologyOption{WithRateLimit(-1, 1)}},
+		{name: "zero rate burst", opts: []TopologyOption{WithRateLimit(1, 0)}},
+		{name: "wrong rate type", opts: []TopologyOption{WithOption("eventbus.rate_limit", "fast")}},
+		{name: "zero ordering key concurrency", opts: []TopologyOption{WithOrderingKeyConcurrency(0)}},
+		{name: "negative ordering key concurrency", opts: []TopologyOption{WithOrderingKeyConcurrency(-1)}},
+		{name: "zero max payload bytes", opts: []TopologyOption{WithMaxPayloadBytes(0)}},
+		{name: "negative max payload bytes", opts: []TopologyOption{WithMaxPayloadBytes(-1)}},
 		{name: "nil option", opts: []TopologyOption{nil}},
 		{name: "empty option key", opts: []TopologyOption{WithOption("", 1)}},
 		{name: "unknown core option", opts: []TopologyOption{WithOption("eventbus.unknown", 1)}},

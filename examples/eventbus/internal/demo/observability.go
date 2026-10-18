@@ -3,6 +3,7 @@ package demo
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -16,7 +17,11 @@ type Logger struct {
 }
 
 func NewLogger(component string) *Logger {
-	return &Logger{base: log.New(os.Stdout, component+" ", log.LstdFlags|log.Lmicroseconds)}
+	return NewLoggerTo(component, os.Stdout)
+}
+
+func NewLoggerTo(component string, output io.Writer) *Logger {
+	return &Logger{base: log.New(output, component+" ", log.LstdFlags|log.Lmicroseconds)}
 }
 
 func (l *Logger) write(level, message string, args ...any) {

@@ -30,6 +30,7 @@ type engine struct {
 	eventTopologies map[string]Topology
 	subTopologies   map[string]map[string]Topology
 	controls        map[consumerKey]*consumerControl
+	policies        map[consumerKey]*processingPolicy
 
 	state        int32
 	ctx          context.Context // intake context: polling, reconnect, provisioning
@@ -56,6 +57,7 @@ func newEngine(cfg Config, t transport.Transport, codec *Codec) *engine {
 		eventTopologies: make(map[string]Topology),
 		subTopologies:   make(map[string]map[string]Topology),
 		controls:        make(map[consumerKey]*consumerControl),
+		policies:        make(map[consumerKey]*processingPolicy),
 		state:           stateNew,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -281,7 +283,9 @@ func (e *engine) Start(ctx context.Context) (err error) {
 
 	// Start consumers for Work-Queue
 	for jobType, handler := range e.handlers {
-		e.controls[consumerKey{kind: TaskTopology, name: jobType}] = newConsumerControl()
+		key := consumerKey{kind: TaskTopology, name: jobType}
+		e.controls[key] = newConsumerControl()
+		e.policies[key] = newProcessingPolicy(e.taskTopologies[jobType])
 		e.wg.Add(1)
 		go e.consumeLoop(TaskTopology, jobType, "", handler)
 	}
@@ -289,7 +293,9 @@ func (e *engine) Start(ctx context.Context) (err error) {
 	// Start consumers for Pub-Sub
 	for eventName, handlers := range e.subscribers {
 		for handlerName, handler := range handlers {
-			e.controls[consumerKey{kind: EventTopology, name: eventName, group: handlerName}] = newConsumerControl()
+			key := consumerKey{kind: EventTopology, name: eventName, group: handlerName}
+			e.controls[key] = newConsumerControl()
+			e.policies[key] = newProcessingPolicy(e.subTopologies[eventName][handlerName])
 			e.wg.Add(1)
 			go e.consumeLoop(EventTopology, eventName, handlerName, handler)
 		}
@@ -456,6 +462,21 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		return
 	}
 	msg := delivery.Message()
+	metricsJobType := metricsName(jobType, handlerName)
+	e.cfg.Metrics.IncDequeue(metricsJobType)
+	maxPayloadBytes := e.maxPayloadBytesFor(consumerKey{kind: kind, name: jobType, group: handlerName})
+	if len(msg.Payload) > maxPayloadBytes {
+		err := payloadTooLargeError(len(msg.Payload), maxPayloadBytes)
+		e.cfg.Logger.ErrorAsync("eventbus: oversized envelope, sending to DLQ", "id", msg.ID, "size", len(msg.Payload), "max", maxPayloadBytes)
+		e.settleDelivery(delivery, transport.Decision{
+			Kind:     transport.DecisionDeadLetter,
+			Reason:   "payload_too_large",
+			Cause:    err,
+			Attempts: delivery.DeliveryAttempt(),
+			FailedAt: time.Now(),
+		}, metricsJobType, msg.ID)
+		return
+	}
 	leaseInterval := time.Duration(0)
 	if lease, ok := delivery.(transport.LeaseDelivery); ok {
 		leaseInterval = lease.HeartbeatInterval()
@@ -467,9 +488,6 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 			return
 		}
 	}
-
-	metricsJobType := metricsName(jobType, handlerName)
-	e.cfg.Metrics.IncDequeue(metricsJobType)
 
 	// Decode envelope
 	env, err := e.codec.Decode(msg.Payload)
@@ -498,6 +516,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	traceCtx, endSpan := e.cfg.Tracer.Start(e.workerCtx, "eventbus.process", cloneHeaders(env.Headers))
 	defer endSpan()
 	delivery = &observedDelivery{Delivery: delivery, message: msg, ctx: traceCtx}
+	policy := e.policyFor(consumerKey{kind: kind, name: jobType, group: handlerName})
 
 	// Poison message guard (Bug C14)
 	currentAttempt := job.Attempt()
@@ -524,20 +543,26 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		return
 	}
 
-	// Execution context with timeout
-	procCtx, procCancel := context.WithTimeout(traceCtx, e.cfg.ProcessTimeout)
-
-	// Setup Heartbeat (Bug C9)
+	// Rate/key waits keep the lease alive but do not consume handler timeout.
+	executionCtx, executionCancel := context.WithCancel(traceCtx)
 	heartbeatDone := make(chan struct{})
 	var heartbeatFailed atomic.Bool
 	go func() {
 		defer close(heartbeatDone)
-		e.heartbeatLoop(procCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); procCancel() })
+		e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); executionCancel() })
 	}()
 	defer func() {
-		procCancel()
+		executionCancel()
 		<-heartbeatDone
 	}()
+	releaseKey, err := policy.wait(executionCtx, env.OrderingKey)
+	if err != nil {
+		return
+	}
+	defer releaseKey()
+
+	// Execution context with timeout begins only when the handler can start.
+	procCtx, procCancel := context.WithTimeout(executionCtx, e.cfg.ProcessTimeout)
 
 	// Execute handler
 	start := time.Now()
@@ -557,6 +582,8 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		err = context.DeadlineExceeded
 	}
 	procCancel()
+	releaseKey()
+	executionCancel()
 	<-heartbeatDone
 
 	e.cfg.Metrics.ObserveDuration(metricsJobType, duration)
@@ -865,6 +892,13 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	if err != nil {
 		return err
 	}
+	maxPayloadBytes := e.cfg.MaxPayloadBytes
+	if val, ok := topo.Options["eventbus.max_payload_bytes"].(int); ok && val > 0 {
+		maxPayloadBytes = val
+	}
+	if len(data) > maxPayloadBytes {
+		return payloadTooLargeError(len(data), maxPayloadBytes)
+	}
 
 	msg := transport.Message{
 		ID:          env.ID,
@@ -936,4 +970,24 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	}
 
 	return nil
+}
+
+func payloadTooLargeError(size, limit int) error {
+	return fmt.Errorf("%w: serialized envelope is %d bytes, maximum is %d", ErrPayloadTooLarge, size, limit)
+}
+
+func (e *engine) maxPayloadBytesFor(key consumerKey) int {
+	limit := e.cfg.MaxPayloadBytes
+	e.mu.RLock()
+	var topo Topology
+	if key.kind == TaskTopology {
+		topo = e.taskTopologies[key.name]
+	} else if subscribers := e.subTopologies[key.name]; subscribers != nil {
+		topo = subscribers[key.group]
+	}
+	e.mu.RUnlock()
+	if val, ok := topo.Options["eventbus.max_payload_bytes"].(int); ok && val > 0 {
+		return val
+	}
+	return limit
 }

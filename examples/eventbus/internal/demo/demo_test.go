@@ -86,3 +86,75 @@ func TestSafeNATSURLsRejectsCredentials(t *testing.T) {
 		t.Fatalf("safeNATSURLs = %#v, %v", got, err)
 	}
 }
+
+func TestOTelAdaptersConstructWithStableMetricNames(t *testing.T) {
+	if err := ValidateOTelMetricNames(); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := NewOTelMetrics()
+	if err != nil {
+		t.Fatalf("NewOTelMetrics: %v", err)
+	}
+	metrics.IncEnqueue(TaskName, "success")
+	tracer := NewOTelTracer()
+	ctx, end := tracer.Start(context.Background(), "eventbus.publish", nil)
+	tracer.RecordEvent(ctx, "publish", map[string]string{"outcome": "success"})
+	end()
+}
+
+func TestMemoryOperationalControlsEndToEnd(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Driver = "memory"
+	cfg.Namespace = "example_controls_test"
+	logger := NewLogger("test")
+	rt, err := OpenRuntime(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus, err := NewBus(cfg, rt, logger, NewMetrics(), NewTracer(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := CloseAll(bus, rt); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	if err := bus.DeclareTask(TaskName, eventbus.WithConcurrency(1), eventbus.WithPrefetch(1)); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan int, 2)
+	if err := bus.HandleTask(TaskName, eventbus.Handle(func(_ context.Context, _ eventbus.Job, value int) error {
+		received <- value
+		return nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := Start(context.Background(), bus); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.Pause(context.Background(), TaskName); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.EnqueueBatch(context.Background(), TaskName, []eventbus.BatchJob{{Payload: 1}, {Payload: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.DrainTopology(context.Background(), TaskName); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case value := <-received:
+		t.Fatalf("received %d while paused", value)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := bus.Resume(context.Background(), TaskName); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-received:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for resumed delivery")
+		}
+	}
+}

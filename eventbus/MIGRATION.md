@@ -132,6 +132,19 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   order but is intentionally non-atomic: `BatchError.Index` identifies the first
   failed item, earlier items may already be durable, and later items are not
   attempted. Retry the failed suffix with idempotency or dedupe keys.
+- `WithRateLimit(rate, burst)` and `WithOrderingKeyConcurrency(limit)` add
+  process-local handler admission controls per task or subscriber. They require
+  positive values. The rate is starts per second, the burst is the initial and
+  maximum token capacity, and an empty ordering key bypasses keyed concurrency.
+  Deployments needing a global quota must coordinate it outside EventBus; these
+  options intentionally do not claim cross-instance ordering or rate limiting.
+- Serialized envelopes are now limited to 1 MiB by default. Set
+  `Config.MaxPayloadBytes` or the positive per-topology
+  `WithMaxPayloadBytes` override when migrating known larger records, while
+  keeping the value within the selected broker's limits. The measured bytes
+  include EventBus metadata and injected trace headers, not only the user JSON.
+  Oversized publishes return `ErrPayloadTooLarge` before dedupe reservation;
+  oversized deliveries are sent to DLQ as `payload_too_large` before decode.
 
 - Kafka EventBus main and delay consumers now own synchronous source commits;
   `ConsumerCommitInterval=0` is accepted and no longer controls their

@@ -50,4 +50,8 @@ var (
 
 	// ErrInvalidOption is returned when a job, topology, or driver option is invalid.
 	ErrInvalidOption = errors.New("eventbus: invalid option")
+
+	// ErrPayloadTooLarge is returned before publishing or decoding an envelope
+	// that exceeds the configured serialized size limit.
+	ErrPayloadTooLarge = errors.New("eventbus: payload too large")
 )

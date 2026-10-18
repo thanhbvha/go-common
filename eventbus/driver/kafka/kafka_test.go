@@ -142,11 +142,12 @@ func TestKafkaTransport_Delay(t *testing.T) {
 	// The durable tier scheduler reads RunAt from the envelope, so publish a
 	// complete envelope rather than an arbitrary payload.
 
-	payload := `{"id":"123","type":"testjob_kafka_delay","payload":"\"hello\"","run_at":` + fmt.Sprintf("%d", time.Now().Add(3*time.Second).UnixMilli()) + `}`
+	runAt := time.Now().Add(3 * time.Second)
+	payload := `{"id":"123","type":"testjob_kafka_delay","payload":"\"hello\"","run_at":` + fmt.Sprintf("%d", runAt.UnixMilli()) + `}`
 
 	err = trans.PublishAt(ctx, topo, transport.Message{
 		Payload: []byte(payload),
-	}, time.Now().Add(3*time.Second))
+	}, runAt)
 
 	if err != nil {
 		t.Fatalf("PublishAt: %v", err)
@@ -163,12 +164,10 @@ func TestKafkaTransport_Delay(t *testing.T) {
 		})
 	}()
 
-	start := time.Now()
 	select {
 	case d := <-received:
-		dur := time.Since(start)
-		if dur < 2*time.Second {
-			t.Fatalf("Message received too early! dur=%v", dur)
+		if earlyBy := time.Until(runAt); earlyBy > 100*time.Millisecond {
+			t.Fatalf("Message received %v before its absolute deadline", earlyBy)
 		}
 		// Ack
 		d.Settle(ctx, transport.Decision{Kind: transport.DecisionAck})

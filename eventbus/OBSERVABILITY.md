@@ -93,3 +93,7 @@ and consumer-defined correlation headers without hard-coding a tracing vendor.
 Carriers are copied so producer injection does not mutate caller-owned maps.
 Consumers should use synthetic/non-sensitive correlation IDs and never put
 credentials or personal data in propagation headers.
+
+See [OPERATIONS.md](OPERATIONS.md) for the runnable OpenTelemetry adapter,
+canonical instrument mapping, importable Grafana dashboard, initial alert
+suggestions, and incident triage guidance.

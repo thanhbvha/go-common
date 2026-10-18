@@ -107,7 +107,7 @@ func (r *Runtime) Close() error {
 	return r.close()
 }
 
-func NewBus(cfg Config, rt *Runtime, logger *Logger, metrics *Metrics, tracer *Tracer) (eventbus.Bus, error) {
+func NewBus(cfg Config, rt *Runtime, logger *Logger, metrics eventbus.Metrics, tracer eventbus.Tracer) (eventbus.Bus, error) {
 	busCfg := eventbus.DefaultConfig()
 	busCfg.Namespace = cfg.Namespace
 	busCfg.Concurrency = 4

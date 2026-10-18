@@ -129,6 +129,22 @@ records remain until broker retention removes them. Kafka requeue requires
 complete per-partition prefixes and administrator operations must be serialized
 across processes. See `eventbus/driver/kafka/ADMIN.md` for the full model.
 
+## OpenTelemetry and operations dashboard
+
+With an OTLP gRPC collector listening locally, run the complete metrics/tracing
+adapter example:
+
+```powershell
+go run ./examples/eventbus/observability --driver memory --otel-endpoint 127.0.0.1:4317
+```
+
+It demonstrates the canonical OTel instruments and W3C trace propagation while
+using batch enqueue, pause, topology drain, resume, a local rate limit,
+ordering-key concurrency policy, and payload-size limit. Import
+`eventbus/dashboards/grafana-eventbus.json` after confirming your collector's
+Prometheus name translation. The panel meanings, suggested alerts, stats polling
+rules, and trace triage procedure are documented in `eventbus/OPERATIONS.md`.
+
 ## Capability notes
 
 | Behavior | Memory | Redis | NATS | Kafka |
@@ -143,7 +159,8 @@ All transports are at-least-once. Handlers must be idempotent. Redis can settle
 retry/DLQ atomically in one cluster slot; NATS and Kafka use confirmed
 publish-before-source-settlement and may duplicate after an ambiguous response.
 Kafka retry can reorder relative to later source records even when the ordering
-key keeps records on one partition. No driver currently advertises pause/resume.
+key keeps records on one partition. Portable pause/resume controls stop only
+local process intake; they are not broker-wide driver capabilities.
 
 The shared helper applies driver-specific topology options only to that driver:
 Redis stream bounds and blocking, NATS ACK/fetch bounds, and Kafka partitions,
@@ -163,3 +180,11 @@ go vet ./eventbus/...
 For broker-backed manual runs, use a unique namespace. Do not use `FLUSHDB`,
 delete shared streams/topics, or purge a DLQ without reviewing the selected
 namespace and supplying the explicit confirmation flag.
+
+## Standardized benchmarks
+
+`./examples/eventbus/benchmark` runs the Phase 6 payload, concurrency, immediate,
+delayed, and retry matrix against any configured driver and emits machine-readable
+JSON. `run-matrix.ps1` executes all 36 combinations. See
+`eventbus/BENCHMARKS.md` before using `--preload` for 100,000/1,000,000-message
+backlogs; durable test data is not automatically deleted.
