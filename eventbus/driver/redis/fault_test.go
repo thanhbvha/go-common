@@ -39,12 +39,12 @@ func (h *postSuccessErrorHook) ProcessPipelineHook(next goredis.ProcessPipelineH
 	return next
 }
 
-// DS-10/20: a publish response can be ambiguous, but an executed XADD remains
-// durable. The caller receives an error and may retry, so duplication is
-// allowed; silent loss is not.
+// DS-10/20: a publish response can be ambiguous, but an executed atomic
+// capacity-check-and-XADD script remains durable. The caller receives an error
+// and may retry, so duplication is allowed; silent loss is not.
 func TestPublishResponseLossLeavesAcceptedSource(t *testing.T) {
 	backend, rc := delayedBackend(t)
-	rc.AddHook(&postSuccessErrorHook{commands: map[string]bool{"xadd": true}})
+	rc.AddHook(&postSuccessErrorHook{commands: map[string]bool{"eval": true, "evalsha": true}})
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "fault", JobType: "publish-response"}
 	err := backend.Publish(ctx, topo, transport.Message{Payload: []byte("accepted")})

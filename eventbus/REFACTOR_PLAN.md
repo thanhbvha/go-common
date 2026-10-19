@@ -517,7 +517,7 @@ shadow production traffic make the remaining behavior harder to change. Finding
 IDs below refer to that review. Complete the tasks in order unless a task notes
 otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
 
-- [ ] **P6.7.1 Close no-loss and routing invariant gaps**
+- [x] **P6.7.1 Close no-loss and routing invariant gaps**
   - Fix the dedupe reserve/publish/release ambiguity (EB-01). A failed publish
     plus failed reservation cleanup must never turn a later retry into a
     successful duplicate response when no durable message exists. Cleanup must
@@ -534,9 +534,93 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   - Acceptance: every successful publication is observable by every intended
     group, and distinct `(namespace, kind, name, subscriber)` tuples cannot map
     to the same physical resource.
-  - Notes:
+  - Notes: Added `transport.PublicationDeduper` with owned reserved/published
+    states and stable `ErrDedupeAmbiguous`. Core cleanup/confirmation is bounded
+    to five seconds outside caller cancellation; only broker-confirmed
+    publication is a successful duplicate, while cleanup/confirmation faults
+    remain visible. Memory, Redis Lua, and NATS KV/CAS implementations preserve
+    ownership across expiry races; combined publish/cleanup fault regressions
+    prove a retry cannot become false success. Redis immediate publication no
+    longer uses `MAXLEN`; the legacy `redis.maxlen`/`WithMaxLen` request is
+    explicitly rejected, and a hermetic 100,001-record regression proves both
+    fast and offline event groups can observe the complete accepted backlog.
+    Memory, NATS, and Kafka now use a versioned length-framed Base32 `eb2`
+    encoding for topology tuples and subscriber groups. Explicit
+    `WithLegacyResourceNames` preserves old resource/group names for supervised
+    migration only; no automatic alias is attempted. Separator, task/event,
+    namespace/name, Unicode, and subscriber collision cases have deterministic
+    coverage; embedded JetStream cross-delivery isolation passed. Updated
+    migration, capability, Redis layout, and benchmark guidance. Verified
+    `go test ./... -count=1`, `go vet ./...`, default EventBus tests/vet,
+    integration-tag compilation and full tagged EventBus execution, the full
+    embedded-NATS integration suite, and race tests for core/Memory/Redis on
+    2026-10-19. The new live Kafka isolation test compiled but skipped because
+    `localhost:9092` refused the connection; live Redis standalone/Cluster
+    suites remained environment-gated because their address variables were not
+    set. These unavailable broker runs are recorded rather than claimed.
 
-- [ ] **P6.7.2 Harden Memory and define its parity boundary**
+- [x] **P6.7.1R Implement bounded, group-safe Redis retention**
+  - Treat the removal of publish-time `MAXLEN` as the completed no-loss fix,
+    not as a complete storage lifecycle. Implement the design in
+    [`driver/redis/RETENTION.md`](driver/redis/RETENTION.md) before claiming
+    bounded Redis resource use or production readiness.
+  - Add durable subscription provisioning before consumer startup. Persist the
+    intended task/event groups and a manifest epoch in the topology hash slot;
+    missing, unmanaged, or concurrently changing relevant groups must block
+    trimming rather than weaken delivery guarantees.
+  - Compute a conservative global acknowledged watermark from every active
+    group's last-delivered position and oldest pending entry. Reclaim only IDs
+    strictly below that watermark using bounded `XTRIM MINID` passes; never
+    reintroduce count- or age-only lossy trimming.
+  - Use one joined transport-owned coordinator, fair bounded batches, and a
+    distributed lease only as a duplicate-work optimization. Manifest epoch
+    fencing, not lease ownership, protects correctness across instances.
+  - Add atomic ready/delayed/DLQ admission limits and a stable typed capacity
+    error. When a slow/offline group blocks retention, reject new acceptance
+    visibly before the configured bound instead of deleting owed work or
+    growing without limit. Keep Redis `noeviction` deployment guidance.
+  - Add explicit safe and forced subscriber-retirement administration. Normal
+    process shutdown never retires a durable group; forced retirement reports
+    the pending/unread work it abandons.
+  - Expose stream/capacity usage, watermark, trim progress/errors, blocking
+    group/reason, manifest conflicts, and capacity rejection metrics plus
+    readiness degradation. Do not log payloads or credentials.
+  - Acceptance: live standalone and Cluster tests prove no unread/pending entry
+    is trimmed, acknowledged entries are eventually reclaimed, group-addition
+    races fail closed, capacity is enforced under an offline subscriber, and
+    restart/failover/multi-instance compaction remains loss-free. The 100k/1m
+    P6.7.6 runs must show a bounded memory plateau after acknowledgement.
+  - Notes: Added engine-level durable subscription provisioning before consumer
+    startup and Redis same-slot group manifests with monotonic epochs, active /
+    retiring state, missing/unmanaged-group fail-closed checks, and explicit
+    safe or forced retirement that reports pending and unread work. Added one
+    joined transport-owned retention coordinator, stable fair topology order,
+    an optimization lease, conservative last-delivered/oldest-pending
+    watermarks, and an atomic epoch plus current-group reconciliation fence.
+    Exact bounded `XTRIM MINID` passes scan at most batch+1 eligible IDs and
+    remove at most the configured batch, avoiding approximate trimming that can
+    retain small acknowledged backlogs forever. Immediate publish, delayed
+    admission/dispatch, retry, DLQ settlement, and DLQ requeue now enforce
+    same-slot atomic count limits and return typed `ErrCapacityExceeded` without
+    removing a durable source. Capacity rejection wakes retention; payload-free
+    `RetentionReport` exposes usage/limits, watermark, progress, errors,
+    blocking reason, group drift, epoch/lease counters, rejection counts, and
+    degraded readiness. Updated `RETENTION.md`, `KEY_LAYOUT.md`, migration and
+    capability guidance, including Redis `noeviction`. Deterministic tests cover
+    provisioning order, unread/pending protection, exact batch bounds, eventual
+    small-backlog reclamation, provisioned and out-of-band group-addition races,
+    concurrent capacity, delayed/retry/DLQ source preservation, retirement,
+    status continuity, and coordinator shutdown. Live Redis 7 standalone and
+    three-master Cluster retention suites passed against the Docker fixture,
+    proving offline-group backpressure, multi-instance compaction, manifest
+    survival across transport restart, and cross-slot-safe epoch fencing.
+    Verified `go test ./... -count=1`, `go vet ./...`, integration-tag
+    compilation, and race tests for core/Redis on 2026-10-19. Broker-process
+    crash/failover and the required 100k/1m memory-plateau evidence remain
+    explicitly assigned to P6.7.6 production-scale/fault execution; they are not
+    claimed by this implementation completion.
+
+- [x] **P6.7.2 Harden Memory and define its parity boundary**
   - Treat Memory as a bounded, process-local reference transport. It must match
     all transport-independent EventBus semantics that it advertises, but must
     not claim broker durability, restart recovery, cross-process coordination,
@@ -576,7 +660,45 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     goroutine count remain bounded, every advertised in-process capability has
     contract evidence, unsupported distributed guarantees are machine-readable,
     and restart loss is explicit in documentation and examples.
-  - Notes:
+  - Notes: Replaced Memory's fixed silently-dropping channels with bounded
+    per-topology/subscriber state queues. Ready capacity includes queued and
+    in-flight obligations (default 1,000 per group); delayed and DLQ stores have
+    independent 1,000-entry defaults. Positive `memory.max_ready_entries`,
+    `memory.max_delayed_entries`, and `memory.max_dlq_entries` options override
+    them. Publication validates every target first and atomically fans out or
+    returns typed `ErrCapacityExceeded`, so `nil` means every intended group has
+    an observable copy. Memory now implements `SubscriptionProvisioner`; engine
+    startup provisions event groups before consumption/publication, and direct
+    consumers use the same idempotent path. Replaced one goroutine/timer per
+    delayed item with one transport-owned bounded heap/timer scheduler, with
+    synchronous admission errors, source-preserving dispatch backpressure, and
+    joined close. Payload-free scheduler status exposes pending work, last
+    run/success/error, and retry count. Consumption tracks queued/in-flight state and redelivers
+    unsettled work after session cancellation; graceful drain uses the existing
+    handler barrier before deciding redelivery. Retry and DLQ requeue preserve
+    the source event subscriber rather than fanning out again. DLQ transfer and
+    requeue are capacity-checked before source removal, and stats now report
+    ready, in-flight, delayed, DLQ, lag, and oldest age. Memory implements
+    topology-scoped legacy dedupe plus confirmed publication state; all state
+    remains process-local and expires or disappears with the process. Read-only
+    stats/DLQ list/count remain available after close for final inspection while
+    publication, consumption, provisioning, mutation, and dedupe reject the
+    closed transport. Event publication without any process-local provisioned
+    subscriber and delivery heartbeat return `ErrNotSupported` rather than a
+    successful zero value. Added Memory to the reusable transport contract and
+    deterministic tests for atomic/ concurrent capacity, publish-before-consume,
+    fan-out, scheduler order/capacity/close, redelivery, retry/DLQ subscriber
+    isolation, DLQ failure/requeue, stats, dedupe scope, lifecycle, and goroutine
+    bounds. Focused Memory tests passed 20 consecutive runs and core/Memory race
+    suites passed on 2026-10-19. Benchmark smoke measured EngineDispatch at
+    14,859 ns/op / 6,390 B/op / 69 allocs and MemoryTransportRoundTrip at 3,042
+    ns/op / 1,333 B/op / 20 allocs on Linux/amd64 i7-12700F; the intentionally
+    higher correctness cost is accepted in the performance ADR addendum rather
+    than compared directly with the Windows baseline. Updated capabilities, migration, testing,
+    contract mapping, examples, and benchmarks to state that Memory is for tests,
+    local development, and explicitly accepted ephemeral workloads only; it
+    provides no process-restart durability, cross-process coordination,
+    distributed ordering, or durable broker lease.
 
 - [ ] **P6.7.3 Correct and observe durable schedulers**
   - Redesign Kafka delayed scheduling so a far-future partition head cannot
@@ -639,8 +761,9 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     (EB-12). Map each checklist row to exact tests in `CONTRACT_TESTS.md` and
     mark it complete only after every enabled durable driver passes.
   - Add the combined dedupe fault window, topology-name collision, envelope
-    route mismatch, scheduler health, Redis retention, and Kafka delayed
-    head-of-line regressions discovered by the pre-Phase 7 review.
+    route mismatch, scheduler health, the complete P6.7.1R Redis retention and
+    capacity matrix, and Kafka delayed head-of-line regressions discovered by
+    the pre-Phase 7 review.
   - Run 100,000- and 1,000,000-message backlogs on disposable broker
     infrastructure with immediate, delayed, 10% retry, and 50% retry workloads
     (EB-13). Include restarts, reconnects, Kafka rebalances, scheduler ownership
@@ -695,6 +818,9 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   expose actionable failures.
 - [ ] Public task/event stats and DLQ administration work without concrete
   transport access.
+- [ ] Redis provisions intended groups before compaction, reclaims only below a
+  group-safe watermark, applies observable admission backpressure when an
+  offline group blocks retention, and demonstrates bounded memory after ACK.
 - [ ] Every applicable shared transport contract row maps to passing tests for
   Memory, Redis, NATS, and Kafka, capability-gating durable-only behavior.
 - [ ] Disposable 100k/1m backlog runs and a sustained pre-production soak are

@@ -72,6 +72,13 @@ func WithMaxPayloadBytes(max int) TopologyOption {
 	return WithOption("eventbus.max_payload_bytes", max)
 }
 
+// WithLegacyResourceNames explicitly selects the pre-v2 separator-joined
+// broker resource layout for a migration window. Legacy names are collision
+// prone; new deployments must use the v2 default.
+func WithLegacyResourceNames() TopologyOption {
+	return WithOption(transport.ResourceNameVersionOption, transport.ResourceNameVersionLegacy)
+}
+
 // WithMaxDeliveries overrides the global MaxAttempts for this specific topology.
 //
 // Deprecated: use WithMaxAttempts.

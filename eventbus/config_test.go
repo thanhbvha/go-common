@@ -1,27 +1,48 @@
 package eventbus
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/thanhbvha/go-common/eventbus/transport"
+)
 
 func TestTopologyName(t *testing.T) {
-	tests := []struct {
-		ns       string
-		jobType  string
-		kind     TopologyKind
-		expected string
-	}{
-		{"eventbus", "email", TaskTopology, "eventbus.email"},
-		{"", "email", TaskTopology, "email"},
-		{"custom", "payment.process", TaskTopology, "custom.payment.process"},
-		{"eventbus", "email", EventTopology, "eventbus.event.email"},
-		{"", "email", EventTopology, "event.email"},
+	topologies := []Topology{
+		{Namespace: "a.b", JobType: "c", Kind: TaskTopology},
+		{Namespace: "a", JobType: "b.c", Kind: TaskTopology},
+		{Namespace: "acme", JobType: "event.foo", Kind: TaskTopology},
+		{Namespace: "acme", JobType: "foo", Kind: EventTopology},
+		{Namespace: "tenant_一", JobType: "orders/paid.*", Kind: EventTopology},
+	}
+	seen := make(map[string]Topology, len(topologies))
+	for _, topo := range topologies {
+		name := TopologyName(topo)
+		if !strings.HasPrefix(name, "eb2.") {
+			t.Fatalf("TopologyName(%+v) = %q, want v2 marker", topo, name)
+		}
+		if prior, ok := seen[name]; ok {
+			t.Fatalf("distinct topologies collide: %+v and %+v => %q", prior, topo, name)
+		}
+		seen[name] = topo
 	}
 
-	for _, tc := range tests {
-		topo := Topology{Namespace: tc.ns, JobType: tc.jobType, Kind: tc.kind}
-		name := TopologyName(topo)
-		if name != tc.expected {
-			t.Errorf("TopologyName(%q, %q, %s) = %q, expected %q", tc.ns, tc.jobType, tc.kind, name, tc.expected)
+	base := Topology{Namespace: "a.b", JobType: "c", Kind: EventTopology}
+	groups := []string{"", "x.y", "x", "y_一", "event.foo"}
+	consumerNames := make(map[string]string, len(groups))
+	for _, group := range groups {
+		name := base.ConsumerName(group)
+		if prior, ok := consumerNames[name]; ok {
+			t.Fatalf("subscriber groups %q and %q collide as %q", prior, group, name)
 		}
+		consumerNames[name] = group
+	}
+
+	legacy := Topology{Namespace: "eventbus", JobType: "email", Kind: EventTopology, Options: map[string]any{
+		transport.ResourceNameVersionOption: transport.ResourceNameVersionLegacy,
+	}}
+	if got := legacy.Name(); got != "eventbus.event.email" {
+		t.Fatalf("legacy topology name = %q", got)
 	}
 }
 

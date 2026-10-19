@@ -24,6 +24,12 @@ func (*redisTransport) dlqKey(topo transport.Topology) string { return topologyP
 func (*redisTransport) metadataKey(topo transport.Topology) string {
 	return topologyPrefix(topo) + ":metadata"
 }
+func (*redisTransport) groupManifestKey(topo transport.Topology) string {
+	return topologyPrefix(topo) + ":groups"
+}
+func (*redisTransport) retentionLeaseKey(topo transport.Topology) string {
+	return topologyPrefix(topo) + ":retention-lease"
+}
 func (*redisTransport) dedupeKey(topo transport.Topology, key string) string {
 	return topologyPrefix(topo) + ":dedupe:" + base64.RawURLEncoding.EncodeToString([]byte(key))
 }

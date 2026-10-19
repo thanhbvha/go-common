@@ -18,11 +18,11 @@ Legend:
 | Durable acceptance | No | Yes | Yes | Yes |
 | Work-queue delivery | Test only | Yes | Yes | Partial |
 | Event fan-out groups | Test only | Yes | Yes | Partial |
-| Delayed delivery | Test only, process-local | Partial, ZSET sweeper | Partial, KV sweeper | Partial, durable bounded tier sweeps (P5.6) |
+| Delayed delivery | Test only, bounded process-local scheduler | Partial, ZSET sweeper | Partial, KV sweeper | Partial, durable bounded tier sweeps (P5.6) |
 | Reported delay precision | 1 ms | 1 s | 1 s | 5 s |
 | Ordering | No | No | No | Yes, within a source partition |
-| Dedupe | Test only | Partial | Partial | No |
-| Heartbeat/lease extension | No-op | Yes, ownership-checked idle renewal (P3.5) | Yes (`InProgress`) | Not applicable in the same model |
+| Dedupe | Test only | Yes, confirmed publication state | Yes, confirmed publication state | No |
+| Heartbeat/lease extension | No, returns only context cancellation | Yes, ownership-checked idle renewal (P3.5) | Yes (`InProgress`) | Not applicable in the same model |
 | Poison delivery count | Process-local | Yes, XPENDING count preserved on direct reclaim | Yes | Envelope-derived only |
 | Atomic retry settlement | No | Yes, same-slot Lua (P3.3) | No | No |
 | Atomic DLQ settlement | No | Yes, same-slot Lua (P3.3) | No | No |
@@ -41,6 +41,7 @@ can be reused after the relevant phase satisfies contract tests.
 
 Required broker operations are exposed by `transport.Transport`. Optional
 operations are advertised only by implementing `transport.Deduper`,
+`transport.PublicationDeduper`,
 `transport.DLQAdmin`, `transport.CursorDLQAdmin`, `transport.StatsReader`, or
 `transport.Pauser`; unsupported drivers no longer provide success-returning
 methods.
@@ -51,6 +52,44 @@ methods.
 | Redis | yes | yes | yes | no |
 | NATS | yes | yes | yes | no |
 | Kafka | no | yes | yes | no |
+
+Memory, Redis, and NATS implement `PublicationDeduper`. A reservation is not a
+successful duplicate until the driver records broker-confirmed publication.
+Unconfirmed or cleanup-ambiguous state returns `ErrDedupeAmbiguous`; cleanup and
+confirmation are bounded to five seconds. The older dedupe interfaces remain
+source-compatible but cannot prove duplicate success.
+
+Memory is a bounded process-local semantic reference, not a broker. Each task
+group and declared event subscriber has a queue whose ready plus in-flight count
+defaults to 1,000; delayed and DLQ stores also default to 1,000 entries per
+topology. `memory.max_ready_entries`, `memory.max_delayed_entries`, and
+`memory.max_dlq_entries` accept positive integer overrides through
+`eventbus.WithOption`. Capacity failures are atomic and return
+`ErrCapacityExceeded`; event publication never partially fans out. One joined
+heap/timer scheduler owns all delayed work; `SchedulerStatus` exposes pending
+count, last run/success/error, and retry count without payloads. Event groups are provisioned during
+`Start`, retry and DLQ requeue return only to their source subscriber, and
+session cancellation redelivers unsettled messages in process. All state,
+dedupe, delays, and DLQ records disappear on process termination; Memory has no
+cross-process coordination, persistence, broker ordering, or distributed lease.
+An event with no process-local provisioned subscriber returns `ErrNotSupported`
+instead of pretending a successful fan-out. Delivery heartbeat is likewise
+unsupported rather than a successful no-op.
+
+Memory, NATS, and Kafka physical resources use the injective `eb2` tuple naming
+layout by default. `WithLegacyResourceNames` is an explicit migration mode and
+retains the old collision risk; there is no automatic alias between layouts.
+Redis keeps its independent injective, cluster-slot-safe key layout. Redis ready
+streams are never trimmed during immediate or delayed publication, and the old
+`redis.maxlen` option is rejected because it violates durable acceptance.
+Redis instead provisions a durable intended-group manifest before consumer
+startup and runs one joined, epoch-fenced compactor per transport. It trims only
+bounded acknowledged prefixes below every active group's safe watermark.
+Atomic ready/delayed/DLQ limits return `ErrCapacityExceeded`; an offline group
+therefore causes visible backpressure rather than loss or unbounded entry growth.
+Safe/forced retirement and payload-free `RetentionReport` are available through
+the Redis-specific `RetentionAdmin` extension. Production deployment still
+requires `maxmemory-policy noeviction` and appropriate persistence/replication.
 
 Transport-level `Pauser` remains unadvertised. P6.1 instead provides portable
 local intake controls on `Bus`: `Pause` cancels active consumer sessions while
@@ -308,9 +347,13 @@ Before changing a matrix cell from Partial/No to Yes:
 
 ### Memory
 
-- Remains explicitly non-durable.
-- Implements routing and settlement state-machine behavior for fast tests.
-- Does not silently drop on full buffers; returns a typed capacity error.
+- Remains explicitly non-durable and process-local.
+- Passes every applicable shared transport contract scenario for routing,
+  settlement/redelivery, delay, dedupe, DLQ administration, and statistics.
+- Uses bounded atomic fan-out queues and one bounded delayed scheduler; it never
+  returns success after dropping or partially accepting work.
+- Is intended for tests, local development, and explicitly accepted ephemeral
+  workloads, not as a substitute for Redis, NATS, or Kafka.
 
 ### Redis
 

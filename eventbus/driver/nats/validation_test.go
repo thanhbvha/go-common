@@ -62,9 +62,16 @@ func TestEffectiveCapacityUsesCoreBoundsAndRejectsOverflow(t *testing.T) {
 	}
 }
 
-func TestValidateTopologyRejectsInvalidNATSName(t *testing.T) {
-	if err := (&natsTransport{}).ValidateTopology(transport.Topology{JobType: "bad name"}); err == nil {
-		t.Fatal("ValidateTopology unexpectedly accepted a reserved character")
+func TestValidateTopologyEncodesReservedNATSNameAndRejectsUnsafeLegacyName(t *testing.T) {
+	validator := &natsTransport{}
+	if err := validator.ValidateTopology(transport.Topology{Namespace: "a.b", JobType: "bad name/一"}); err != nil {
+		t.Fatalf("v2 encoded topology rejected: %v", err)
+	}
+	legacy := transport.Topology{JobType: "bad name", Options: map[string]any{
+		transport.ResourceNameVersionOption: transport.ResourceNameVersionLegacy,
+	}}
+	if err := validator.ValidateTopology(legacy); err == nil {
+		t.Fatal("unsafe legacy topology unexpectedly accepted")
 	}
 }
 

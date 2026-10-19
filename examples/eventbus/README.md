@@ -16,6 +16,11 @@ Memory needs no external service:
 go run ./examples/eventbus --driver memory
 ```
 
+Memory is bounded and process-local. It is suitable for this all-in-one example,
+tests, and local development, but all queued, delayed, dedupe, and DLQ state is
+lost when the process exits. It does not connect separate producer/worker
+processes and is not a durable substitute for Redis, NATS, or Kafka.
+
 The quickstart declares a task and an event, starts one task handler and two
 independent event subscriber groups, then demonstrates:
 

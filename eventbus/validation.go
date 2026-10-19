@@ -71,6 +71,11 @@ func validateTopology(topology Topology, backend transport.Transport) error {
 			if !ok || v <= 0 {
 				return fmt.Errorf("%w: %s must be a positive int", ErrInvalidOption, key)
 			}
+		case transport.ResourceNameVersionOption:
+			v, ok := value.(string)
+			if !ok || (v != transport.ResourceNameVersionV2 && v != transport.ResourceNameVersionLegacy) {
+				return fmt.Errorf("%w: %s must be %q or %q", ErrInvalidOption, key, transport.ResourceNameVersionV2, transport.ResourceNameVersionLegacy)
+			}
 		default:
 			if strings.HasPrefix(key, "eventbus.") {
 				return fmt.Errorf("%w: unknown core option %q", ErrInvalidOption, key)

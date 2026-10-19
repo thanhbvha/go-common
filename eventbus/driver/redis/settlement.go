@@ -29,6 +29,13 @@ if mode == "retry" then expected = "zset" end
 if target_type ~= "none" and target_type ~= expected then
     return redis.error_reply("invalid settlement destination type")
 end
+local capacity = tonumber(ARGV[11])
+if mode == "retry" then
+    local current = redis.call("ZCARD", target)
+    if not redis.call("ZSCORE", target, ARGV[4]) and current >= capacity then return -2 end
+else
+    if redis.call("XLEN", target) >= capacity then return -2 end
+end
 if mode == "retry" then
     local score = tonumber(ARGV[5])
     if not score then return redis.error_reply("invalid retry timestamp") end
@@ -55,9 +62,13 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 		msg = *decision.Source
 	}
 	target := d.transport.dlqKey(d.topo)
+	capacity := maxDLQEntries(d.topo)
+	resource := "dlq"
 	if decision.Kind == transport.DecisionRetry {
 		msg = decision.Next
 		target = d.transport.delayedKey(d.topo)
+		capacity = maxDelayedEntries(d.topo)
+		resource = "delayed"
 		if decision.RetryAt.IsZero() {
 			return fmt.Errorf("redis: retry deadline required")
 		}
@@ -72,7 +83,7 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 	result, err := transferScript.Run(ctx, d.transport.rc, []string{d.stream, target},
 		d.group, d.xmsgID, decision.Kind.String(), msg.Payload,
 		decision.RetryAt.UnixMilli(), decision.Reason, decisionError(decision),
-		decision.Attempts, failedAt.UnixMilli(), d.consumer).Int64()
+		decision.Attempts, failedAt.UnixMilli(), d.consumer, capacity).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: atomic %s settlement: %w", decision.Kind, err)
 	}
@@ -81,6 +92,15 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 	}
 	if result == -1 {
 		return transport.ErrLeaseLost
+	}
+	if result == -2 {
+		var current int64
+		if decision.Kind == transport.DecisionRetry {
+			current, _ = d.transport.rc.ZCard(ctx, target).Result()
+		} else {
+			current, _ = d.transport.rc.XLen(ctx, target).Result()
+		}
+		return d.transport.capacityError(d.topo, resource, current, capacity)
 	}
 	return nil
 }

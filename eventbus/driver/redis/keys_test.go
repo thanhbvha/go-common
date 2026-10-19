@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,34 @@ func TestScopedDedupeIsolationExpiryAndRelease(t *testing.T) {
 		if ok, err := backend.ReserveTopology(ctx, topo, "same", time.Minute); err != nil || !ok {
 			t.Fatal("reservation did not expire")
 		}
+	}
+}
+
+func TestPublicationDedupeRequiresConfirmedState(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rc := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	defer rc.Close()
+	backend := New(rc).(*redisTransport)
+	ctx := context.Background()
+	topo := transport.Topology{Namespace: "dedupe", JobType: "job"}
+
+	state, err := backend.BeginPublication(ctx, topo, "same", "owner-1", time.Minute)
+	if err != nil || state != transport.DedupeReservationAcquired {
+		t.Fatalf("begin = %d, %v", state, err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-2", time.Minute)
+	if err != nil || state != transport.DedupeReservationPending {
+		t.Fatalf("unconfirmed state = %d, %v", state, err)
+	}
+	if err := backend.AbortPublication(ctx, topo, "same", "owner-2"); !errors.Is(err, transport.ErrDedupeAmbiguous) {
+		t.Fatalf("wrong-owner abort = %v", err)
+	}
+	if err := backend.ConfirmPublication(ctx, topo, "same", "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-3", time.Minute)
+	if err != nil || state != transport.DedupeReservationPublished {
+		t.Fatalf("confirmed state = %d, %v", state, err)
 	}
 }
 

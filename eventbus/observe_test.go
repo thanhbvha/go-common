@@ -88,6 +88,19 @@ func (b *observationTransport) Reserve(_ context.Context, _ string, ttl time.Dur
 	return b.reserved, nil
 }
 func (*observationTransport) Release(context.Context, string) error { return nil }
+func (b *observationTransport) BeginPublication(_ context.Context, _ transport.Topology, _, _ string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	b.reserveTTL = ttl
+	if b.reserved {
+		return transport.DedupeReservationAcquired, nil
+	}
+	return transport.DedupeReservationPublished, nil
+}
+func (*observationTransport) ConfirmPublication(context.Context, transport.Topology, string, string) error {
+	return nil
+}
+func (*observationTransport) AbortPublication(context.Context, transport.Topology, string, string) error {
+	return nil
+}
 func (b *observationTransport) Stats(context.Context, transport.Topology) (transport.TopologyStats, error) {
 	return b.stats, b.failure
 }

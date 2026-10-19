@@ -325,13 +325,16 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 
 func (t *kafkaTransport) statsGroups(ctx context.Context, topology transport.Topology) ([]string, error) {
 	if topology.Kind == transport.TaskTopology {
-		return []string{topology.Name() + "-group"}, nil
+		return []string{kafkaConsumerGroup(topology, "")}, nil
 	}
 	listed, err := t.adm.ListGroups(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: list event consumer groups: %w", err)
 	}
-	prefix := topology.Name() + "-"
+	prefix := topology.Name() + ".c."
+	if version, _ := topology.Options[transport.ResourceNameVersionOption].(string); version == transport.ResourceNameVersionLegacy {
+		prefix = topology.Name() + "-"
+	}
 	excluded := map[string]struct{}{t.dlqAdminGroup(topology): {}}
 	for _, tier := range delayTiers {
 		excluded[fmt.Sprintf("%s-delay-%s-group", topology.Name(), tier)] = struct{}{}

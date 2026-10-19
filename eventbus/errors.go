@@ -25,6 +25,11 @@ var (
 	// ErrDedupeUnavailable is returned when deduplication is requested but no Deduper is configured.
 	ErrDedupeUnavailable = fmt.Errorf("eventbus: deduplication not available: %w", ErrNotSupported)
 
+	// ErrDedupeAmbiguous means EventBus cannot prove that a reservation maps to
+	// a durably accepted message. The caller must treat the publish as failed or
+	// ambiguous, never as a successful duplicate.
+	ErrDedupeAmbiguous = transport.ErrDedupeAmbiguous
+
 	// ErrBusClosed is returned when an operation is performed on a stopped bus.
 	ErrBusClosed = errors.New("eventbus: bus is closed")
 

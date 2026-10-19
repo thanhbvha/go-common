@@ -35,8 +35,21 @@ func TestValidateTopologyRejectsInvalidKafkaOptions(t *testing.T) {
 	}
 }
 
-func TestValidateTopologyRejectsInvalidKafkaTopicName(t *testing.T) {
-	if err := (&kafkaTransport{}).ValidateTopology(transport.Topology{JobType: "bad topic"}); err == nil {
-		t.Fatal("ValidateTopology unexpectedly accepted an invalid topic name")
+func TestValidateTopologyEncodesInvalidKafkaCharactersAndRejectsOversizeName(t *testing.T) {
+	validator := &kafkaTransport{}
+	if err := validator.ValidateTopology(transport.Topology{JobType: "bad topic/一"}); err != nil {
+		t.Fatalf("v2 encoded topology rejected: %v", err)
+	}
+	if err := validator.ValidateTopology(transport.Topology{JobType: string(make([]byte, 249))}); err == nil {
+		t.Fatal("oversize encoded topic unexpectedly accepted")
+	}
+}
+
+func TestKafkaLegacyConsumerGroupMatchesPreV2Layout(t *testing.T) {
+	topo := transport.Topology{Namespace: "eventbus", JobType: "email", Kind: transport.EventTopology, Options: map[string]any{
+		transport.ResourceNameVersionOption: transport.ResourceNameVersionLegacy,
+	}}
+	if got := kafkaConsumerGroup(topo, "receipt"); got != "eventbus.event.email-receipt" {
+		t.Fatalf("legacy consumer group = %q", got)
 	}
 }

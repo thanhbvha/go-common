@@ -26,7 +26,7 @@ func delayedBackend(t *testing.T) (*redisTransport, *goredis.Client) {
 func TestDelayedDispatchBoundedAndPreservesEnvelopes(t *testing.T) {
 	backend, rc := delayedBackend(t)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "test", JobType: "delayed", Options: map[string]any{"redis.delay_batch_size": 2, "redis.maxlen": int64(1)}}
+	topo := transport.Topology{Namespace: "test", JobType: "delayed", Options: map[string]any{"redis.delay_batch_size": 2}}
 	now := time.Unix(1700000000, 0)
 	want := map[string]bool{"existing": true}
 	if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.streamKey(topo), Values: map[string]any{"payload": "existing"}}).Err(); err != nil {

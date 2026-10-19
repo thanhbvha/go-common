@@ -76,11 +76,7 @@ func (t *natsTransport) reconcileStream(ctx context.Context, desired gonats.Stre
 }
 
 func (t *natsTransport) consumerName(sub transport.Subscription) string {
-	name := sub.Topology.NameWithSeparator("_") + "_group"
-	if sub.Group != "" {
-		name = sub.Topology.NameWithSeparator("_") + "_" + sub.Group
-	}
-	return name
+	return sub.Topology.ConsumerNameWithSeparator(sub.Group, "_")
 }
 
 func effectiveCapacity(sub transport.Subscription) (int, error) {

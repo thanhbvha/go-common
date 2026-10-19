@@ -32,6 +32,28 @@ func transferDecision(kind transport.DecisionKind) transport.Decision {
 	return transport.Decision{Kind: kind, Next: transport.Message{Payload: []byte(`{"id":"retry","attempt":2}`)}, Source: &transport.Message{Payload: []byte(`{"id":"source","headers":{"correlation-id":"synthetic"}}`)}, RetryAt: time.Unix(1700000000, 0), Reason: "synthetic", Cause: errors.New("synthetic error"), Attempts: 2, FailedAt: time.Unix(1699999999, 0)}
 }
 
+func TestTransferCapacityFailurePreservesPendingSource(t *testing.T) {
+	for _, kind := range []transport.DecisionKind{transport.DecisionRetry, transport.DecisionDeadLetter} {
+		t.Run(kind.String(), func(t *testing.T) {
+			backend, rc := delayedBackend(t)
+			ctx := context.Background()
+			topo := transport.Topology{Namespace: "capacity", JobType: kind.String(), Options: map[string]any{
+				"redis.max_delayed_entries": int64(1), "redis.max_dlq_entries": int64(1),
+			}}
+			delivery := pendingDelivery(t, backend, rc, topo)
+			if kind == transport.DecisionRetry {
+				if err := rc.ZAdd(ctx, backend.delayedKey(topo), goredis.Z{Score: 1, Member: "existing"}).Err(); err != nil { t.Fatal(err) }
+			} else {
+				if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.dlqKey(topo), Values: map[string]any{"payload": "existing"}}).Err(); err != nil { t.Fatal(err) }
+			}
+			err := delivery.Settle(ctx, transferDecision(kind))
+			if !errors.Is(err, transport.ErrCapacityExceeded) { t.Fatalf("settle error=%v", err) }
+			pending, pendingErr := rc.XPending(ctx, delivery.stream, delivery.group).Result()
+			if pendingErr != nil || pending.Count != 1 { t.Fatalf("pending=%+v err=%v", pending, pendingErr) }
+		})
+	}
+}
+
 // DS-40/42/44: destination durability and source ACK are one isolated operation;
 // failed writes retain pending ownership and the guard permits a later retry.
 func TestAtomicTransferFailureAndRetry(t *testing.T) {

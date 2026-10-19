@@ -3,8 +3,9 @@
 The reusable driver boundary suite lives in `transport/contracttest`. It checks
 durable publish/consume/ACK, retry transfer, DLQ administration/requeue,
 delayed delivery, event fan-out groups, topology-scoped dedupe expiry/release,
-statistics, and malformed payload settlement. Redis runs the same suite against
-miniredis by default and against live Redis 7 single-node and Cluster fixtures
+statistics, and malformed payload settlement. Memory runs every applicable
+scenario hermetically against its bounded process-local state. Redis runs the
+same suite against miniredis by default and against live Redis 7 single-node and Cluster fixtures
 under the `integration` build tag. NATS runs it against an embedded, file-backed
 JetStream server under the same tag; its scheduler is stopped by the harness so
 due-time dispatch remains deterministic. Kafka runs every applicable scenario
@@ -36,6 +37,20 @@ the shared driver suite and the applicable core tests pass.
 | Stats accuracy | `contracttest` stats assertions; `TestRedisStats*`; `TestNATSStatsUseConsumerObligations` |
 | DLQ list/requeue/purge/count | `contracttest/dead_letter_admin`; `TestRedisDLQ*`; `TestNATSDLQAdminPreservesMetadataAndRequeues` |
 | Malformed transport message | `contracttest/malformed_payload_remains_settleable`; `TestReclaimSkipsActiveAndMalformedRecordsRemainPending` |
+
+Memory-specific parity coverage adds `TestFanoutCapacityFailureIsAtomic`,
+`TestConcurrentPublishRespectsCapacity`,
+`TestEventPublishBeforeConsumeReachesProvisionedGroups`,
+`TestDelayedSchedulerCapacityOrderAndClose`,
+`TestDelayedSchedulerAutomaticallyDispatchesAndReportsBackpressure`,
+`TestCancellationRedeliversUnsettledMessage`,
+`TestEventRetryReturnsOnlyToSourceGroup`,
+`TestEventDLQRequeueReturnsOnlyToSourceGroup`,
+`TestDLQCapacityFailurePreservesSourceAndRequeueIsAtomic`,
+`TestStatsReportQueuedInFlightDelayedAndDLQ`, and
+`TestTopologyScopedDedupeIsolation`. Broker restart, distributed ownership, and
+cross-process ordering do not apply because Memory explicitly advertises no
+durability or distributed capability.
 
 Redis-specific fault coverage tests both sides of ambiguous network responses:
 

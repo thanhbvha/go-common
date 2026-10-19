@@ -14,15 +14,26 @@ func (t *redisTransport) ValidateTopology(topology transport.Topology) error {
 	}
 	for key, value := range topology.Options {
 		switch key {
-		case "redis.maxlen", "redis.dlq_maxlen", "redis.batch_size":
+		case "redis.maxlen":
+			return fmt.Errorf("redis: redis.maxlen is unsafe for durable ready streams and is no longer supported")
+		case "redis.dlq_maxlen", "redis.batch_size", "redis.max_ready_entries",
+			"redis.max_delayed_entries", "redis.max_dlq_entries", "redis.retention_batch_size":
 			v, ok := value.(int64)
 			if !ok || v <= 0 {
 				return fmt.Errorf("redis: %s must be a positive int64", key)
 			}
-		case "redis.block", "redis.ack_wait":
+			if key == "redis.retention_batch_size" && v > 100_000 {
+				return fmt.Errorf("redis: redis.retention_batch_size must not exceed 100000")
+			}
+		case "redis.block", "redis.ack_wait", "redis.retention_interval":
 			v, ok := value.(time.Duration)
 			if !ok || v <= 0 {
 				return fmt.Errorf("redis: %s must be a positive duration", key)
+			}
+		case "redis.retention_min_age":
+			v, ok := value.(time.Duration)
+			if !ok || v < 0 {
+				return fmt.Errorf("redis: %s must be a non-negative duration", key)
 			}
 		case "redis.delay_batch_size":
 			v, ok := value.(int)

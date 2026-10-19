@@ -234,10 +234,7 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 		return err
 	}
 	topic := t.mainTopic(sub.Topology)
-	group := sub.Topology.Name() + "-group"
-	if sub.Group != "" {
-		group = sub.Topology.Name() + "-" + sub.Group
-	}
+	group := kafkaConsumerGroup(sub.Topology, sub.Group)
 
 	opts := mainConsumerOptions(topic, group, sub.Topology)
 	rebalances := newRebalanceController()
@@ -257,6 +254,17 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 		coordinator.close()
 	}()
 	return t.consumeRecords(ctx, sub.Topology, cl, coordinator, rebalances, capacity, deliver)
+}
+
+func kafkaConsumerGroup(topo transport.Topology, group string) string {
+	if version, _ := topo.Options[transport.ResourceNameVersionOption].(string); version == transport.ResourceNameVersionLegacy {
+		name := topo.Name() + "-group"
+		if group != "" {
+			name = topo.Name() + "-" + group
+		}
+		return name
+	}
+	return topo.ConsumerName(group)
 }
 
 func mainConsumerOptions(topic, group string, topo transport.Topology) []kgo.Opt {

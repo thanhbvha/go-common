@@ -12,10 +12,13 @@ import (
 
 type lifecycleTransport struct {
 	benchmarkTransport
-	ensure   func(context.Context, transport.Topology) error
-	close    func(context.Context) error
-	consumes atomic.Int32
-	closes   atomic.Int32
+	ensure             func(context.Context, transport.Topology) error
+	close              func(context.Context) error
+	consumes           atomic.Int32
+	closes             atomic.Int32
+	provisions         atomic.Int32
+	expectedProvisions atomic.Int32
+	prematureConsume   atomic.Bool
 }
 
 func (b *lifecycleTransport) EnsureTopology(ctx context.Context, topo transport.Topology) error {
@@ -26,9 +29,17 @@ func (b *lifecycleTransport) EnsureTopology(ctx context.Context, topo transport.
 }
 
 func (b *lifecycleTransport) Consume(ctx context.Context, _ transport.Subscription, _ func(transport.Delivery)) error {
+	if expected := b.expectedProvisions.Load(); expected > 0 && b.provisions.Load() < expected {
+		b.prematureConsume.Store(true)
+	}
 	b.consumes.Add(1)
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func (b *lifecycleTransport) EnsureSubscription(context.Context, transport.Subscription) error {
+	b.provisions.Add(1)
+	return nil
 }
 
 func (b *lifecycleTransport) Close(ctx context.Context) error {
@@ -37,6 +48,30 @@ func (b *lifecycleTransport) Close(ctx context.Context) error {
 		return b.close(ctx)
 	}
 	return nil
+}
+
+func TestStartProvisionsEverySubscriptionBeforeConsumers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		backend := &lifecycleTransport{}
+		backend.expectedProvisions.Store(2)
+		b := lifecycleBus(t, backend)
+		if err := b.DeclareEvent("event"); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Subscribe("event", "subscriber", func(context.Context, Job) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if backend.provisions.Load() != 2 || backend.consumes.Load() != 2 || backend.prematureConsume.Load() {
+			t.Fatalf("provisions=%d consumes=%d premature=%t", backend.provisions.Load(), backend.consumes.Load(), backend.prematureConsume.Load())
+		}
+		if err := b.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func lifecycleBus(t *testing.T, backend *lifecycleTransport) Bus {

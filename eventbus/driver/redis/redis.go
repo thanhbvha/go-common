@@ -24,12 +24,31 @@ func init() {
 }
 
 const (
+	luaPublishReady = `
+local stream = KEYS[1]
+local limit = tonumber(ARGV[1])
+local current = redis.call("XLEN", stream)
+if current >= limit then return -(current + 1) end
+redis.call("XADD", stream, "*", "payload", ARGV[2])
+return current + 1
+`
+	luaPublishDelayed = `
+local delayed = KEYS[1]
+local limit = tonumber(ARGV[1])
+local current = redis.call("ZCARD", delayed)
+if not redis.call("ZSCORE", delayed, ARGV[3]) and current >= limit then
+    return -(current + 1)
+end
+redis.call("ZADD", delayed, ARGV[2], ARGV[3])
+return current + 1
+`
 	// Lua script to move delayed jobs to the stream atomically
 	luaMoveDelayed = `
 local zset = KEYS[1]
 local stream = KEYS[2]
 local max_score = ARGV[1]
 local limit = ARGV[2]
+local ready_limit = tonumber(ARGV[3])
 limit = tonumber(limit)
 if not limit or limit < 1 or limit > 1000 or limit ~= math.floor(limit) then
     return redis.error_reply("invalid delayed dispatch batch limit")
@@ -43,37 +62,78 @@ if target_type ~= "none" and target_type ~= "stream" then
     return redis.error_reply("delayed destination must be a stream")
 end
 local jobs = redis.call("ZRANGEBYSCORE", zset, "-inf", max_score, "LIMIT", 0, limit)
+local current = redis.call("XLEN", stream)
+if current + #jobs > ready_limit then return -(current + 1) end
 for _, job in ipairs(jobs) do
     redis.call("XADD", stream, "*", "payload", job)
     redis.call("ZREM", zset, job)
 end
 return #jobs
 `
+	luaBeginPublication = `
+local current = redis.call("GET", KEYS[1])
+if not current then
+    local created = redis.call("SET", KEYS[1], "r:" .. ARGV[1], "PX", ARGV[2], "NX")
+    if created then return 1 end
+    current = redis.call("GET", KEYS[1])
+end
+if current and string.sub(current, 1, 2) == "p:" then return 2 end
+return 3
+`
+	luaConfirmPublication = `
+local current = redis.call("GET", KEYS[1])
+if current == "p:" .. ARGV[1] then return 1 end
+if current ~= "r:" .. ARGV[1] then return 0 end
+redis.call("SET", KEYS[1], "p:" .. ARGV[1], "KEEPTTL")
+return 1
+`
+	luaAbortPublication = `
+local current = redis.call("GET", KEYS[1])
+if not current then return 1 end
+if current ~= "r:" .. ARGV[1] then return 0 end
+redis.call("DEL", KEYS[1])
+return 1
+`
 )
 
 type redisTransport struct {
 	rc goredis.UniversalClient
 
-	mu       sync.Mutex
-	sweepers map[string]context.CancelFunc
+	mu                  sync.Mutex
+	sweepers            map[string]context.CancelFunc
+	retentionTopologies map[string]transport.Topology
+	retentionStatuses   map[string]RetentionStatus
+	capacityRejections  map[string]map[string]uint64
+	retentionCancel     context.CancelFunc
+	retentionDone       chan struct{}
+	retentionWake       chan struct{}
 }
 
 var (
-	_ transport.Transport         = (*redisTransport)(nil)
-	_ transport.Deduper           = (*redisTransport)(nil)
-	_ transport.TopologyDeduper   = (*redisTransport)(nil)
-	_ transport.DLQAdmin          = (*redisTransport)(nil)
-	_ transport.CursorDLQAdmin    = (*redisTransport)(nil)
-	_ transport.StatsReader       = (*redisTransport)(nil)
-	_ transport.TopologyValidator = (*redisTransport)(nil)
-	_ transport.Delivery          = (*redisDelivery)(nil)
+	_ transport.Transport               = (*redisTransport)(nil)
+	_ transport.Deduper                 = (*redisTransport)(nil)
+	_ transport.TopologyDeduper         = (*redisTransport)(nil)
+	_ transport.PublicationDeduper      = (*redisTransport)(nil)
+	_ transport.DLQAdmin                = (*redisTransport)(nil)
+	_ transport.CursorDLQAdmin          = (*redisTransport)(nil)
+	_ transport.StatsReader             = (*redisTransport)(nil)
+	_ transport.TopologyValidator       = (*redisTransport)(nil)
+	_ transport.SubscriptionProvisioner = (*redisTransport)(nil)
+	_ RetentionAdmin                    = (*redisTransport)(nil)
+	_ transport.Delivery                = (*redisDelivery)(nil)
 )
 
 func New(rc goredis.UniversalClient) transport.Transport {
-	return &redisTransport{
-		rc:       rc,
-		sweepers: make(map[string]context.CancelFunc),
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &redisTransport{
+		rc: rc, sweepers: make(map[string]context.CancelFunc),
+		retentionTopologies: make(map[string]transport.Topology),
+		retentionStatuses:   make(map[string]RetentionStatus),
+		capacityRejections:  make(map[string]map[string]uint64),
+		retentionCancel:     cancel, retentionDone: make(chan struct{}), retentionWake: make(chan struct{}, 1),
 	}
+	go t.retentionLoop(ctx)
+	return t
 }
 
 func (t *redisTransport) Name() string { return "redis" }
@@ -111,25 +171,27 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 		t.sweepers[topoName] = cancel
 		go t.delaySweeper(sweepCtx, topo)
 	}
+	t.retentionTopologies[topoName] = topo
+	select {
+	case t.retentionWake <- struct{}{}:
+	default:
+	}
 
 	return nil
 }
 
 func (t *redisTransport) Publish(ctx context.Context, topo transport.Topology, msg transport.Message) error {
-	stream := t.streamKey(topo)
-
-	maxLen := int64(100000)
-	if val, ok := topo.Options["redis.maxlen"].(int64); ok && val > 0 {
-		maxLen = val
+	if err := t.ValidateTopology(topo); err != nil {
+		return err
 	}
-
-	// Add directly to stream
-	return t.rc.XAdd(ctx, &goredis.XAddArgs{
-		Stream: stream,
-		MaxLen: maxLen,
-		Approx: true,
-		Values: map[string]interface{}{"payload": msg.Payload},
-	}).Err()
+	result, err := publishReadyScript.Run(ctx, t.rc, []string{t.streamKey(topo)}, maxReadyEntries(topo), msg.Payload).Int64()
+	if err != nil {
+		return fmt.Errorf("redis: publish ready: %w", err)
+	}
+	if result < 0 {
+		return t.capacityError(topo, "ready", -result-1, maxReadyEntries(topo))
+	}
+	return nil
 }
 
 func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
@@ -139,10 +201,14 @@ func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology,
 	delayed := t.delayedKey(topo)
 	score := float64(runAt.UnixMilli())
 
-	return t.rc.ZAdd(ctx, delayed, goredis.Z{
-		Score:  score,
-		Member: msg.Payload,
-	}).Err()
+	result, err := publishDelayedScript.Run(ctx, t.rc, []string{delayed}, maxDelayedEntries(topo), score, msg.Payload).Int64()
+	if err != nil {
+		return fmt.Errorf("redis: publish delayed: %w", err)
+	}
+	if result < 0 {
+		return t.capacityError(topo, "delayed", -result-1, maxDelayedEntries(topo))
+	}
+	return nil
 }
 
 func (t *redisTransport) delaySweeper(ctx context.Context, topo transport.Topology) {
@@ -163,7 +229,11 @@ func (t *redisTransport) delaySweeper(ctx context.Context, topo transport.Topolo
 	}
 }
 
-var moveDelayedScript = goredis.NewScript(luaMoveDelayed)
+var (
+	moveDelayedScript    = goredis.NewScript(luaMoveDelayed)
+	publishReadyScript   = goredis.NewScript(luaPublishReady)
+	publishDelayedScript = goredis.NewScript(luaPublishDelayed)
+)
 
 // dispatchDue performs one bounded broker-side move. Lua errors do not roll
 // back prior writes: validate types first and remove each source only after
@@ -176,7 +246,29 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 	if value, ok := topo.Options["redis.delay_batch_size"].(int); ok {
 		limit = value
 	}
-	return moveDelayedScript.Run(ctx, t.rc, []string{t.delayedKey(topo), t.streamKey(topo)}, now.UnixMilli(), limit).Int64()
+	moved, err := moveDelayedScript.Run(ctx, t.rc, []string{t.delayedKey(topo), t.streamKey(topo)}, now.UnixMilli(), limit, maxReadyEntries(topo)).Int64()
+	if err != nil {
+		return 0, err
+	}
+	if moved < 0 {
+		return 0, t.capacityError(topo, "ready", -moved-1, maxReadyEntries(topo))
+	}
+	return moved, nil
+}
+
+func (t *redisTransport) capacityError(topo transport.Topology, resource string, current, limit int64) error {
+	t.mu.Lock()
+	key := topologyPrefix(topo)
+	if t.capacityRejections[key] == nil {
+		t.capacityRejections[key] = make(map[string]uint64)
+	}
+	t.capacityRejections[key][resource]++
+	t.mu.Unlock()
+	select {
+	case t.retentionWake <- struct{}{}:
+	default:
+	}
+	return &transport.CapacityError{Transport: "redis", Topology: topologyPrefix(topo), Resource: resource, Current: current, Limit: limit}
 }
 
 func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
@@ -186,10 +278,8 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 	group := t.groupName(sub)
 	consumer := "consumer-" + generateID() // need a unique consumer name
 
-	// Ensure group exists
-	err := t.rc.XGroupCreateMkStream(ctx, stream, group, "0").Err()
-	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
-		return fmt.Errorf("redis Consume XGROUP CREATE: %w", err)
+	if err := t.EnsureSubscription(ctx, sub); err != nil {
+		return err
 	}
 
 	batchSize := consumerBatchSize(sub)
@@ -291,18 +381,69 @@ func (t *redisTransport) ReleaseTopology(ctx context.Context, topo transport.Top
 	return t.rc.Del(ctx, t.dedupeKey(topo, key)).Err()
 }
 
+var (
+	beginPublicationScript   = goredis.NewScript(luaBeginPublication)
+	confirmPublicationScript = goredis.NewScript(luaConfirmPublication)
+	abortPublicationScript   = goredis.NewScript(luaAbortPublication)
+)
+
+func (t *redisTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	if err := t.ValidateTopology(topo); err != nil {
+		return 0, err
+	}
+	if key == "" || reservationID == "" || ttl <= 0 {
+		return 0, fmt.Errorf("redis: dedupe key, reservation ID, and positive TTL required")
+	}
+	ttlMillis := max(int64(1), ttl.Milliseconds())
+	state, err := beginPublicationScript.Run(ctx, t.rc, []string{t.dedupeKey(topo, key)}, reservationID, ttlMillis).Int()
+	if err != nil {
+		return 0, fmt.Errorf("redis dedupe begin: %w", err)
+	}
+	return transport.DedupeReservationState(state), nil
+}
+
+func (t *redisTransport) ConfirmPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {
+	confirmed, err := confirmPublicationScript.Run(ctx, t.rc, []string{t.dedupeKey(topo, key)}, reservationID).Int()
+	if err != nil {
+		return fmt.Errorf("redis dedupe confirm: %w", err)
+	}
+	if confirmed != 1 {
+		return transport.ErrDedupeAmbiguous
+	}
+	return nil
+}
+
+func (t *redisTransport) AbortPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {
+	aborted, err := abortPublicationScript.Run(ctx, t.rc, []string{t.dedupeKey(topo, key)}, reservationID).Int()
+	if err != nil {
+		return fmt.Errorf("redis dedupe abort: %w", err)
+	}
+	if aborted != 1 {
+		return transport.ErrDedupeAmbiguous
+	}
+	return nil
+}
+
 func (t *redisTransport) Ping(ctx context.Context) error {
 	return t.rc.Ping(ctx).Err()
 }
 
 func (t *redisTransport) Close(ctx context.Context) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, cancel := range t.sweepers {
 		cancel()
 	}
 	t.sweepers = make(map[string]context.CancelFunc)
-	return nil
+	retentionCancel := t.retentionCancel
+	retentionDone := t.retentionDone
+	t.mu.Unlock()
+	retentionCancel()
+	select {
+	case <-retentionDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // redisDelivery implements Delivery

@@ -29,11 +29,13 @@ the canonical prefix, not the delimiter-joined logical display name.
 
 Consumer groups belong to their stream: task group is `workers`, subscriber
 groups are `subscriber:<subscriber-name>`. Dedupe scope is namespace + kind +
-name + user key; expiry and release affect only that reservation. The engine
-prefers optional `transport.TopologyDeduper`. Existing `Deduper` direct calls
-keep the old unscoped `eventbus:dedupe:<key>` behavior for compatibility; they
-cannot provide topology isolation. The engine's existing 24-hour default TTL
-is unchanged by this key-layout task.
+name + user key. Engine publications use `transport.PublicationDeduper`: values
+are owned `reserved` records until broker acceptance is confirmed, then become
+`published`; abort/confirm scripts compare the reservation ID before mutation.
+A live reserved record is ambiguous, not a successful duplicate. Existing
+`Deduper` direct calls keep the old unscoped `eventbus:dedupe:<key>` behavior
+for compatibility; they cannot prove publication. The engine's 24-hour default
+TTL remains unchanged.
 
 ## Migration from the old layout
 
@@ -77,10 +79,19 @@ removes a member before its destination write. Duplicates remain allowed after
 network/failover ambiguity. Durability still depends on Redis persistence and
 replication configuration; this is not an exactly-once guarantee.
 
-Delayed dispatch intentionally does not apply `redis.maxlen`: trimming a ready
-stream during the move could discard accepted, unprocessed work. The option's
-existing behavior on other publication paths is unchanged by P3.2. Operators
-must provision sufficient storage and use a no-eviction policy for queue keys.
+Neither delayed dispatch nor immediate publication applies `redis.maxlen`:
+trimming a ready stream can discard accepted work before every task/event group
+observes it. `redis.maxlen` and `WithMaxLen` are retained only as compiling
+compatibility entry points and are rejected by topology validation. Operators
+must provision sufficient storage, use a no-eviction policy for queue keys, and
+perform retention only after accounting for every relevant group.
+P6.7.1R implements the mandatory durable group manifest, epoch-fenced safe
+watermark, bounded transport-owned compactor, explicit subscriber retirement,
+and atomic ready/delayed/DLQ admission limits described in
+[RETENTION.md](RETENTION.md). An offline active group intentionally blocks
+compaction; publication then fails with `transport.ErrCapacityExceeded` at the
+configured bound instead of deleting owed work. Production Redis must use
+`maxmemory-policy noeviction`; the count limits are not byte limits.
 Identical serialized members retain Redis sorted-set upsert semantics; normal
 engine envelopes contain distinct IDs. Scheduling/retry does not regenerate IDs
 or rewrite headers, attempts, ordering/dedupe keys, or payload bytes.

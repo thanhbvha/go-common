@@ -105,7 +105,8 @@ run with 100 messages produced:
 | Kafka | 92.99 | 806.52 ms | 832.20 ms | 841.83 ms | 47,040.24 | 273.43 | 0 |
 
 Large persistent backlog runs were not executed on the shared local services:
-Memory has an intentional 1,000-record test queue, while Redis/NATS/Kafka lack a
+Memory has intentional default 1,000-entry ready, delayed, and DLQ bounds for
+its process-local test/development role, while Redis/NATS/Kafka lack a
 safe benchmark topology deletion API and would retain substantial user-visible
 data. The runner supports both target sizes for disposable infrastructure; this
 environment therefore does not satisfy the plan's “where infrastructure
@@ -113,3 +114,9 @@ permits” condition. No destructive broker cleanup was attempted.
 
 The three-run core micro-benchmark results and accepted regressions are recorded
 in [PERFORMANCE_BASELINE_ADR.md](PERFORMANCE_BASELINE_ADR.md).
+
+P6.7.2 changes Memory from a channel benchmark stub into a bounded semantic
+reference transport with atomic fan-out, queued/in-flight redelivery, and one
+joined delayed scheduler. A Linux smoke run and the accepted correctness cost
+are recorded in the ADR addendum; use a same-host three-run comparison before
+promoting those smoke values to a new statistical baseline.

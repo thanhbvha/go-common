@@ -270,6 +270,20 @@ func (e *engine) Start(ctx context.Context) (err error) {
 			return fmt.Errorf("ensure event topology for %s failed: %w", eventName, err)
 		}
 	}
+	if provisioner, ok := e.transport.(transport.SubscriptionProvisioner); ok {
+		for jobType, topo := range e.taskTopologies {
+			if err := provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo}); err != nil {
+				return fmt.Errorf("ensure task subscription for %s failed: %w", jobType, err)
+			}
+		}
+		for eventName, subscribers := range e.subTopologies {
+			for group, topo := range subscribers {
+				if err := provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo, Group: group}); err != nil {
+					return fmt.Errorf("ensure event subscription for %s/%s failed: %w", eventName, group, err)
+				}
+			}
+		}
+	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -915,6 +929,41 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 
 	// Handle Deduplication (Bug C11)
 	if msg.DedupeKey != "" {
+		dedupeTTL := time.Duration(env.DedupeTTL)
+		if dedupeTTL == 0 {
+			dedupeTTL = 24 * time.Hour
+		}
+		if deduper, ok := e.transport.(transport.PublicationDeduper); ok {
+			state, err := deduper.BeginPublication(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			if err != nil {
+				return fmt.Errorf("dedupe begin: %w", err)
+			}
+			switch state {
+			case transport.DedupeReservationPublished:
+				status = "duplicate"
+				return nil
+			case transport.DedupeReservationPending:
+				return fmt.Errorf("%w: unconfirmed reservation", ErrDedupeAmbiguous)
+			case transport.DedupeReservationAcquired:
+			default:
+				return fmt.Errorf("%w: unknown reservation state %d", ErrDedupeAmbiguous, state)
+			}
+
+			pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if pubErr != nil {
+				if abortErr := deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); abortErr != nil {
+					return errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
+				}
+				return pubErr
+			}
+			if err := deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); err != nil {
+				return fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
+			}
+			return nil
+		}
+
 		var reserve func(context.Context, string, time.Duration) (bool, error)
 		var release func(context.Context, string) error
 		if scoped, ok := e.transport.(transport.TopologyDeduper); ok {
@@ -928,48 +977,44 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			return ErrDedupeUnavailable
 		}
 
-		dedupeTTL := time.Duration(env.DedupeTTL)
-		if dedupeTTL == 0 {
-			dedupeTTL = 24 * time.Hour
-		}
 		acquired, err := reserve(ctx, msg.DedupeKey, dedupeTTL)
 		if err != nil {
 			return fmt.Errorf("dedupe reserve: %w", err)
 		}
 		if !acquired {
-			status = "duplicate"
-			return nil // Duplicate detected, skip silently or return specific err? Standard is skip silently for dedupe.
+			return fmt.Errorf("%w: legacy deduper cannot prove durable publication", ErrDedupeAmbiguous)
 		}
 
 		// Publish
-		var pubErr error
-		if env.RunAt > 0 {
-			pubErr = e.transport.PublishAt(ctx, topo, msg, time.UnixMilli(env.RunAt))
-		} else {
-			pubErr = e.transport.Publish(ctx, topo, msg)
-		}
+		pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
 
 		if pubErr != nil {
 			// Release lock if publish fails so it can be retried
-			_ = release(context.WithoutCancel(ctx), msg.DedupeKey)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if cleanupErr := release(cleanupCtx, msg.DedupeKey); cleanupErr != nil {
+				return errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, cleanupErr))
+			}
 			return pubErr
 		}
 
 		return nil
 	}
 
-	var pubErr error
-	if env.RunAt > 0 {
-		pubErr = e.transport.PublishAt(ctx, topo, msg, time.UnixMilli(env.RunAt))
-	} else {
-		pubErr = e.transport.Publish(ctx, topo, msg)
-	}
+	pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
 
 	if pubErr != nil {
 		return pubErr
 	}
 
 	return nil
+}
+
+func (e *engine) publishMessage(ctx context.Context, topo Topology, msg transport.Message, runAt int64) error {
+	if runAt > 0 {
+		return e.transport.PublishAt(ctx, topo, msg, time.UnixMilli(runAt))
+	}
+	return e.transport.Publish(ctx, topo, msg)
 }
 
 func payloadTooLargeError(size, limit int) error {

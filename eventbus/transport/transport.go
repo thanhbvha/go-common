@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"encoding/base32"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,6 +17,32 @@ var ErrNotSupported = errors.New("eventbus: operation not supported by transport
 
 // ErrLeaseLost means a delivery no longer owns its pending broker entry.
 var ErrLeaseLost = errors.New("eventbus: delivery lease lost")
+
+// ErrCapacityExceeded means a bounded transport resource cannot accept more
+// durable work without violating its no-loss contract.
+var ErrCapacityExceeded = errors.New("eventbus: transport capacity exceeded")
+
+// CapacityError identifies the bounded broker resource that rejected
+// admission. It intentionally excludes message payloads and credentials.
+type CapacityError struct {
+	Transport string
+	Topology  string
+	Resource  string
+	Current   int64
+	Limit     int64
+}
+
+func (e *CapacityError) Error() string {
+	if e == nil {
+		return ErrCapacityExceeded.Error()
+	}
+	if e.Topology == "" {
+		return fmt.Sprintf("%s: %s capacity %d/%d: %v", e.Transport, e.Resource, e.Current, e.Limit, ErrCapacityExceeded)
+	}
+	return fmt.Sprintf("%s: topology %s %s capacity %d/%d: %v", e.Transport, e.Topology, e.Resource, e.Current, e.Limit, ErrCapacityExceeded)
+}
+
+func (e *CapacityError) Unwrap() error { return ErrCapacityExceeded }
 
 // LeaseDelivery lets a driver request renewal before handler execution and a
 // lease-specific heartbeat cadence. Renewal failure leaves the source unsettled.
@@ -36,6 +64,18 @@ var (
 
 	// ErrInvalidTopology is returned when a transport topology is malformed.
 	ErrInvalidTopology = errors.New("eventbus: invalid transport topology")
+
+	// ErrDedupeAmbiguous means a deduplication reservation cannot be proven to
+	// represent a durably published message. Callers must not treat it as a
+	// successful duplicate response.
+	ErrDedupeAmbiguous = errors.New("eventbus: deduplication state is ambiguous")
+)
+
+const (
+	// ResourceNameVersionOption selects the broker resource naming layout.
+	ResourceNameVersionOption = "eventbus.resource_name_version"
+	ResourceNameVersionV2     = "v2"
+	ResourceNameVersionLegacy = "legacy"
 )
 
 // TopologyKind separates competing-consumer tasks from fan-out events.
@@ -73,14 +113,42 @@ func (t Topology) Validate() error {
 	return nil
 }
 
-// Name returns the canonical broker-facing topology name. Task names retain
-// their legacy format; event names include an explicit mode segment.
+// Name returns the canonical broker-facing topology name. The v2 default is
+// an injective encoding of namespace, topology kind, and logical name.
 func (t Topology) Name() string {
 	return t.NameWithSeparator(".")
 }
 
-// NameWithSeparator returns the canonical topology name using sep.
+// NameWithSeparator returns the canonical topology name using sep between the
+// version marker and an encoded tuple. The encoded tuple is a single component,
+// so separators occurring in caller-controlled values cannot create aliases.
 func (t Topology) NameWithSeparator(sep string) string {
+	if t.resourceNameVersion() == ResourceNameVersionLegacy {
+		return t.LegacyNameWithSeparator(sep)
+	}
+	return "eb2" + sep + encodeResourceTuple(t.Namespace, t.Kind.String(), t.JobType)
+}
+
+// ConsumerName returns an injective name for a topology consumer group.
+func (t Topology) ConsumerName(group string) string {
+	return t.ConsumerNameWithSeparator(group, ".")
+}
+
+// ConsumerNameWithSeparator is ConsumerName for brokers that reserve dots.
+func (t Topology) ConsumerNameWithSeparator(group, sep string) string {
+	if t.resourceNameVersion() == ResourceNameVersionLegacy {
+		name := t.LegacyNameWithSeparator(sep) + sep + "group"
+		if group != "" {
+			name = t.LegacyNameWithSeparator(sep) + sep + group
+		}
+		return name
+	}
+	return t.NameWithSeparator(sep) + sep + "c" + sep + encodeResourceTuple(group)
+}
+
+// LegacyNameWithSeparator returns the pre-v2 separator-joined name. It exists
+// only for explicit migrations and must not be used as a collision-safe name.
+func (t Topology) LegacyNameWithSeparator(sep string) string {
 	parts := make([]string, 0, 3)
 	if t.Namespace != "" {
 		parts = append(parts, t.Namespace)
@@ -90,6 +158,23 @@ func (t Topology) NameWithSeparator(sep string) string {
 	}
 	parts = append(parts, t.JobType)
 	return strings.Join(parts, sep)
+}
+
+func (t Topology) resourceNameVersion() string {
+	if version, ok := t.Options[ResourceNameVersionOption].(string); ok && version == ResourceNameVersionLegacy {
+		return version
+	}
+	return ResourceNameVersionV2
+}
+
+func encodeResourceTuple(components ...string) string {
+	encoded := make([]byte, 0, 64)
+	encoded = binary.AppendUvarint(encoded, uint64(len(components)))
+	for _, component := range components {
+		encoded = binary.AppendUvarint(encoded, uint64(len(component)))
+		encoded = append(encoded, component...)
+	}
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(encoded)
 }
 
 // Capabilities describes the features supported by a specific transport driver.
@@ -146,6 +231,13 @@ type Subscription struct {
 	WaitForHandlers func()
 }
 
+// SubscriptionProvisioner durably creates the broker-side consumer identity
+// before a consumer session starts. The engine invokes it during Start after
+// topology provisioning and before committing to the running state.
+type SubscriptionProvisioner interface {
+	EnsureSubscription(ctx context.Context, subscription Subscription) error
+}
+
 // TopologyStats holds metrics for a specific topology (job type).
 type TopologyStats struct {
 	Pending  int64 // ready delivery obligations not yet handed to a consumer
@@ -196,6 +288,25 @@ type Deduper interface {
 type TopologyDeduper interface {
 	ReserveTopology(ctx context.Context, topology Topology, key string, ttl time.Duration) (bool, error)
 	ReleaseTopology(ctx context.Context, topology Topology, key string) error
+}
+
+// DedupeReservationState is the durable state observed when beginning a
+// publication protected by a dedupe key.
+type DedupeReservationState uint8
+
+const (
+	DedupeReservationAcquired DedupeReservationState = iota + 1
+	DedupeReservationPublished
+	DedupeReservationPending
+)
+
+// PublicationDeduper distinguishes an unconfirmed reservation from proof that
+// a prior publication was durably accepted. reservationID must uniquely own an
+// acquired reservation; confirm/abort must not mutate another owner's state.
+type PublicationDeduper interface {
+	BeginPublication(ctx context.Context, topology Topology, key, reservationID string, ttl time.Duration) (DedupeReservationState, error)
+	ConfirmPublication(ctx context.Context, topology Topology, key, reservationID string) error
+	AbortPublication(ctx context.Context, topology Topology, key, reservationID string) error
 }
 
 // StatsReader is implemented by transports that can return real topology

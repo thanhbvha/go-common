@@ -158,6 +158,13 @@ func Run(t *testing.T, h Harness) {
 		topo := h.Topology(t.Name(), transport.EventTopology)
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
+		if provisioner, ok := tr.(transport.SubscriptionProvisioner); ok {
+			for _, group := range []string{"alpha", "beta"} {
+				if err := provisioner.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: group}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 		mustPublish(t, ctx, tr, topo, "event")
 		for _, group := range []string{"alpha", "beta"} {
 			active := receive(t, tr, transport.Subscription{Topology: topo, Group: group}, h.ReceiveWithin)

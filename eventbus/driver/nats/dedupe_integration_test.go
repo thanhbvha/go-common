@@ -4,6 +4,7 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -132,5 +133,45 @@ func TestDedupeDistinguishesCorruptionAndInfrastructureFailureFromDuplicate(t *t
 	nc.Close()
 	if ok, err := backend.ReserveTopology(ctx, topo, "unavailable", time.Minute); err == nil || ok {
 		t.Fatalf("closed connection reservation = %v, %v; want infrastructure error", ok, err)
+	}
+}
+
+func TestPublicationDedupeRequiresConfirmedState(t *testing.T) {
+	s := RunServerOnPort(t, server.RANDOM_PORT)
+	defer s.Shutdown()
+	nc, err := gonats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := New(js).(*natsTransport)
+	ctx := context.Background()
+	topo := transport.Topology{Namespace: "dedupe-state", JobType: "job"}
+	if err := backend.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close(context.Background())
+
+	state, err := backend.BeginPublication(ctx, topo, "same", "owner-1", time.Minute)
+	if err != nil || state != transport.DedupeReservationAcquired {
+		t.Fatalf("begin = %d, %v", state, err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-2", time.Minute)
+	if err != nil || state != transport.DedupeReservationPending {
+		t.Fatalf("pending = %d, %v", state, err)
+	}
+	if err := backend.AbortPublication(ctx, topo, "same", "owner-2"); !errors.Is(err, transport.ErrDedupeAmbiguous) {
+		t.Fatalf("wrong-owner abort = %v", err)
+	}
+	if err := backend.ConfirmPublication(ctx, topo, "same", "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-3", time.Minute)
+	if err != nil || state != transport.DedupeReservationPublished {
+		t.Fatalf("published = %d, %v", state, err)
 	}
 }

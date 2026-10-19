@@ -4,6 +4,85 @@ This guide covers migration from `queue`, `queue_kafka`, and `queue_nats`, and
 from the pre-refactor EventBus API. EventBus provides at-least-once delivery:
 handlers must be idempotent and may receive a message more than once.
 
+## Phase 6.7 resource-name migration
+
+Memory, NATS, and Kafka now derive broker resources from a versioned `eb2`
+encoding of the complete `(namespace, topology kind, logical name)` tuple.
+Consumer groups additionally encode the subscriber name. The encoding is
+injective for supported inputs: dots, underscores, slashes, the word `event`,
+and Unicode cannot shift component boundaries or alias another topology.
+
+This intentionally changes physical topic, stream, bucket, and consumer-group
+names. EventBus does not silently alias, copy, drain, or delete v1 resources.
+For each topology, either:
+
+1. stop old producers, drain and account for ready/delayed/DLQ work, then deploy
+   all v2 producers and consumers together; or
+2. temporarily declare the topology with `eventbus.WithLegacyResourceNames()`
+   while performing an explicitly supervised migration.
+
+The legacy option preserves the old separator-joined names and their collision
+risk. Never use it for two identities that collide, and do not assume legacy
+and v2 deployments share a backlog. Keep old resources through the rollback
+window, then remove them with broker-specific administration. Redis data keys
+already use their separate injective v1 layout and are not renamed by this
+change, although process-local scheduler identity now follows the selected
+topology name.
+
+## Phase 6.7 dedupe publication state
+
+Built-in dedupe drivers now store an owned `reserved` state before publication
+and change it to `published` only after the transport confirms durable
+acceptance. Only `published` is a successful duplicate. A live unconfirmed
+reservation returns `ErrDedupeAmbiguous`; it is never translated into success.
+Publish-failure cleanup and post-publish confirmation use a five-second context
+independent of caller cancellation. If either result is ambiguous, the publish
+returns an error matching `ErrDedupeAmbiguous` so callers and telemetry can
+alert or reconcile it. Reservation expiry remains the recovery bound.
+
+Custom transports that expose only the legacy `Deduper`/`TopologyDeduper`
+interfaces still compile, but a reservation hit returns `ErrDedupeAmbiguous`
+because those interfaces cannot prove publication. Implement
+`transport.PublicationDeduper` to restore confirmed duplicate suppression.
+
+## Phase 6.7 Memory parity boundary
+
+The Memory driver is now bounded and passes the shared transport scenarios that
+apply to an in-process transport. Ready capacity counts queued plus in-flight
+entries per task/subscriber group; event publication first validates every
+declared group, then fan-outs atomically. Delayed work uses one joined heap/timer
+scheduler instead of one goroutine per message. Retry and DLQ requeue preserve
+the source event subscriber rather than broadcasting a second copy.
+The concrete Memory transport's `SchedulerStatus` reports retained delayed
+count, last run/success/error, and retry count for local tests and diagnostics.
+
+Defaults are 1,000 ready entries per group, 1,000 delayed entries per topology,
+and 1,000 DLQ records per topology. Override them with positive integer options:
+
+```go
+eventbus.WithOption("memory.max_ready_entries", 500)
+eventbus.WithOption("memory.max_delayed_entries", 200)
+eventbus.WithOption("memory.max_dlq_entries", 100)
+```
+
+Saturation returns `transport.ErrCapacityExceeded`; it does not drop or partially
+fan out a message. Consumer-session cancellation redelivers unsettled entries as
+long as the process remains alive. `Close` joins the scheduler and rejects new
+publication, consumption, provisioning, and dedupe mutations; read-only stats,
+DLQ list, and DLQ count remain available for final inspection.
+
+Publishing a Memory event with no process-local provisioned subscriber returns
+`transport.ErrNotSupported`; unlike a durable broker, Memory cannot preserve it
+for a subscriber that may appear in another process or after restart. Heartbeat
+also returns `ErrNotSupported` because there is no broker lease to extend.
+
+These semantics do not make Memory durable. Process termination loses every
+queue, delayed entry, dedupe reservation, and DLQ record. There is no restart
+recovery, cross-process fan-out, distributed ordering, durable lease, or broker
+availability guarantee. Use Memory for tests, local development, or workloads
+whose process-local loss is explicitly accepted; use Redis, NATS, or Kafka for
+durable deployment.
+
 ## Canonical API
 
 Import the selected driver for its registry side effect, configure the bus,
@@ -269,9 +348,22 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   Drain/migrate old keys before switching; existing backlogs and consumer groups
   are not automatically discovered by the new driver.
 - Redis `redis.delay_batch_size` is now bounded to 1–1000 (default 100).
-  Delayed dispatch does not trim the destination with `redis.maxlen`, avoiding
-  deletion of unprocessed work. Provision storage accordingly; other existing
-  publication paths retain their current retention behavior.
+  Neither immediate nor delayed publication trims the ready stream. The former
+  `redis.maxlen`/`WithMaxLen` behavior could remove accepted work ahead of an
+  offline task worker or slow event subscriber and is now rejected during
+  topology validation. Redis now provisions every intended `workers` or
+  `subscriber:*` group into a durable manifest before consumer startup. A
+  transport-owned coordinator trims only IDs strictly below the conservative
+  watermark of every active/retiring group, with manifest-epoch fencing across
+  instances. Configure `redis.max_ready_entries`,
+  `redis.max_delayed_entries`, and `redis.max_dlq_entries`; saturation returns
+  `transport.ErrCapacityExceeded` before acceptance or source settlement.
+  `RetireSubscription` is explicit: safe retirement requires no pending/unread
+  work through its barrier, while forced retirement reports the work abandoned.
+  `RetentionReport` exposes capacity, watermark, trim/error/conflict counters,
+  blocking groups, and readiness. Keep `maxmemory-policy noeviction`; count
+  limits do not replace Redis memory, persistence, or replication planning. See
+  [RETENTION.md](driver/redis/RETENTION.md).
 - Redis retry/DLQ now use same-slot Lua settlement. Stale sources return
   `transport.ErrDeliverySettled` without publishing another copy. DLQ settlement
   no longer applies `redis.dlq_maxlen`; records remain until explicitly managed.

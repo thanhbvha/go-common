@@ -19,6 +19,7 @@ var (
 	requeueScript = goredis.NewScript(`
 local dlq = KEYS[1]
 local ready = KEYS[2]
+local capacity = tonumber(ARGV[1])
 local dlq_type = redis.call("TYPE", dlq).ok
 local ready_type = redis.call("TYPE", ready).ok
 if dlq_type ~= "none" and dlq_type ~= "stream" then
@@ -30,7 +31,8 @@ end
 if dlq_type == "none" then return 0 end
 
 local selected = {}
-for _, id in ipairs(ARGV) do
+for index = 2, #ARGV do
+    local id = ARGV[index]
     local records = redis.call("XRANGE", dlq, id, id, "COUNT", 1)
     if #records > 0 then
         local fields = records[1][2]
@@ -47,6 +49,9 @@ for _, id in ipairs(ARGV) do
         table.insert(selected, {id, payload})
     end
 end
+
+local current = redis.call("XLEN", ready)
+if current + #selected > capacity then return -(current + 1) end
 
 for _, record in ipairs(selected) do
     redis.call("XADD", ready, "*", "payload", record[2])
@@ -137,7 +142,8 @@ func (t *redisTransport) Requeue(ctx context.Context, topology transport.Topolog
 	if len(messageIDs) > maxDLQAdminBatch {
 		return fmt.Errorf("redis: DLQ requeue batch exceeds %d records", maxDLQAdminBatch)
 	}
-	unique := make([]any, 0, len(messageIDs))
+	unique := make([]any, 0, len(messageIDs)+1)
+	unique = append(unique, maxReadyEntries(topology))
 	seen := make(map[string]struct{}, len(messageIDs))
 	for _, id := range messageIDs {
 		if !redisStreamID.MatchString(id) {
@@ -149,11 +155,15 @@ func (t *redisTransport) Requeue(ctx context.Context, topology transport.Topolog
 		seen[id] = struct{}{}
 		unique = append(unique, id)
 	}
-	if len(unique) == 0 {
+	if len(unique) == 1 {
 		return nil
 	}
-	if _, err := requeueScript.Run(ctx, t.rc, []string{t.dlqKey(topology), t.streamKey(topology)}, unique...).Int64(); err != nil {
+	result, err := requeueScript.Run(ctx, t.rc, []string{t.dlqKey(topology), t.streamKey(topology)}, unique...).Int64()
+	if err != nil {
 		return fmt.Errorf("redis: requeue DLQ: %w", err)
+	}
+	if result < 0 {
+		return t.capacityError(topology, "ready", -result-1, maxReadyEntries(topology))
 	}
 	return nil
 }

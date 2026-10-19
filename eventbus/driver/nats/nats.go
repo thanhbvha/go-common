@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -50,15 +51,16 @@ const dedupeBucket = "eventbus_dedupe_v2"
 const messageIDHeader = "X-EventBus-Message-Id"
 
 var (
-	_ transport.Transport         = (*natsTransport)(nil)
-	_ transport.Deduper           = (*natsTransport)(nil)
-	_ transport.TopologyDeduper   = (*natsTransport)(nil)
-	_ transport.DLQAdmin          = (*natsTransport)(nil)
-	_ transport.CursorDLQAdmin    = (*natsTransport)(nil)
-	_ transport.StatsReader       = (*natsTransport)(nil)
-	_ transport.TopologyValidator = (*natsTransport)(nil)
-	_ transport.Delivery          = (*natsDelivery)(nil)
-	_ transport.LeaseDelivery     = (*natsDelivery)(nil)
+	_ transport.Transport          = (*natsTransport)(nil)
+	_ transport.Deduper            = (*natsTransport)(nil)
+	_ transport.TopologyDeduper    = (*natsTransport)(nil)
+	_ transport.PublicationDeduper = (*natsTransport)(nil)
+	_ transport.DLQAdmin           = (*natsTransport)(nil)
+	_ transport.CursorDLQAdmin     = (*natsTransport)(nil)
+	_ transport.StatsReader        = (*natsTransport)(nil)
+	_ transport.TopologyValidator  = (*natsTransport)(nil)
+	_ transport.Delivery           = (*natsDelivery)(nil)
+	_ transport.LeaseDelivery      = (*natsDelivery)(nil)
 )
 
 func New(js gonats.JetStreamContext) transport.Transport {
@@ -309,6 +311,122 @@ func (t *natsTransport) ReleaseTopology(ctx context.Context, topo transport.Topo
 		return err
 	}
 	return t.release(ctx, dedupeStorageKey(&topo, key))
+}
+
+type publicationDedupeRecord struct {
+	State   string `json:"state"`
+	Owner   string `json:"owner"`
+	Expires int64  `json:"expires_unix_nano"`
+}
+
+func (t *natsTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	if err := topo.Validate(); err != nil {
+		return 0, err
+	}
+	if key == "" || reservationID == "" || ttl <= 0 {
+		return 0, fmt.Errorf("nats dedupe: key, reservation ID, and positive TTL required")
+	}
+	kv, err := t.js.KeyValue(dedupeBucket)
+	if err != nil {
+		return 0, fmt.Errorf("nats dedupe open bucket: %w", err)
+	}
+	storageKey := dedupeStorageKey(&topo, key)
+	record := publicationDedupeRecord{State: "reserved", Owner: reservationID, Expires: t.now().Add(ttl).UnixNano()}
+	value, err := json.Marshal(record)
+	if err != nil {
+		return 0, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if _, err := kv.Create(storageKey, value); err == nil {
+			return transport.DedupeReservationAcquired, nil
+		} else if !errors.Is(err, gonats.ErrKeyExists) {
+			return 0, fmt.Errorf("nats dedupe create: %w", err)
+		}
+		entry, err := kv.Get(storageKey)
+		if errors.Is(err, gonats.ErrKeyNotFound) || errors.Is(err, gonats.ErrKeyDeleted) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("nats dedupe read: %w", err)
+		}
+		var current publicationDedupeRecord
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			// A live v1 numeric reservation cannot prove publication.
+			if expires, legacyErr := strconv.ParseInt(string(entry.Value()), 10, 64); legacyErr == nil {
+				if t.now().UnixNano() < expires {
+					return transport.DedupeReservationPending, nil
+				}
+				current.Expires = expires
+			} else {
+				return 0, fmt.Errorf("nats dedupe invalid stored state: %w", err)
+			}
+		}
+		if t.now().UnixNano() < current.Expires {
+			switch current.State {
+			case "published":
+				return transport.DedupeReservationPublished, nil
+			case "reserved":
+				return transport.DedupeReservationPending, nil
+			default:
+				return 0, fmt.Errorf("nats dedupe invalid stored state %q", current.State)
+			}
+		}
+		if _, err := kv.Update(storageKey, value, entry.Revision()); err == nil {
+			return transport.DedupeReservationAcquired, nil
+		} else if errors.Is(err, gonats.ErrKeyExists) {
+			continue
+		} else {
+			return 0, fmt.Errorf("nats dedupe replace expired reservation: %w", err)
+		}
+	}
+}
+
+func (t *natsTransport) ConfirmPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {
+	return t.mutatePublicationDedupe(ctx, topo, key, reservationID, true)
+}
+
+func (t *natsTransport) AbortPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {
+	return t.mutatePublicationDedupe(ctx, topo, key, reservationID, false)
+}
+
+func (t *natsTransport) mutatePublicationDedupe(ctx context.Context, topo transport.Topology, key, reservationID string, confirm bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	kv, err := t.js.KeyValue(dedupeBucket)
+	if err != nil {
+		return fmt.Errorf("nats dedupe open bucket: %w", err)
+	}
+	storageKey := dedupeStorageKey(&topo, key)
+	entry, err := kv.Get(storageKey)
+	if !confirm && (errors.Is(err, gonats.ErrKeyNotFound) || errors.Is(err, gonats.ErrKeyDeleted)) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("nats dedupe read state: %w", err)
+	}
+	var record publicationDedupeRecord
+	if err := json.Unmarshal(entry.Value(), &record); err != nil || record.Owner != reservationID || record.State != "reserved" {
+		return transport.ErrDedupeAmbiguous
+	}
+	if confirm {
+		record.State = "published"
+		value, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		if _, err := kv.Update(storageKey, value, entry.Revision()); err != nil {
+			return fmt.Errorf("nats dedupe confirm: %w", err)
+		}
+		return nil
+	}
+	if err := kv.Delete(storageKey, gonats.LastRevision(entry.Revision())); err != nil && !errors.Is(err, gonats.ErrKeyNotFound) && !errors.Is(err, gonats.ErrKeyDeleted) {
+		return fmt.Errorf("nats dedupe abort: %w", err)
+	}
+	return nil
 }
 
 func dedupeStorageKey(topo *transport.Topology, key string) string {

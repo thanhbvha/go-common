@@ -235,7 +235,7 @@ func TestKafkaStatsUsesEndAndCommittedOffsets(t *testing.T) {
 		commits: make(map[string]map[string]map[int32]int64),
 	}
 	admin.starts[main], admin.ends[main] = map[int32]int64{0: 0, 1: 2}, map[int32]int64{0: 10, 1: 5}
-	admin.commits[topo.Name()+"-group"] = map[string]map[int32]int64{main: {0: 4}}
+	admin.commits[topo.ConsumerName("")] = map[string]map[int32]int64{main: {0: 4}}
 	for i, tier := range delayTiers {
 		topic := backend.delayTopic(topo, tier)
 		admin.starts[topic], admin.ends[topic] = map[int32]int64{0: 0}, map[int32]int64{0: int64(i + 1)}
@@ -264,12 +264,12 @@ func TestKafkaEventStatsAggregateOnlySubscriberGroups(t *testing.T) {
 		ends:    map[string]map[int32]int64{main: {0: 5}, dlq: {0: 0}},
 		commits: make(map[string]map[string]map[int32]int64),
 		groups: []string{
-			topo.Name() + "-alpha", topo.Name() + "-beta", topo.Name() + "-dlq-admin",
+			topo.ConsumerName("alpha"), topo.ConsumerName("beta"), topo.Name() + "-dlq-admin",
 			"unrelated-group",
 		},
 	}
-	admin.commits[topo.Name()+"-alpha"] = map[string]map[int32]int64{main: {0: 3}}
-	admin.commits[topo.Name()+"-beta"] = map[string]map[int32]int64{main: {0: 4}}
+	admin.commits[topo.ConsumerName("alpha")] = map[string]map[int32]int64{main: {0: 3}}
+	admin.commits[topo.ConsumerName("beta")] = map[string]map[int32]int64{main: {0: 4}}
 	for _, tier := range delayTiers {
 		topic := backend.delayTopic(topo, tier)
 		admin.starts[topic], admin.ends[topic] = map[int32]int64{0: 0}, map[int32]int64{0: 0}

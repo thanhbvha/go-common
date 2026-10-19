@@ -62,7 +62,21 @@ func TestDLQUsesNormalizedSourceMetadata(t *testing.T) {
 	defer backend.Close(context.Background())
 	topo := transport.Topology{Namespace: "test", JobType: "metadata"}
 	source := transport.Message{ID: "envelope-id", Type: "metadata", OrderingKey: "ordering", DedupeKey: "dedupe", Headers: map[string]string{"correlation-id": "synthetic"}, Payload: []byte(`{"v":3}`)}
-	delivery := &memoryDelivery{transport: backend, topo: topo, msg: transport.Message{ID: "stale"}}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Publish(context.Background(), topo, transport.Message{ID: "stale", Payload: source.Payload}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deliveries := make(chan transport.Delivery, 1)
+	go func() {
+		_ = backend.Consume(ctx, transport.Subscription{Topology: topo}, func(delivery transport.Delivery) {
+			deliveries <- delivery
+		})
+	}()
+	delivery := <-deliveries
 	if err := delivery.Settle(context.Background(), transport.Decision{Kind: transport.DecisionDeadLetter, Source: &source, Reason: "synthetic"}); err != nil {
 		t.Fatal(err)
 	}
@@ -73,5 +87,26 @@ func TestDLQUsesNormalizedSourceMetadata(t *testing.T) {
 	msg := records[0].Message
 	if msg.ID != source.ID || msg.Type != source.Type || msg.OrderingKey != source.OrderingKey || msg.DedupeKey != source.DedupeKey || msg.Headers["correlation-id"] != "synthetic" {
 		t.Fatal("DLQ used raw broker metadata")
+	}
+}
+
+func TestMemoryPublicationDedupeRequiresConfirmedState(t *testing.T) {
+	backend := New().(*memoryTransport)
+	ctx := context.Background()
+	topo := transport.Topology{Namespace: "dedupe", JobType: "task"}
+	state, err := backend.BeginPublication(ctx, topo, "same", "owner-1", time.Minute)
+	if err != nil || state != transport.DedupeReservationAcquired {
+		t.Fatalf("begin = %d, %v", state, err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-2", time.Minute)
+	if err != nil || state != transport.DedupeReservationPending {
+		t.Fatalf("pending = %d, %v", state, err)
+	}
+	if err := backend.ConfirmPublication(ctx, topo, "same", "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = backend.BeginPublication(ctx, topo, "same", "owner-3", time.Minute)
+	if err != nil || state != transport.DedupeReservationPublished {
+		t.Fatalf("published = %d, %v", state, err)
 	}
 }

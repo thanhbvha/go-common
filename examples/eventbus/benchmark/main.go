@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus"
-	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
 	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
 )
 
@@ -129,9 +128,6 @@ func run(args []string) (returnErr error) {
 		eventbus.WithMaxAttempts(2),
 		eventbus.WithMaxPayloadBytes(128*1024),
 	)
-	if cfg.Preload && cfg.Driver == "redis" {
-		topologyOptions = append(topologyOptions, redisdriver.WithMaxLen(int64(cfg.Messages)))
-	}
 	const topology = "phase6_benchmark"
 	if err := bus.DeclareTask(topology, topologyOptions...); err != nil {
 		return err

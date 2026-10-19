@@ -35,6 +35,9 @@ func TestMemoryAdvertisesOnlyImplementedOptionalInterfaces(t *testing.T) {
 	if _, ok := backend.(transport.Deduper); !ok {
 		t.Fatal("memory transport does not advertise Deduper")
 	}
+	if _, ok := backend.(transport.PublicationDeduper); !ok {
+		t.Fatal("memory transport does not advertise PublicationDeduper")
+	}
 	if _, ok := backend.(transport.DLQAdmin); !ok {
 		t.Fatal("memory transport does not advertise DLQAdmin")
 	}

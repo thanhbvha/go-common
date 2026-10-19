@@ -43,3 +43,23 @@ avoiding redundant envelope materialization after trace injection and reducing
 per-delivery context/span bookkeeping. Any optimization must retain payload
 validation before broker I/O, propagation, lease safety, bounded concurrency,
 confirmed settlement, and observability behavior.
+
+## P6.7.2 Memory hardening addendum
+
+P6.7.2 replaces Memory's channel fast path with atomic multi-subscriber capacity
+checks, queued/in-flight redelivery state, metadata isolation, a bounded heap
+scheduler, scheduler health, and source-scoped retry/DLQ transfer. A Linux/amd64
+i7-12700F smoke run with Go 1.26.0 and `-benchtime=100x` measured:
+
+| Benchmark | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| EngineDispatch | 14,859 | 6,390 | 69 |
+| MemoryTransportRoundTrip | 3,042 | 1,333 | 20 |
+
+These figures are not directly comparable to the Windows Phase 6 baseline, but
+the allocation shape confirms an intentional implementation cost. Accept it for
+P6.7.2 because the previous fast path returned success after drops, could lose
+pre-consume events, and created one timer goroutine per delayed message. Future
+optimization may reduce cloning and state allocations, but must retain atomic
+fan-out, bounded admission, redelivery, subscriber isolation, and joined
+scheduler behavior.

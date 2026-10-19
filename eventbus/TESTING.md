@@ -7,6 +7,14 @@ Docker:
 go test ./eventbus/...
 ```
 
+The Memory package runs the same reusable transport contract as durable drivers
+for every applicable in-process capability. Its focused tests additionally cover
+atomic capacity saturation, publish-before-consume event groups, concurrent
+publication, scheduler ordering/capacity/close, settlement redelivery,
+subscriber-scoped retry and DLQ requeue, topology-scoped dedupe, complete stats,
+and post-close behavior. Durable restart and multi-process scenarios are
+capability-inapplicable rather than simulated.
+
 Tests that exercise a broker or an implementation spike use the `integration`
 build tag:
 
@@ -63,7 +71,7 @@ Integration prerequisites:
 docker compose -f eventbus/driver/redis/testdata/compose.yaml up -d --wait
 $env:EVENTBUS_REDIS_ADDR='127.0.0.1:16379'
 $env:EVENTBUS_REDIS_CLUSTER_ADDRS='127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002'
-go test -tags=integration ./eventbus/driver/redis -run 'ContractIntegration' -count=1
+go test -tags=integration ./eventbus/driver/redis -run 'ContractIntegration|RetentionIntegration' -count=1
 docker compose -f eventbus/driver/redis/testdata/compose.yaml down -v
 ```
 
