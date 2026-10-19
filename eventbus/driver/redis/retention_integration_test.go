@@ -59,7 +59,7 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 	first := New(rc).(*redisTransport)
 	t.Cleanup(func() { _ = first.Close(context.Background()) })
 	topo := transport.Topology{Namespace: namespace, JobType: "watermark", Kind: transport.EventTopology,
-		Options: map[string]any{"redis.retention_interval": time.Hour, "redis.retention_batch_size": int64(100)}}
+		Options: map[string]any{"redis.retention_interval": time.Hour, "redis.retention_batch_size": int64(100), redisEventLayoutOption: redisTargetedLayoutV1}}
 	for _, group := range []string{"fast", "slow"} {
 		if err := first.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: group}); err != nil {
 			t.Fatal(err)
@@ -156,7 +156,7 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 	}
 
 	capacityTopo := transport.Topology{Namespace: namespace, JobType: "offline-capacity", Kind: transport.EventTopology,
-		Options: map[string]any{"redis.max_ready_entries": int64(32), "redis.retention_interval": time.Hour}}
+		Options: map[string]any{"redis.max_ready_entries": int64(32), "redis.retention_interval": time.Hour, redisEventLayoutOption: redisTargetedLayoutV1}}
 	if err := restarted.EnsureSubscription(ctx, transport.Subscription{Topology: capacityTopo, Group: "offline"}); err != nil {
 		t.Fatal(err)
 	}

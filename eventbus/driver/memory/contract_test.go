@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
+	buscontract "github.com/thanhbvha/go-common/eventbus/contracttest"
 	"github.com/thanhbvha/go-common/eventbus/transport"
-	"github.com/thanhbvha/go-common/eventbus/transport/contracttest"
+	transportcontract "github.com/thanhbvha/go-common/eventbus/transport/contracttest"
 )
 
 func TestMemoryTransportContract(t *testing.T) {
-	contracttest.Run(t, contracttest.Harness{
+	transportcontract.Run(t, transportcontract.Harness{
 		New: func(t *testing.T) transport.Transport {
 			backend := New()
 			t.Cleanup(func() { _ = backend.Close(context.Background()) })
@@ -22,7 +23,27 @@ func TestMemoryTransportContract(t *testing.T) {
 		DispatchDue: func(ctx context.Context, tr transport.Transport, _ transport.Topology, now time.Time) (int64, error) {
 			return tr.(*memoryTransport).dispatchDue(ctx, now)
 		},
-		ExpireDedupe:  func(_ *testing.T, duration time.Duration) { time.Sleep(duration) },
+		ExpireDedupe:               func(_ *testing.T, duration time.Duration) { time.Sleep(duration) },
+		PrepareUnsettledRedelivery: func(*testing.T, transport.Topology) {},
+		SubscriberRetryIsolation:   true,
+		SubscriberDLQIsolation:     true,
+		ReceiveWithin:              time.Second,
+	})
+}
+
+func TestMemoryBusContract(t *testing.T) {
+	buscontract.Run(t, buscontract.Harness{
+		New: func(t *testing.T) transport.Transport {
+			backend := New()
+			t.Cleanup(func() { _ = backend.Close(context.Background()) })
+			return backend
+		},
+		Topology: func(name string, kind transport.TopologyKind) transport.Topology {
+			return transport.Topology{Namespace: "memory-bus-contract", JobType: name, Kind: kind}
+		},
+		DispatchDue: func(ctx context.Context, tr transport.Transport, _ transport.Topology, now time.Time) (int64, error) {
+			return tr.(*memoryTransport).dispatchDue(ctx, now)
+		},
 		ReceiveWithin: time.Second,
 	})
 }

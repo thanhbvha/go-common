@@ -20,12 +20,21 @@ func (*redisTransport) streamKey(topo transport.Topology) string {
 func (*redisTransport) delayedKey(topo transport.Topology) string {
 	return topologyPrefix(topo) + ":delayed"
 }
+func (*redisTransport) subscriberRetryStreamKey(topo transport.Topology, group string) string {
+	return topologyPrefix(topo) + ":retry:" + base64.RawURLEncoding.EncodeToString([]byte(group)) + ":stream"
+}
+func (*redisTransport) subscriberRetryDelayedKey(topo transport.Topology, group string) string {
+	return topologyPrefix(topo) + ":retry:" + base64.RawURLEncoding.EncodeToString([]byte(group)) + ":delayed"
+}
 func (*redisTransport) dlqKey(topo transport.Topology) string { return topologyPrefix(topo) + ":dlq" }
 func (*redisTransport) metadataKey(topo transport.Topology) string {
 	return topologyPrefix(topo) + ":metadata"
 }
 func (*redisTransport) groupManifestKey(topo transport.Topology) string {
 	return topologyPrefix(topo) + ":groups"
+}
+func (*redisTransport) groupIndexKey(topo transport.Topology) string {
+	return topologyPrefix(topo) + ":group-index"
 }
 func (*redisTransport) retentionLeaseKey(topo transport.Topology) string {
 	return topologyPrefix(topo) + ":retention-lease"

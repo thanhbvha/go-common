@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -26,6 +28,9 @@ type fakeKafkaAdmin struct {
 	partitionResponses kadm.CreatePartitionsResponses
 	partitionCalls     []string
 	partitionErrTopic  string
+	listEndHook        func()
+	listStartResponses []kadm.ListedOffsets
+	listStartCalls     int
 }
 
 func (*fakeKafkaAdmin) CreateTopics(context.Context, int32, int16, map[string]*string, ...string) (kadm.CreateTopicResponses, error) {
@@ -74,7 +79,7 @@ func kafkaAdminMetadata(topics []string, partitions int, replicas int) kadm.Meta
 		detail := kadm.TopicDetail{Topic: topic, Partitions: make(kadm.PartitionDetails, partitions)}
 		for partition := range partitions {
 			replicaIDs := make([]int32, replicas)
-			detail.Partitions[int32(partition)] = kadm.PartitionDetail{Topic: topic, Partition: int32(partition), Replicas: replicaIDs}
+			detail.Partitions[int32(partition)] = kadm.PartitionDetail{Topic: topic, Partition: int32(partition), Leader: 0, Replicas: replicaIDs}
 		}
 		metadata.Topics[topic] = detail
 	}
@@ -93,13 +98,32 @@ func kafkaAdminConfigs(topics []string, values map[string]string) kadm.ResourceC
 	}
 	return configs
 }
+
+func provisionKafkaSubscriber(backend *kafkaTransport, admin *fakeKafkaAdmin, topology transport.Topology, group string) {
+	privateTopic := backend.privateReadyTopic(topology, group)
+	marker := backend.subscriberMarkerTopic(topology, group)
+	layout := backend.eventLayoutTopic(topology)
+	admin.metadata = kafkaAdminMetadata([]string{privateTopic, marker, layout}, 1, 1)
+	admin.configs = append(
+		kafkaAdminConfigs([]string{privateTopic}, map[string]string{"cleanup.policy": "delete"}),
+		kafkaAdminConfigs([]string{marker}, subscriberMarkerConfigs())...,
+	)
+}
 func (a *fakeKafkaAdmin) Metadata(context.Context, ...string) (kadm.Metadata, error) {
 	return a.metadata, nil
 }
 func (a *fakeKafkaAdmin) ListStartOffsets(_ context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	if a.listStartCalls < len(a.listStartResponses) {
+		response := a.listStartResponses[a.listStartCalls]
+		a.listStartCalls++
+		return response, nil
+	}
 	return a.listed(a.starts, topics), nil
 }
 func (a *fakeKafkaAdmin) ListEndOffsets(_ context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	if a.listEndHook != nil {
+		a.listEndHook()
+	}
 	return a.listed(a.ends, topics), nil
 }
 func (a *fakeKafkaAdmin) ListGroups(context.Context, ...string) (kadm.ListedGroups, error) {
@@ -274,6 +298,7 @@ func TestKafkaDLQAdminUsesLogicalAppendOnlyCursor(t *testing.T) {
 		ends:    map[string]map[int32]int64{topic: {0: 2, 1: 1}},
 		commits: make(map[string]map[string]map[int32]int64),
 	}
+	provisionKafkaSubscriber(backend, admin, topo, "alpha")
 	backend.adm = admin
 	records := map[int32][]*kgo.Record{
 		0: {kafkaAdminRecord(t, topic, 0, 0, "zero"), kafkaAdminRecord(t, topic, 0, 1, "one")},
@@ -362,6 +387,112 @@ func TestKafkaDLQRequeueFailureNeverAdvancesCursor(t *testing.T) {
 	}
 }
 
+func TestKafkaDLQRequeueLeaseLossStopsBeforeNextPublishAndCursor(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "requeue-lease-loss"}
+	backend := &kafkaTransport{}
+	topic := backend.dlqTopic(topo)
+	admin := &fakeKafkaAdmin{
+		starts:  map[string]map[int32]int64{topic: {0: 0}},
+		ends:    map[string]map[int32]int64{topic: {0: 2}},
+		commits: make(map[string]map[string]map[int32]int64),
+	}
+	backend.adm = admin
+	backend.scanDLQ = func(context.Context, string, int32, int64, int64, int) ([]*kgo.Record, error) {
+		return []*kgo.Record{kafkaAdminRecord(t, topic, 0, 0, "zero"), kafkaAdminRecord(t, topic, 0, 1, "one")}, nil
+	}
+	var lease *dlqAdminLease
+	backend.dlqLease = func(ctx context.Context, _ transport.Topology) (*dlqAdminLease, error) {
+		lease = newLocalDLQAdminLease(ctx)
+		return lease, nil
+	}
+	var published []string
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
+		published = append(published, string(record.Value))
+		lease.lose()
+		return nil
+	})
+
+	err := backend.Requeue(context.Background(), topo, []string{"0:0", "0:1"})
+	if !errors.Is(err, errKafkaDLQAdminLeaseLost) {
+		t.Fatalf("requeue error = %v, want lease loss", err)
+	}
+	if !reflect.DeepEqual(published, []string{"zero"}) {
+		t.Fatalf("published after lease loss = %q", published)
+	}
+	if admin.commits[backend.dlqAdminGroup(topo)] != nil {
+		t.Fatal("stale requeue advanced the DLQ cursor")
+	}
+}
+
+func TestKafkaDLQPurgeLeaseLossStopsBeforeCursor(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "purge-lease-loss"}
+	backend := &kafkaTransport{}
+	topic := backend.dlqTopic(topo)
+	admin := &fakeKafkaAdmin{
+		ends:    map[string]map[int32]int64{topic: {0: 2}},
+		commits: make(map[string]map[string]map[int32]int64),
+	}
+	backend.adm = admin
+	var lease *dlqAdminLease
+	backend.dlqLease = func(ctx context.Context, _ transport.Topology) (*dlqAdminLease, error) {
+		lease = newLocalDLQAdminLease(ctx)
+		return lease, nil
+	}
+	admin.listEndHook = func() { lease.lose() }
+
+	err := backend.Purge(context.Background(), topo)
+	if !errors.Is(err, errKafkaDLQAdminLeaseLost) {
+		t.Fatalf("purge error = %v, want lease loss", err)
+	}
+	if admin.commits[backend.dlqAdminGroup(topo)] != nil {
+		t.Fatal("stale purge advanced the DLQ cursor")
+	}
+}
+
+func TestKafkaEventDLQRequeueTargetsSourceSubscriberAndRejectsOldRecords(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "events", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
+	backend := &kafkaTransport{}
+	topic := backend.dlqTopic(topo)
+	admin := &fakeKafkaAdmin{
+		starts: map[string]map[int32]int64{topic: {0: 0}}, ends: map[string]map[int32]int64{topic: {0: 1}},
+		commits: make(map[string]map[string]map[int32]int64),
+	}
+	provisionKafkaSubscriber(backend, admin, topo, "alpha")
+	backend.adm = admin
+	makeRecord := func(group string) *kgo.Record {
+		payload, err := json.Marshal(kafkaDLQRecord{
+			Version: kafkaDLQRecordVersion, Message: transport.Message{Payload: []byte("event"), Headers: map[string]string{kafkaTargetGroupHeader: "forged"}},
+			FailedAt: time.Now().UnixMilli(), SourceTopic: backend.mainTopic(topo), SourceGroup: group,
+			SourcePartition: 0, SourceOffset: 0, SourceTimestamp: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &kgo.Record{Topic: topic, Partition: 0, Offset: 0, Value: payload}
+	}
+	current := makeRecord("alpha")
+	backend.scanDLQ = func(context.Context, string, int32, int64, int64, int) ([]*kgo.Record, error) {
+		return []*kgo.Record{current}, nil
+	}
+	var produced *kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error { produced = record; return nil })
+	if err := backend.Requeue(context.Background(), topo, []string{"0:0"}); err != nil {
+		t.Fatal(err)
+	}
+	if produced == nil || produced.Topic != backend.privateReadyTopic(topo, "alpha") || recordMessage(produced).Headers != nil {
+		t.Fatalf("requeued record = %#v", produced)
+	}
+	admin.commits = make(map[string]map[string]map[int32]int64)
+	current = makeRecord("")
+	produced = nil
+	if err := backend.Requeue(context.Background(), topo, []string{"0:0"}); err == nil {
+		t.Fatal("old event DLQ record without source group was requeued")
+	}
+	if produced != nil || admin.commits[backend.dlqAdminGroup(topo)] != nil {
+		t.Fatal("failed-closed requeue mutated destination or cursor")
+	}
+}
+
 func TestKafkaStatsUsesEndAndCommittedOffsets(t *testing.T) {
 	topo := transport.Topology{Namespace: "stats", JobType: "jobs"}
 	backend := &kafkaTransport{}
@@ -392,22 +523,57 @@ func TestKafkaStatsUsesEndAndCommittedOffsets(t *testing.T) {
 	}
 }
 
+func TestKafkaLogicalOffsetsRetriesTransientLeaderError(t *testing.T) {
+	topo := transport.Topology{Namespace: "stats", JobType: "leader-retry"}
+	backend := &kafkaTransport{}
+	topic := backend.mainTopic(topo)
+	admin := &fakeKafkaAdmin{
+		starts: map[string]map[int32]int64{topic: {0: 0}},
+		ends:   map[string]map[int32]int64{topic: {0: 1}},
+		listStartResponses: []kadm.ListedOffsets{
+			{topic: {0: kadm.ListedOffset{Topic: topic, Partition: 0, Err: kerr.LeaderNotAvailable}}},
+		},
+	}
+	backend.adm = admin
+
+	starts, ends, err := backend.logicalOffsets(context.Background(), topic, kafkaConsumerGroup(topo, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.listStartCalls != 1 || starts[0] != 0 || ends[0] != 1 {
+		t.Fatalf("calls=%d starts=%v ends=%v", admin.listStartCalls, starts, ends)
+	}
+}
+
 func TestKafkaEventStatsAggregateOnlySubscriberGroups(t *testing.T) {
-	topo := transport.Topology{Namespace: "stats", JobType: "events", Kind: transport.EventTopology}
+	topo := transport.Topology{Namespace: "stats", JobType: "events", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
 	backend := &kafkaTransport{}
 	main := backend.mainTopic(topo)
 	dlq := backend.dlqTopic(topo)
+	alphaPrivate := backend.privateReadyTopic(topo, "alpha")
+	betaPrivate := backend.privateReadyTopic(topo, "beta")
+	alphaMarker := backend.subscriberMarkerTopic(topo, "alpha")
+	betaMarker := backend.subscriberMarkerTopic(topo, "beta")
 	admin := &fakeKafkaAdmin{
-		starts:  map[string]map[int32]int64{main: {0: 0}, dlq: {0: 0}},
-		ends:    map[string]map[int32]int64{main: {0: 5}, dlq: {0: 0}},
+		starts: map[string]map[int32]int64{
+			main: {0: 0}, dlq: {0: 0}, alphaPrivate: {0: 0}, betaPrivate: {0: 0},
+		},
+		ends: map[string]map[int32]int64{
+			main: {0: 5}, dlq: {0: 0}, alphaPrivate: {0: 2}, betaPrivate: {0: 1},
+		},
 		commits: make(map[string]map[string]map[int32]int64),
 		groups: []string{
 			topo.ConsumerName("alpha"), topo.ConsumerName("beta"), topo.Name() + "-dlq-admin",
-			"unrelated-group",
+			topo.ConsumerName("hostile"), "unrelated-group",
 		},
+		metadata: kafkaAdminMetadata([]string{alphaPrivate, alphaMarker, betaPrivate, betaMarker}, 1, 1),
 	}
-	admin.commits[topo.ConsumerName("alpha")] = map[string]map[int32]int64{main: {0: 3}}
-	admin.commits[topo.ConsumerName("beta")] = map[string]map[int32]int64{main: {0: 4}}
+	admin.configs = append(
+		kafkaAdminConfigs([]string{alphaPrivate, betaPrivate}, map[string]string{"cleanup.policy": "delete"}),
+		kafkaAdminConfigs([]string{alphaMarker, betaMarker}, subscriberMarkerConfigs())...,
+	)
+	admin.commits[topo.ConsumerName("alpha")] = map[string]map[int32]int64{main: {0: 3}, alphaPrivate: {0: 1}}
+	admin.commits[topo.ConsumerName("beta")] = map[string]map[int32]int64{main: {0: 4}, betaPrivate: {0: 1}}
 	for _, tier := range delayTiers {
 		topic := backend.delayTopic(topo, tier)
 		admin.starts[topic], admin.ends[topic] = map[int32]int64{0: 0}, map[int32]int64{0: 0}
@@ -417,8 +583,32 @@ func TestKafkaEventStatsAggregateOnlySubscriberGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Pending != 3 || stats.Lag != 3 {
+	if stats.Pending != 4 || stats.Lag != 4 {
 		t.Fatalf("event stats = %#v", stats)
+	}
+}
+
+func TestKafkaSubscriptionStatsDoesNotAttributeSharedTargetedDelayLag(t *testing.T) {
+	topo := transport.Topology{Namespace: "stats", JobType: "events", Kind: transport.EventTopology}
+	backend := &kafkaTransport{}
+	group := kafkaConsumerGroup(topo, "alpha")
+	main, private := backend.mainTopic(topo), backend.privateReadyTopic(topo, "alpha")
+	admin := &fakeKafkaAdmin{starts: make(map[string]map[int32]int64), ends: make(map[string]map[int32]int64), commits: make(map[string]map[string]map[int32]int64)}
+	admin.starts[main], admin.ends[main] = map[int32]int64{0: 0}, map[int32]int64{0: 5}
+	admin.starts[private], admin.ends[private] = map[int32]int64{0: 0}, map[int32]int64{0: 3}
+	admin.commits[group] = map[string]map[int32]int64{main: {0: 4}, private: {0: 1}}
+	for i, tier := range delayTiers {
+		topic := backend.targetedDelayTopic(topo, tier)
+		admin.starts[topic], admin.ends[topic] = map[int32]int64{0: 0}, map[int32]int64{0: int64(i + 2)}
+		admin.commits[fmt.Sprintf("%s-target-delay-%s-group", topo.Name(), tier)] = map[string]map[int32]int64{topic: {0: int64(i)}}
+	}
+	backend.adm = admin
+	stats, err := backend.SubscriptionStats(context.Background(), transport.Subscription{Topology: topo, Group: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pending != 3 || stats.Lag != 3 || stats.Delayed != 0 || !stats.LagKnown || stats.OldestAgeKnown {
+		t.Fatalf("subscription stats = %#v", stats)
 	}
 }
 

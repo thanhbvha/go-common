@@ -11,7 +11,10 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-const kafkaRunAtHeader = "X-EventBus-Run-At"
+const (
+	kafkaRunAtHeader       = "X-EventBus-Run-At"
+	kafkaTargetGroupHeader = "X-EventBus-Internal-Target-Group"
+)
 
 type recordProducer interface {
 	ProduceSync(context.Context, ...*kgo.Record) kgo.ProduceResults
@@ -71,6 +74,13 @@ func removeMessageHeader(msg *transport.Message, key string) {
 	if len(msg.Headers) == 0 {
 		msg.Headers = nil
 	}
+}
+
+func setMessageHeader(msg *transport.Message, key, value string) {
+	if msg.Headers == nil {
+		msg.Headers = make(map[string]string)
+	}
+	msg.Headers[key] = value
 }
 
 func recordMessage(record *kgo.Record) transport.Message {

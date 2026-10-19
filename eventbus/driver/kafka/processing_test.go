@@ -241,7 +241,7 @@ func TestRebalanceStopsNewPartitionIntakeAndDrainsInFlight(t *testing.T) {
 		}
 		done := make(chan dispatchResult, 1)
 		go func() {
-			rewind, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, coordinator, rebalances,
+			rewind, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, "", coordinator, rebalances,
 				[]*kgo.Record{processingRecord(0, 0), processingRecord(0, 1)}, func(d transport.Delivery) { received <- d })
 			done <- dispatchResult{rewind: rewind, err: err}
 		}()
@@ -280,7 +280,7 @@ func TestConsumeAllowsRebalanceOnlyAfterSettlement(t *testing.T) {
 		received := make(chan transport.Delivery, 1)
 		done := make(chan error, 1)
 		go func() {
-			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Topology{}, client, coordinator, nil, 1, func(d transport.Delivery) { received <- d })
+			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Subscription{}, client, coordinator, nil, 1, func(d transport.Delivery) { received <- d })
 		}()
 		delivery := <-received
 		synctest.Wait()
@@ -318,7 +318,7 @@ func TestPartitionProcessingOrderAndConcurrency(t *testing.T) {
 		received := make(chan *kafkaDelivery, 4)
 		done := make(chan error, 1)
 		go func() {
-			_, err := (&kafkaTransport{}).dispatchBatch(ctx, transport.Topology{}, coordinator, nil,
+			_, err := (&kafkaTransport{}).dispatchBatch(ctx, transport.Topology{}, "", coordinator, nil,
 				[]*kgo.Record{processingRecord(0, 10), processingRecord(0, 12), processingRecord(1, 30), processingRecord(1, 31)},
 				func(d transport.Delivery) { received <- d.(*kafkaDelivery) })
 			done <- err
@@ -371,7 +371,7 @@ func TestPartitionProcessingBoundsPollingAndCancellation(t *testing.T) {
 		received := make(chan transport.Delivery, 5)
 		done := make(chan error, 1)
 		go func() {
-			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Topology{}, client, coordinator, nil, 3, func(d transport.Delivery) { received <- d })
+			done <- (&kafkaTransport{}).consumeRecords(ctx, transport.Subscription{}, client, coordinator, nil, 3, func(d transport.Delivery) { received <- d })
 		}()
 		synctest.Wait()
 		if len(client.polls) != 1 || client.polls[0] != 3 || len(client.records) != 2 || len(received) != 2 {
@@ -401,7 +401,7 @@ func TestPartitionProcessingSettlementFailureStopsLaterOffsets(t *testing.T) {
 		received := make(chan transport.Delivery, 2)
 		done := make(chan error, 1)
 		go func() {
-			_, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, coordinator, nil,
+			_, err := (&kafkaTransport{}).dispatchBatch(context.Background(), transport.Topology{}, "", coordinator, nil,
 				[]*kgo.Record{processingRecord(0, 0), processingRecord(0, 1)}, func(d transport.Delivery) { received <- d })
 			done <- err
 		}()
@@ -446,6 +446,38 @@ func TestKafkaAdvertisesPartitionOrderingAfterSafeRebalance(t *testing.T) {
 	}
 }
 
+func TestKafkaOrderingDoesNotSerializeAcrossPhysicalTopics(t *testing.T) {
+	topo := transport.Topology{Namespace: "ordering", JobType: "events", Kind: transport.EventTopology}
+	backend := &kafkaTransport{}
+	main := processingRecord(0, 0)
+	main.Topic = backend.mainTopic(topo)
+	private := processingRecord(0, 0)
+	private.Topic = backend.privateReadyTopic(topo, "alpha")
+	coordinator := newOffsetCoordinator(&processingConsumer{}, 2)
+	defer coordinator.close()
+	received := make(chan *kafkaDelivery, 2)
+	done := make(chan error, 1)
+	go func() {
+		_, err := backend.dispatchBatch(context.Background(), topo, "alpha", coordinator, nil, []*kgo.Record{main, private}, func(delivery transport.Delivery) {
+			received <- delivery.(*kafkaDelivery)
+		})
+		done <- err
+	}()
+	first, second := <-received, <-received
+	if first.record.Topic == second.record.Topic {
+		t.Fatalf("deliveries unexpectedly share topic %q", first.record.Topic)
+	}
+	if err := second.Settle(context.Background(), transport.Decision{Kind: transport.DecisionAck}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Settle(context.Background(), transport.Decision{Kind: transport.DecisionAck}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type engineProcessingTransport struct {
 	*kafkaTransport
 	client *processingConsumer
@@ -460,7 +492,7 @@ func (t *engineProcessingTransport) Consume(ctx context.Context, sub transport.S
 		return err
 	}
 	coordinator := newOffsetCoordinator(t.client, capacity)
-	err = t.consumeRecords(ctx, sub.Topology, t.client, coordinator, nil, capacity, deliver)
+	err = t.consumeRecords(ctx, sub, t.client, coordinator, nil, capacity, deliver)
 	if sub.WaitForHandlers != nil {
 		sub.WaitForHandlers()
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,6 +127,99 @@ func TestDelayedDispatchMultipleSweepers(t *testing.T) {
 		}
 		seen[value] = true
 	}
+}
+
+func TestEventDelayedDispatchIsBoundedAndFairAcrossSubscriberLanes(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "fair", Kind: transport.EventTopology, Options: map[string]any{"redis.delay_batch_size": 1, redisEventLayoutOption: redisTargetedLayoutV1}}
+	ensureTargetedEventTopology(t, backend, topo)
+	for _, name := range []string{"alpha", "beta"} {
+		sub := transport.Subscription{Topology: topo, Group: name}
+		if err := backend.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+		group := backend.groupName(sub)
+		if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, group), goredis.Z{Score: float64(now.UnixMilli()), Member: name}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backend.PublishAt(ctx, topo, transport.Message{Payload: []byte("shared")}, now); err != nil {
+		t.Fatal(err)
+	}
+	for pass := range 3 {
+		moved, err := backend.dispatchDue(ctx, topo, now)
+		if err != nil || moved != 1 {
+			t.Fatalf("pass %d moved = %d, %v", pass, moved, err)
+		}
+	}
+	if moved, err := backend.dispatchDue(ctx, topo, now); err != nil || moved != 0 {
+		t.Fatalf("fourth pass moved = %d, %v", moved, err)
+	}
+	if count, err := rc.XLen(ctx, backend.streamKey(topo)).Result(); err != nil || count != 1 {
+		t.Fatalf("shared ready = %d, %v", count, err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		group := "subscriber:" + name
+		if count, err := rc.XLen(ctx, backend.subscriberRetryStreamKey(topo, group)).Result(); err != nil || count != 1 {
+			t.Fatalf("%s private ready = %d, %v", name, count, err)
+		}
+	}
+}
+
+func TestEventDelayedDispatchScansBoundedSubscriberPages(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "bounded-scan", Kind: transport.EventTopology, Options: map[string]any{"redis.delay_batch_size": 1000, redisEventLayoutOption: redisTargetedLayoutV1}}
+	ensureTargetedEventTopology(t, backend, topo)
+	for index := range 200 {
+		sub := transport.Subscription{Topology: topo, Group: fmt.Sprintf("subscriber-%03d", index)}
+		if err := backend.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+		group := backend.groupName(sub)
+		if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, group), goredis.Z{Score: float64(now.UnixMilli()), Member: group}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hook := &schedulerCommandHook{}
+	rc.AddHook(hook)
+	moved, err := backend.dispatchDue(ctx, topo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved > schedulerLaneScanMax || hook.zrange.Load() > 2 || hook.scripts.Load() > 2*schedulerLaneScanMax {
+		t.Fatalf("moved=%d range=%d scripts=%d", moved, hook.zrange.Load(), hook.scripts.Load())
+	}
+	remaining, err := rc.HLen(ctx, backend.groupManifestKey(topo)).Result()
+	if err != nil || remaining != 200 {
+		t.Fatalf("manifest changed during bounded scan: %d, %v", remaining, err)
+	}
+}
+
+type schedulerCommandHook struct {
+	zrange  atomic.Int64
+	scripts atomic.Int64
+}
+
+func (h *schedulerCommandHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (h *schedulerCommandHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		switch strings.ToLower(cmd.Name()) {
+		case "zrangebylex":
+			h.zrange.Add(1)
+		case "eval", "evalsha":
+			h.scripts.Add(1)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *schedulerCommandHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return next
 }
 
 // Redis scripts do not roll back runtime errors. Wrong-type keys must fail

@@ -1,9 +1,11 @@
 # EventBus transport contract coverage
 
 The reusable driver boundary suite lives in `transport/contracttest`. It checks
-durable publish/consume/ACK, retry transfer, DLQ administration/requeue,
-delayed delivery, event fan-out groups, topology-scoped dedupe expiry/release,
-statistics, and malformed payload settlement. Memory runs every applicable
+durable publish/consume/ACK, single-use settlement, deterministic unsettled
+redelivery where the harness can advance ownership, retry transfer, complete
+DLQ administration, delayed delivery, event fan-out and task/event routing,
+dedupe scope/publication state, scheduler health, statistics, and malformed
+payload settlement. Memory runs every applicable
 scenario hermetically against its bounded process-local state. Redis runs the
 same suite against miniredis by default and against live Redis 7 single-node and Cluster fixtures
 under the `integration` build tag. NATS runs it against an embedded, file-backed
@@ -18,25 +20,49 @@ Core runtime behavior is transport-independent and remains covered by the root
 EventBus tests. A durable driver is considered contract-complete only when both
 the shared driver suite and the applicable core tests pass.
 
-| Required behavior | Coverage |
-| --- | --- |
-| Enqueue, handle, ACK | `contracttest/publish_consume_ack`; `TestEngine_C4_StateMachine` |
+| Required behavior | Coverage | P6.7.6 status |
+| --- | --- | --- |
+| Enqueue, handle, ACK | `contracttest/publish_consume_ack`; `TestEngine_C4_StateMachine` | Shared boundary passes Memory, Redis, NATS, and Kafka |
 | Handler failure and exact attempt bound | `TestProcessDeliveryAttemptBounds` |
-| Explicit retry-after | `TestBug_C6_DelayUnder1Second`; `contracttest/retry_transfer` |
+| Explicit retry-after | `TestBug_C6_DelayUnder1Second`; `contracttest/retry_transfer` | Shared transfer passes all drivers |
 | Permanent/decode failure to DLQ | `TestDecodedMetadataReachesRetryAndDLQ`; `TestDecodeFailurePreservesRawSource`; `contracttest/dead_letter_admin`; `contracttest/malformed_payload_remains_settleable` |
 | Panic and timeout | `TestPanicRecoveryDefaultsAndAttemptBounds`; `TestEngine_C1_ProcessTimeout` |
 | Settlement timeout/failure | `TestEngineRecordsMetricsOnlyAfterSettlementSuccess`; Redis response-loss tests |
 | Retry/DLQ failure cannot lose source | `TestAtomicTransferFailureAndRetry`; `TestTransferResponseLossIsIdempotent` |
-| Duplicate delivery | `TestReclaimPreservesSourceAndDeliveryHistory`; `TestNATSAckWaitExpiryRedeliversWithAttempt`; idempotent handlers remain required |
-| Delay precision and multi-instance scheduler | `contracttest/delayed_delivery`; `TestDelayedDispatchBoundedAndPreservesEnvelopes`; `TestDelayedDispatchMultipleSweepers`; `TestDelaySchedulerCASAcrossInstances` |
-| Dedupe expiry and isolation | `contracttest/dedupe_scope_expiry_release`; `TestScopedDedupeIsolationExpiryAndRelease` |
+| Duplicate delivery | `contracttest/unsettled_session_cancellation_redelivers`; `TestReclaimPreservesSourceAndDeliveryHistory`; `TestNATSAckWaitExpiryRedeliversWithAttempt`; idempotent handlers remain required | Shared deterministic control currently runs for Memory and Redis; NATS/Kafka remain driver-specific |
+| Delay precision and multi-instance scheduler | `contracttest/delayed_delivery`; `TestDelayedDispatchBoundedAndPreservesEnvelopes`; `TestDelayedDispatchMultipleSweepers`; `TestDelaySchedulerCASAcrossInstances` | Precision is shared; multi-instance ownership remains driver-specific |
+| Dedupe expiry and isolation | `contracttest/dedupe_scope_expiry_release`; `contracttest/publication_deduper_state`; `TestScopedDedupeIsolationExpiryAndRelease` | Namespace/kind/topology and ownership states pass Memory, Redis, and NATS; Kafka does not advertise dedupe |
 | Graceful/forced drain | `TestDrainPreservesHandlersAndSettlesPrefetch`; `TestDrainDeadlineLeavesSourcesUnsettled` |
 | Reconnect without session leak | `TestSupervisorReconnectAndCancellation`; `TestSupervisorJoinsSessionBeforeReconnect`; `TestNATSDisconnectReconnectResumesConsumer` |
-| Task/event and subscriber isolation | `TestTaskAndEventPublishUseIsolatedTopologies`; `contracttest/event_fanout_groups` |
+| Task/event and subscriber isolation | `TestTaskAndEventPublishUseIsolatedTopologies`; `contracttest/event_fanout_groups`; `contracttest/task_event_same_name_routing_isolation`; `contracttest/event_subscriber_retry_isolation` | Task/event isolation passes all drivers. Retry isolation passes Memory; Redis/NATS/Kafka are an explicit open gate and the shared case capability-skips them rather than claiming support |
 | Ordering when advertised | Kafka deterministic/live contiguous-offset and rebalance tests; Redis and NATS advertise no ordering guarantee |
-| Stats accuracy | `contracttest` stats assertions; `TestRedisStats*`; `TestNATSStatsUseConsumerObligations` |
-| DLQ list/requeue/purge/count | `contracttest/dead_letter_admin`; `TestRedisDLQ*`; `TestNATSDLQAdminPreservesMetadataAndRequeues` |
+| Stats accuracy | `contracttest/stats_transitions`; other `contracttest` stats assertions; `TestRedisStats*`; `TestNATSStatsUseConsumerObligations` | Shared transitions pass all drivers; Kafka's documented `Pending` includes fetched-uncommitted obligations |
+| DLQ list/requeue/purge/count | `contracttest/dead_letter_admin`; `TestRedisDLQ*`; `TestNATSDLQAdminPreservesMetadataAndRequeues` | Shared case now covers duplicate/missing requeue, purge, and count for all drivers |
 | Malformed transport message | `contracttest/malformed_payload_remains_settleable`; `TestReclaimSkipsActiveAndMalformedRecordsRemainPending` |
+
+`contracttest/double_settlement_rejected` now proves the terminal settlement
+guard across every driver. `contracttest/scheduler_health_presence_and_sanitization`
+passes Redis, NATS, and Kafka and checks bounded payload-free status. These are
+cross-cutting assertions used by the settlement and scheduler checklist rows.
+
+## P6.7.6 open contract gates
+
+The expanded suite is intentionally not described as complete while these rows
+still depend only on core or driver-specific evidence:
+
+- Bus-level handler failure, permanent error, decode error, panic, and timeout
+  through every durable driver.
+- Shared settlement-fault injection for retry/DLQ publication failure and
+  ambiguous broker responses.
+- Durable forced shutdown followed by redelivery, and repeated reconnect leak
+  checks, for Redis/NATS/Kafka.
+- One shared multi-instance scheduler ownership scenario and one shared Kafka
+  ordering scenario.
+- Source-subscriber retry routing for Redis, NATS, and Kafka. Current retry
+  publication returns to the shared event resource and can create a new
+  obligation for a subscriber that already handled the original event.
+- End-to-end hostile envelope route/metadata cases through every real driver;
+  transport opacity and core validation are separately covered today.
 
 Memory-specific parity coverage adds `TestFanoutCapacityFailureIsAtomic`,
 `TestConcurrentPublishRespectsCapacity`,

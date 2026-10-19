@@ -832,7 +832,7 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     `go vet ./...`, the complete tagged Kafka suite, focused default race tests,
     and the race-enabled live topology-admin test all passed on 2026-10-19.
 
-- [ ] **P6.7.6 Complete contract coverage and production-scale evidence**
+- [~] **P6.7.6 Complete contract coverage and production-scale evidence**
   - Expand `transport/contracttest.Run` so every applicable item in the shared
     transport contract checklist has an executable capability-gated scenario
     (EB-12). Map each checklist row to exact tests in `CONTRACT_TESTS.md` and
@@ -851,7 +851,27 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   - Acceptance: there is no unexplained loss, resource growth is bounded, every
     advertised guarantee has contract evidence, and unavailable infrastructure
     is recorded as an open gate rather than silently skipped.
-  - Notes:
+  - Notes: IN PROGRESS on 2026-10-19. Expanded the reusable transport suite with
+    single-use settlement, deterministic unsettled redelivery hooks, dedicated
+    stats transitions, same-name task/event routing isolation, complete DLQ
+    purge/idempotent requeue, namespace/kind/topology dedupe isolation,
+    publication-reservation ownership states, and bounded payload-free scheduler
+    health checks. Memory and miniredis pass by default; embedded JetStream and
+    live Kafka contract runs pass. Kafka's documented stats model keeps
+    fetched-uncommitted obligations in Pending, and scheduler health permits
+    inactive delay tiers with zero counters. Subscriber retry isolation passes
+    Memory but remains an explicit open gate for Redis/NATS/Kafka rather than a
+    false capability claim. Added a bounded large-run benchmark, periodic
+    heap/goroutine/lag samples, explicit delay control, pinned profile-scoped
+    Redis 7.4.1/NATS 2.10.22/Kafka 3.8.0 disposable fixtures, guarded PowerShell
+    orchestration, and `PRODUCTION_SCALE.md`. A disposable Redis 100,000-message
+    immediate 1 KiB/concurrency-100 preload completed with 100,000 unique ACKs,
+    zero observed duplicates, final lag zero, 1,527.67 msg/s drain throughput,
+    6.18 MB peak Go heap, about 74.8 MB peak process RSS, 108 peak goroutines,
+    and project-scoped container/network/volume cleanup. The 1m matrix, other
+    driver/workload cells, restart/reconnect/rebalance/ambiguity faults, sustained
+    soak, and remaining shared Bus-level/fault scenarios are still open, so this
+    task remains `[~]` and no Phase 6.7 exit criterion is claimed.
 
 - [ ] **P6.7.7 Finalize the API and scalability model before adapters**
   - Make all public operations return deterministic lifecycle errors while

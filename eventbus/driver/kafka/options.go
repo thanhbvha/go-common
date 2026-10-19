@@ -39,6 +39,13 @@ func WithDelayBatchSize(size int) eventbus.TopologyOption {
 	return eventbus.WithOption("kafka.delay_batch_size", size)
 }
 
+// WithEventLayoutTargeted opts an event topology into subscriber-targeted
+// retries. The explicit marker makes mixed-version deployments fail closed:
+// older drivers reject the unknown option instead of broadcasting retries.
+func WithEventLayoutTargeted() eventbus.TopologyOption {
+	return eventbus.WithOption(kafkaEventLayoutOption, kafkaTargetedLayoutV1)
+}
+
 // WithRetention sets the retention time for messages in the Kafka topics.
 // It translates to the "retention.ms" topic configuration.
 func WithRetention(d time.Duration) eventbus.TopologyOption {

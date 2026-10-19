@@ -55,7 +55,7 @@ func TestKafkaSettlementBrokerFaultWindows(t *testing.T) {
 					t.Fatal(err)
 				}
 				group := topic + "-workers"
-				consumer, err := backend.newManualConsumer(append(mainConsumerOptions(topic, group, topo), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))...)
+				consumer, err := backend.newManualConsumer(mainConsumerOptions([]string{topic}, group, topo)...)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -42,6 +42,7 @@ type kafkaTransport struct {
 	producerErr   error
 	scanDLQ       dlqPartitionScanner
 	dlqAdminMu    sync.Mutex
+	dlqLease      func(context.Context, transport.Topology) (*dlqAdminLease, error)
 
 	mu                sync.Mutex
 	sweepers          map[string]*delaySchedulerHandle
@@ -54,6 +55,7 @@ var (
 	_ transport.DLQAdmin                = (*kafkaTransport)(nil)
 	_ transport.StatsReader             = (*kafkaTransport)(nil)
 	_ transport.SubscriptionStatsReader = (*kafkaTransport)(nil)
+	_ transport.SubscriptionProvisioner = (*kafkaTransport)(nil)
 	_ transport.SchedulerHealthReader   = (*kafkaTransport)(nil)
 	_ transport.Delivery                = (*kafkaDelivery)(nil)
 )
@@ -127,8 +129,8 @@ func (t *kafkaTransport) Name() string { return "kafka" }
 func (t *kafkaTransport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
 		DelayPrecision: 5 * time.Second, // Based on the smallest tier
-		// Ordering keys map to Kafka partitions. Dispatch, commits, and
-		// ownership transfer are serialized within each partition.
+		// Ordering is preserved only within one physical Kafka topic-partition.
+		// Related main, delay, and private topics are independent logs.
 		Ordering: true,
 	}
 }
@@ -139,6 +141,14 @@ func (t *kafkaTransport) mainTopic(topo transport.Topology) string {
 
 func (t *kafkaTransport) delayTopic(topo transport.Topology, tier time.Duration) string {
 	return fmt.Sprintf("%s.delay-%s", topo.Name(), tier.String())
+}
+
+func (t *kafkaTransport) targetedDelayTopic(topo transport.Topology, tier time.Duration) string {
+	return fmt.Sprintf("%s.target-delay-%s", topo.Name(), tier.String())
+}
+
+func (t *kafkaTransport) privateReadyTopic(topo transport.Topology, group string) string {
+	return kafkaConsumerGroup(topo, group) + ".retry-ready"
 }
 
 func (t *kafkaTransport) dlqTopic(topo transport.Topology) string {
@@ -153,13 +163,22 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
+	if err := requireTargetedEventLayout(topo); err != nil {
+		return err
+	}
 	main := t.mainTopic(topo)
 	dlq := t.dlqTopic(topo)
 	topics := []string{main, dlq}
 	for _, tier := range delayTiers {
 		topics = append(topics, t.delayTopic(topo, tier))
+		if topo.Kind == transport.EventTopology {
+			topics = append(topics, t.targetedDelayTopic(topo, tier))
+		}
 	}
 	lockTopic := t.dlqAdminLockTopic(topo)
+	if topo.Kind == transport.EventTopology {
+		topics = append(topics, t.eventLayoutTopic(topo))
+	}
 
 	partitions := int32(1)
 	if val, ok := topo.Options["kafka.partitions"].(int32); ok && val > 0 {
@@ -171,27 +190,8 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 		replFactor = val
 	}
 
-	var kadmConfigs map[string]*string
-
-	// Collect configs
-	configs := make(map[string]string)
-	if val, ok := topo.Options["kafka.topic_configs"].(map[string]string); ok {
-		for k, v := range val {
-			configs[k] = v
-		}
-	}
-	if val, ok := topo.Options["kafka.retention_ms"].(time.Duration); ok && val > 0 {
-		configs["retention.ms"] = fmt.Sprintf("%d", val.Milliseconds())
-	}
-
-	// Convert to map[string]*string for kadm
-	if len(configs) > 0 {
-		kadmConfigs = make(map[string]*string, len(configs))
-		for k, v := range configs {
-			v := v // capture loop variable
-			kadmConfigs[k] = &v
-		}
-	}
+	configs := topicConfigs(topo)
+	kadmConfigs := pointerConfigs(configs)
 
 	resp, err := t.adm.CreateTopics(ctx, partitions, replFactor, kadmConfigs, topics...)
 	if err != nil {
@@ -211,7 +211,14 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 			return fmt.Errorf("kafka EnsureTopology CreateTopic error for %q: %w", tr.Topic, tr.Err)
 		}
 	}
-	if err := t.validateRelatedTopicPartitions(ctx, topics, partitions); err != nil {
+	partitionedTopics := topics
+	if topo.Kind == transport.EventTopology {
+		partitionedTopics = topics[:len(topics)-1]
+		if err := t.validateRelatedTopicPartitions(ctx, []string{t.eventLayoutTopic(topo)}, 1); err != nil {
+			return err
+		}
+	}
+	if err := t.validateRelatedTopicPartitions(ctx, partitionedTopics, partitions); err != nil {
 		return err
 	}
 	if err := t.reconcileRelatedTopicConfigs(ctx, topics, replFactor, configs); err != nil {
@@ -236,6 +243,94 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	}
 
 	return nil
+}
+
+func topicConfigs(topo transport.Topology) map[string]string {
+	configs := make(map[string]string)
+	if values, ok := topo.Options["kafka.topic_configs"].(map[string]string); ok {
+		for key, value := range values {
+			configs[key] = value
+		}
+	}
+	if value, ok := topo.Options["kafka.retention_ms"].(time.Duration); ok && value > 0 {
+		configs["retention.ms"] = fmt.Sprintf("%d", value.Milliseconds())
+	}
+	return configs
+}
+
+func pointerConfigs(configs map[string]string) map[string]*string {
+	if len(configs) == 0 {
+		return nil
+	}
+	result := make(map[string]*string, len(configs))
+	for key, value := range configs {
+		value := value
+		result[key] = &value
+	}
+	return result
+}
+
+func (t *kafkaTransport) EnsureSubscription(ctx context.Context, sub transport.Subscription) error {
+	if err := t.ValidateTopology(sub.Topology); err != nil {
+		return err
+	}
+	if sub.Topology.Kind == transport.EventTopology && sub.Group == "" {
+		return fmt.Errorf("kafka: event subscription group must not be blank")
+	}
+	if sub.Topology.Kind == transport.TaskTopology {
+		if sub.Group != "" {
+			return fmt.Errorf("kafka: task subscription group must be empty")
+		}
+		return nil
+	}
+	if err := t.validateEventLayout(ctx, sub.Topology); err != nil {
+		return err
+	}
+	topic := t.privateReadyTopic(sub.Topology, sub.Group)
+	if len(topic) > 249 || !kafkaTopicName.MatchString(topic) {
+		return fmt.Errorf("kafka: subscriber produces invalid private retry topic name %q", topic)
+	}
+	partitions := int32(1)
+	if value, ok := sub.Topology.Options["kafka.partitions"].(int32); ok {
+		partitions = value
+	}
+	replicationFactor := int16(1)
+	if value, ok := sub.Topology.Options["kafka.replication_factor"].(int16); ok {
+		replicationFactor = value
+	}
+	configs := topicConfigs(sub.Topology)
+	marker := t.subscriberMarkerTopic(sub.Topology, sub.Group)
+	response, err := t.adm.CreateTopics(ctx, partitions, replicationFactor, pointerConfigs(configs), topic)
+	if err != nil {
+		return fmt.Errorf("kafka: ensure subscriber retry topic: %w", err)
+	}
+	for _, result := range response {
+		if result.Err != nil && !errors.Is(result.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("kafka: ensure subscriber retry topic %q: %w", result.Topic, result.Err)
+		}
+	}
+	if err := t.validateRelatedTopicPartitions(ctx, []string{topic}, partitions); err != nil {
+		return err
+	}
+	if err := t.reconcileRelatedTopicConfigs(ctx, []string{topic}, replicationFactor, configs); err != nil {
+		return err
+	}
+	response, err = t.adm.CreateTopics(ctx, 1, replicationFactor, pointerConfigs(subscriberMarkerConfigs()), marker)
+	if err != nil {
+		return fmt.Errorf("kafka: ensure subscriber registry marker: %w", err)
+	}
+	for _, result := range response {
+		if result.Err != nil && !errors.Is(result.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("kafka: ensure subscriber registry marker %q: %w", result.Topic, result.Err)
+		}
+	}
+	if err := t.validateRelatedTopicPartitions(ctx, []string{marker}, 1); err != nil {
+		return err
+	}
+	if err := t.reconcileRelatedTopicConfigs(ctx, []string{marker}, replicationFactor, subscriberMarkerConfigs()); err != nil {
+		return err
+	}
+	return t.validateProvisionedSubscriber(ctx, sub.Topology, sub.Group)
 }
 
 func (t *kafkaTransport) reconcileRelatedTopicConfigs(ctx context.Context, topics []string, replicationFactor int16, desired map[string]string) error {
@@ -301,14 +396,41 @@ func (t *kafkaTransport) reconcileRelatedTopicConfigs(ctx context.Context, topic
 }
 
 func (t *kafkaTransport) Publish(ctx context.Context, topo transport.Topology, msg transport.Message) error {
+	if err := requireTargetedEventLayout(topo); err != nil {
+		return err
+	}
+	removeMessageHeader(&msg, kafkaTargetGroupHeader)
 	topic := t.mainTopic(topo)
 
 	return t.produceConfirmed(ctx, messageRecord(topic, msg))
 }
 
 func (t *kafkaTransport) PublishAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
+	if err := requireTargetedEventLayout(topo); err != nil {
+		return err
+	}
+	removeMessageHeader(&msg, kafkaTargetGroupHeader)
 	topic := t.delayDestination(topo, runAt, time.Now())
 	if topic == t.mainTopic(topo) {
+		return t.produceConfirmed(ctx, messageRecord(topic, msg))
+	}
+	return t.produceConfirmed(ctx, scheduledMessageRecord(topic, msg, runAt))
+}
+
+func (t *kafkaTransport) publishTargetedAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
+	if err := requireTargetedEventLayout(topo); err != nil {
+		return err
+	}
+	group := msg.Headers[kafkaTargetGroupHeader]
+	if group == "" {
+		return fmt.Errorf("kafka: targeted retry group required")
+	}
+	if err := t.validateProvisionedSubscriber(ctx, topo, group); err != nil {
+		return err
+	}
+	topic := t.targetedDelayDestination(topo, group, runAt, time.Now())
+	if topic == t.privateReadyTopic(topo, group) {
+		removeMessageHeader(&msg, kafkaTargetGroupHeader)
 		return t.produceConfirmed(ctx, messageRecord(topic, msg))
 	}
 	return t.produceConfirmed(ctx, scheduledMessageRecord(topic, msg, runAt))
@@ -322,10 +444,16 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 	if err != nil {
 		return err
 	}
-	topic := t.mainTopic(sub.Topology)
+	topics := []string{t.mainTopic(sub.Topology)}
+	if sub.Topology.Kind == transport.EventTopology {
+		if err := t.EnsureSubscription(ctx, sub); err != nil {
+			return err
+		}
+		topics = append(topics, t.privateReadyTopic(sub.Topology, sub.Group))
+	}
 	group := kafkaConsumerGroup(sub.Topology, sub.Group)
 
-	opts := mainConsumerOptions(topic, group, sub.Topology)
+	opts := mainConsumerOptions(topics, group, sub.Topology)
 	rebalances := newRebalanceController()
 	opts = append(opts, rebalances.options()...)
 
@@ -342,7 +470,7 @@ func (t *kafkaTransport) Consume(ctx context.Context, sub transport.Subscription
 		cl.CloseAllowingRebalance()
 		coordinator.close()
 	}()
-	return t.consumeRecords(ctx, sub.Topology, cl, coordinator, rebalances, capacity, deliver)
+	return t.consumeRecords(ctx, sub, cl, coordinator, rebalances, capacity, deliver)
 }
 
 func kafkaConsumerGroup(topo transport.Topology, group string) string {
@@ -356,16 +484,17 @@ func kafkaConsumerGroup(topo transport.Topology, group string) string {
 	return topo.ConsumerName(group)
 }
 
-func mainConsumerOptions(topic, group string, topo transport.Topology) []kgo.Opt {
+func mainConsumerOptions(topics []string, group string, topo transport.Topology) []kgo.Opt {
 	opts := []kgo.Opt{
 		kgo.ConsumerGroup(group),
-		kgo.ConsumeTopics(topic),
+		kgo.ConsumeTopics(topics...),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.BlockRebalanceOnPoll(), // Bug K1 mitigation
 	}
 	return append(opts, topologyFetchOptions(topo)...)
 }
 
-func (t *kafkaTransport) consumeRecords(ctx context.Context, topo transport.Topology, cl recordConsumer, coordinator *offsetCoordinator, rebalances *rebalanceController, capacity int, deliver func(transport.Delivery)) error {
+func (t *kafkaTransport) consumeRecords(ctx context.Context, sub transport.Subscription, cl recordConsumer, coordinator *offsetCoordinator, rebalances *rebalanceController, capacity int, deliver func(transport.Delivery)) error {
 	for {
 		// Do not poll another batch until every record in this bounded batch
 		// settles. PollRecords limits application-owned records, independently
@@ -378,7 +507,7 @@ func (t *kafkaTransport) consumeRecords(ctx context.Context, topo transport.Topo
 			return fetches.Err()
 		}
 
-		rewind, err := t.dispatchBatch(ctx, topo, coordinator, rebalances, fetches.Records(), deliver)
+		rewind, err := t.dispatchBatch(ctx, sub.Topology, sub.Group, coordinator, rebalances, fetches.Records(), deliver)
 		if err != nil && !errors.Is(err, errRebalanceRequested) {
 			return err
 		}
@@ -399,6 +528,14 @@ func (t *kafkaTransport) delayTopics(topo transport.Topology) []string {
 	topics := make([]string, 0, len(delayTiers))
 	for _, tier := range delayTiers {
 		topics = append(topics, t.delayTopic(topo, tier))
+	}
+	return topics
+}
+
+func (t *kafkaTransport) targetedDelayTopics(topo transport.Topology) []string {
+	topics := make([]string, 0, len(delayTiers))
+	for _, tier := range delayTiers {
+		topics = append(topics, t.targetedDelayTopic(topo, tier))
 	}
 	return topics
 }
@@ -470,6 +607,7 @@ type kafkaDelivery struct {
 	record      *kgo.Record
 	msg         transport.Message
 	count       int
+	group       string
 	settled     transport.SettlementGuard
 	completed   func(error)
 }
@@ -508,7 +646,15 @@ func (d *kafkaDelivery) Settle(ctx context.Context, decision transport.Decision)
 		case transport.DecisionAck:
 			return d.ack(ctx)
 		case transport.DecisionRetry:
-			if err := d.transport.PublishAt(ctx, d.topo, decision.Next, decision.RetryAt); err != nil {
+			next := decision.Next
+			var err error
+			if d.topo.Kind == transport.EventTopology {
+				setMessageHeader(&next, kafkaTargetGroupHeader, d.group)
+				err = d.transport.publishTargetedAt(ctx, d.topo, next, decision.RetryAt)
+			} else {
+				err = d.transport.PublishAt(ctx, d.topo, next, decision.RetryAt)
+			}
+			if err != nil {
 				return err
 			}
 			return d.ack(ctx)

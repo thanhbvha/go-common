@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -25,7 +26,8 @@ func stoppedRetentionBackend(t *testing.T) (*redisTransport, *goredis.Client) {
 func TestEnsureSubscriptionDurablyRegistersGroupAndEpoch(t *testing.T) {
 	backend, rc := stoppedRetentionBackend(t)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "retention", JobType: "provision", Kind: transport.EventTopology}
+	topo := targetedEventTopology("retention", "provision")
+	ensureTargetedEventTopology(t, backend, topo)
 	sub := transport.Subscription{Topology: topo, Group: "billing"}
 	if err := backend.EnsureSubscription(ctx, sub); err != nil {
 		t.Fatal(err)
@@ -50,7 +52,8 @@ func TestEnsureSubscriptionDurablyRegistersGroupAndEpoch(t *testing.T) {
 func TestCompactionProtectsUnreadAndPendingAcrossGroups(t *testing.T) {
 	backend, rc := stoppedRetentionBackend(t)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "retention", JobType: "watermark", Kind: transport.EventTopology}
+	topo := targetedEventTopology("retention", "watermark")
+	ensureTargetedEventTopology(t, backend, topo)
 	for _, name := range []string{"fast", "slow"} {
 		if err := backend.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: name}); err != nil {
 			t.Fatal(err)
@@ -107,7 +110,8 @@ func TestCompactionProtectsUnreadAndPendingAcrossGroups(t *testing.T) {
 func TestManifestEpochRejectsStaleTrim(t *testing.T) {
 	backend, rc := stoppedRetentionBackend(t)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "retention", JobType: "epoch", Kind: transport.EventTopology}
+	topo := targetedEventTopology("retention", "epoch")
+	ensureTargetedEventTopology(t, backend, topo)
 	if err := backend.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: "one"}); err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +134,8 @@ func TestManifestEpochRejectsStaleTrim(t *testing.T) {
 func TestTrimRejectsConcurrentUnmanagedGroup(t *testing.T) {
 	backend, rc := stoppedRetentionBackend(t)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "retention", JobType: "unmanaged-race", Kind: transport.EventTopology}
+	topo := targetedEventTopology("retention", "unmanaged-race")
+	ensureTargetedEventTopology(t, backend, topo)
 	if err := backend.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: "managed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -273,11 +278,53 @@ func TestDelayedCapacityAndDispatchBackpressurePreserveSource(t *testing.T) {
 	}
 }
 
+func TestEventCapacityIsTopologyWideAcrossRetryLanes(t *testing.T) {
+	backend, rc := stoppedRetentionBackend(t)
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "retention", JobType: "aggregate-capacity", Kind: transport.EventTopology, Options: map[string]any{
+		"redis.max_ready_entries": int64(2), "redis.max_delayed_entries": int64(1), redisEventLayoutOption: redisTargetedLayoutV1,
+	}}
+	ensureTargetedEventTopology(t, backend, topo)
+	alpha := transport.Subscription{Topology: topo, Group: "alpha"}
+	beta := transport.Subscription{Topology: topo, Group: "beta"}
+	for _, sub := range []transport.Subscription{alpha, beta} {
+		if err := backend.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delivery := pendingEventDelivery(t, backend, rc, topo, "alpha")
+	if err := delivery.Settle(ctx, transferDecision(transport.DecisionRetry)); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Publish(ctx, topo, transport.Message{Payload: []byte("shared")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.PublishAt(ctx, topo, transport.Message{Payload: []byte("overflow-delayed")}, now); !errors.Is(err, transport.ErrCapacityExceeded) {
+		t.Fatalf("aggregate delayed capacity error = %v", err)
+	}
+	for index, group := range []string{"subscriber:alpha", "subscriber:beta"} {
+		if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.dlqKey(topo), ID: fmt.Sprintf("%d-0", index+1), Values: map[string]any{
+			"payload": "requeue", "reason": "test", "error": "test", "attempts": 1, "failed_at": 1,
+			"source_stream": backend.streamKey(topo), "source_group": group, "source_id": "source",
+		}}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backend.Requeue(ctx, topo, []string{"1-0", "2-0"}); !errors.Is(err, transport.ErrCapacityExceeded) {
+		t.Fatalf("aggregate ready capacity error = %v", err)
+	}
+	if count, err := backend.Count(ctx, topo); err != nil || count != 2 {
+		t.Fatalf("capacity rejection changed DLQ: %d, %v", count, err)
+	}
+}
+
 func TestSafeAndForcedSubscriberRetirement(t *testing.T) {
 	t.Run("safe", func(t *testing.T) {
 		backend, rc := stoppedRetentionBackend(t)
 		ctx := context.Background()
-		topo := transport.Topology{Namespace: "retention", JobType: "retire-safe", Kind: transport.EventTopology}
+		topo := targetedEventTopology("retention", "retire-safe")
+		ensureTargetedEventTopology(t, backend, topo)
 		sub := transport.Subscription{Topology: topo, Group: "old"}
 		if err := backend.EnsureSubscription(ctx, sub); err != nil {
 			t.Fatal(err)
@@ -314,7 +361,8 @@ func TestSafeAndForcedSubscriberRetirement(t *testing.T) {
 	t.Run("forced reports abandoned work", func(t *testing.T) {
 		backend, rc := stoppedRetentionBackend(t)
 		ctx := context.Background()
-		topo := transport.Topology{Namespace: "retention", JobType: "retire-force", Kind: transport.EventTopology}
+		topo := targetedEventTopology("retention", "retire-force")
+		ensureTargetedEventTopology(t, backend, topo)
 		sub := transport.Subscription{Topology: topo, Group: "old"}
 		if err := backend.EnsureSubscription(ctx, sub); err != nil {
 			t.Fatal(err)
@@ -334,13 +382,93 @@ func TestSafeAndForcedSubscriberRetirement(t *testing.T) {
 	})
 }
 
+func TestSubscriberRetirementIncludesPrivateRetryLanes(t *testing.T) {
+	backend, rc := stoppedRetentionBackend(t)
+	ctx := context.Background()
+	topo := targetedEventTopology("retention", "private-retire")
+	ensureTargetedEventTopology(t, backend, topo)
+	sub := transport.Subscription{Topology: topo, Group: "old"}
+	if err := backend.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	group := backend.groupName(sub)
+	if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, group), goredis.Z{Score: 1, Member: "delayed"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := backend.RetireSubscription(ctx, sub, false)
+	if !errors.Is(err, ErrSubscriptionNotDrained) || attempt.Unread != 1 {
+		t.Fatalf("safe retirement = %+v, %v", attempt, err)
+	}
+	completed, err := backend.RetireSubscription(ctx, sub, true)
+	if err != nil || !completed.Retired || completed.Unread != 1 {
+		t.Fatalf("forced retirement = %+v, %v", completed, err)
+	}
+	if count, err := rc.Exists(ctx, backend.subscriberRetryStreamKey(topo, group), backend.subscriberRetryDelayedKey(topo, group)).Result(); err != nil || count != 0 {
+		t.Fatalf("private lanes retained after retirement: %d, %v", count, err)
+	}
+}
+
+func TestRetiredSubscriberDLQRequeueCannotRecreateRetryLane(t *testing.T) {
+	backend, rc := stoppedRetentionBackend(t)
+	ctx := context.Background()
+	topo := targetedEventTopology("retention", "retire-requeue-fence")
+	ensureTargetedEventTopology(t, backend, topo)
+	sub := transport.Subscription{Topology: topo, Group: "old"}
+	if err := backend.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	group := backend.groupName(sub)
+	if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.dlqKey(topo), ID: "1-0", Values: map[string]any{
+		"payload": "requeue", "reason": "test", "error": "test", "attempts": 1, "failed_at": 1,
+		"source_stream": backend.streamKey(topo), "source_group": group, "source_id": "source",
+	}}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := backend.RetireSubscription(ctx, sub, true)
+	if err != nil || !retired.Retired {
+		t.Fatalf("retirement = %+v, %v", retired, err)
+	}
+	if err := backend.Requeue(ctx, topo, []string{"1-0"}); !errors.Is(err, ErrSubscriptionRetiring) {
+		t.Fatalf("requeue after retirement = %v", err)
+	}
+	if exists, err := rc.Exists(ctx, backend.subscriberRetryStreamKey(topo, group)).Result(); err != nil || exists != 0 {
+		t.Fatalf("orphan retry lane recreated: %d, %v", exists, err)
+	}
+	if count, err := backend.Count(ctx, topo); err != nil || count != 1 {
+		t.Fatalf("fenced DLQ source changed: %d, %v", count, err)
+	}
+}
+
+func TestRetentionReportIncludesPrivateRetryLanes(t *testing.T) {
+	backend, rc := stoppedRetentionBackend(t)
+	ctx := context.Background()
+	topo := targetedEventTopology("retention", "private-report")
+	ensureTargetedEventTopology(t, backend, topo)
+	sub := transport.Subscription{Topology: topo, Group: "alpha"}
+	if err := backend.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	group := backend.groupName(sub)
+	if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.subscriberRetryStreamKey(topo, group), Values: map[string]any{"payload": "ready"}}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, group), goredis.Z{Score: 1, Member: "delayed"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := backend.RetentionReport(ctx, topo)
+	if err != nil || report.ReadyEntries != 1 || report.DelayedEntries != 1 {
+		t.Fatalf("report = %+v, %v", report, err)
+	}
+}
+
 func TestImmediatePublishDoesNotTrimAcceptedBacklog(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rc := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
 	defer rc.Close()
 	backend := New(rc).(*redisTransport)
 	ctx := context.Background()
-	topo := transport.Topology{Namespace: "retention", JobType: "events", Kind: transport.EventTopology}
+	topo := targetedEventTopology("retention", "events")
+	ensureTargetedEventTopology(t, backend, topo)
 	stream := backend.streamKey(topo)
 	for _, group := range []string{"subscriber:fast", "subscriber:slow"} {
 		if err := rc.XGroupCreateMkStream(ctx, stream, group, "0").Err(); err != nil {

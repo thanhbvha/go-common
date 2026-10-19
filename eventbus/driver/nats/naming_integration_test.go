@@ -16,7 +16,7 @@ func TestEncodedTopologyNamesPreventNATSCrossDelivery(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close(context.Background()) })
 	ctx := context.Background()
 	first := transport.Topology{Namespace: "acme", JobType: "event.foo", Kind: transport.TaskTopology}
-	second := transport.Topology{Namespace: "acme", JobType: "foo", Kind: transport.EventTopology}
+	second := targetedEventTopology("acme", "foo")
 	if backend.streamName(first) == backend.streamName(second) {
 		t.Fatal("hostile task/event tuples share a NATS stream")
 	}

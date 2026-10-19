@@ -49,6 +49,10 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 			if !ok || v < 1 || v > maxDelayBatchSize {
 				return fmt.Errorf("kafka: %s must be an int between 1 and %d", key, maxDelayBatchSize)
 			}
+		case kafkaEventLayoutOption:
+			if topology.Kind != transport.EventTopology || value != kafkaTargetedLayoutV1 {
+				return fmt.Errorf("kafka: %s must be %q on event topologies", key, kafkaTargetedLayoutV1)
+			}
 		case "kafka.topic_configs":
 			configs, ok := value.(map[string]string)
 			if !ok || configs == nil {
@@ -68,7 +72,7 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 			}
 		}
 	}
-	return nil
+	return requireTargetedEventLayout(topology)
 }
 
 func cleanupPolicyDeleteOnly(value string) bool {

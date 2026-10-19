@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -12,7 +13,9 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 const (
@@ -44,6 +47,7 @@ type kafkaDLQRecord struct {
 	Attempts        int               `json:"attempts"`
 	FailedAt        int64             `json:"failed_at"`
 	SourceTopic     string            `json:"source_topic"`
+	SourceGroup     string            `json:"source_group,omitempty"`
 	SourcePartition int32             `json:"source_partition"`
 	SourceOffset    int64             `json:"source_offset"`
 	SourceTimestamp int64             `json:"source_timestamp"`
@@ -72,6 +76,7 @@ func (d *kafkaDelivery) deadLetterRecord(msg transport.Message, decision transpo
 		}
 		record.SourceTimestamp = sourceTimestamp.UnixMilli()
 	}
+	record.SourceGroup = d.group
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: encode DLQ record: %w", err)
@@ -175,6 +180,9 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 	if err := t.ValidateTopology(topology); err != nil {
 		return err
 	}
+	if err := requireTargetedEventLayout(topology); err != nil {
+		return err
+	}
 	if len(messageIDs) > maxDLQAdminBatch {
 		return fmt.Errorf("kafka: DLQ requeue batch exceeds %d records", maxDLQAdminBatch)
 	}
@@ -185,6 +193,10 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 		return err
 	}
 	defer lease.release()
+	opCtx, generation, err := lease.operation()
+	if err != nil {
+		return err
+	}
 	topic := t.dlqTopic(topology)
 	selected := make(map[int32]map[int64]struct{})
 	maxOffset := make(map[int32]int64)
@@ -203,7 +215,7 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 	if len(selected) == 0 {
 		return nil
 	}
-	starts, ends, err := t.logicalOffsets(ctx, topic, t.dlqAdminGroup(topology))
+	starts, ends, err := t.logicalOffsets(opCtx, topic, t.dlqAdminGroup(topology))
 	if err != nil {
 		return err
 	}
@@ -216,7 +228,7 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 		if maxOffset[partition] < starts[partition] {
 			continue // an already advanced cursor makes a repeated request a no-op
 		}
-		prefix, err := t.readDLQPartition(ctx, topic, partition, starts[partition], maxOffset[partition]+1, maxDLQAdminBatch+1)
+		prefix, err := t.readDLQPartition(opCtx, topic, partition, starts[partition], maxOffset[partition]+1, maxDLQAdminBatch+1)
 		if err != nil {
 			return err
 		}
@@ -233,13 +245,40 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 			return fmt.Errorf("kafka: DLQ record %s does not exist", kafkaDLQID(partition, maxOffset[partition]))
 		}
 	}
+	type requeueRecord struct {
+		deadLetter  transport.DeadLetter
+		destination string
+	}
+	prepared := make([]requeueRecord, 0, len(records))
+	validatedGroups := make(map[string]struct{})
 	for _, record := range records {
 		deadLetter, err := decodeKafkaDLQRecord(record)
 		if err != nil {
 			return err
 		}
-		if err := t.produceConfirmed(ctx, messageRecord(t.mainTopic(topology), deadLetter.Message)); err != nil {
-			return fmt.Errorf("kafka: requeue DLQ record %s: %w", deadLetter.ID, err)
+		destination := t.mainTopic(topology)
+		if topology.Kind == transport.EventTopology {
+			if deadLetter.SourceGroup == "" {
+				return fmt.Errorf("kafka: requeue DLQ record %s: source subscriber is unavailable", deadLetter.ID)
+			}
+			if _, ok := validatedGroups[deadLetter.SourceGroup]; !ok {
+				if err := t.validateProvisionedSubscriber(opCtx, topology, deadLetter.SourceGroup); err != nil {
+					return fmt.Errorf("kafka: requeue DLQ record %s: %w", deadLetter.ID, err)
+				}
+				validatedGroups[deadLetter.SourceGroup] = struct{}{}
+			}
+			destination = t.privateReadyTopic(topology, deadLetter.SourceGroup)
+		}
+		prepared = append(prepared, requeueRecord{deadLetter: deadLetter, destination: destination})
+	}
+	for _, record := range prepared {
+		if err := lease.check(generation); err != nil {
+			return err
+		}
+		message := record.deadLetter.Message
+		removeMessageHeader(&message, kafkaTargetGroupHeader)
+		if err := t.produceConfirmed(opCtx, messageRecord(record.destination, message)); err != nil {
+			return fmt.Errorf("kafka: requeue DLQ record %s: %w", record.deadLetter.ID, err)
 		}
 	}
 	offsets := make(kadm.Offsets)
@@ -248,7 +287,7 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 			offsets.AddOffset(topic, partition, maximum+1, -1)
 		}
 	}
-	return t.commitDLQCursor(ctx, topology, offsets)
+	return t.commitDLQCursor(opCtx, topology, lease, generation, offsets)
 }
 
 // Purge advances the logical admin cursor to a snapshot of the DLQ end
@@ -264,8 +303,12 @@ func (t *kafkaTransport) Purge(ctx context.Context, topology transport.Topology)
 		return err
 	}
 	defer lease.release()
+	opCtx, generation, err := lease.operation()
+	if err != nil {
+		return err
+	}
 	topic := t.dlqTopic(topology)
-	ends, err := t.adm.ListEndOffsets(ctx, topic)
+	ends, err := t.adm.ListEndOffsets(opCtx, topic)
 	if err != nil {
 		return fmt.Errorf("kafka: inspect DLQ end offsets: %w", err)
 	}
@@ -279,7 +322,7 @@ func (t *kafkaTransport) Purge(ctx context.Context, topology transport.Topology)
 		}
 		offsets.AddOffset(topic, partition, end.Offset, end.LeaderEpoch)
 	}
-	return t.commitDLQCursor(ctx, topology, offsets)
+	return t.commitDLQCursor(opCtx, topology, lease, generation, offsets)
 }
 
 func (t *kafkaTransport) Count(ctx context.Context, topology transport.Topology) (int64, error) {
@@ -315,6 +358,16 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 			return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing topology lag")
 		}
 		mainLag += lag
+		if topology.Kind == transport.EventTopology {
+			lag, err = t.groupLag(ctx, group+".retry-ready", group)
+			if err != nil {
+				return transport.TopologyStats{}, err
+			}
+			if mainLag > math.MaxInt64-lag {
+				return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing topology lag")
+			}
+			mainLag += lag
+		}
 	}
 	var delayed int64
 	for _, tier := range delayTiers {
@@ -326,6 +379,16 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 			return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing delayed count")
 		}
 		delayed += lag
+		if topology.Kind == transport.EventTopology {
+			lag, err = t.groupLag(ctx, t.targetedDelayTopic(topology, tier), fmt.Sprintf("%s-target-delay-%s-group", topology.Name(), tier))
+			if err != nil {
+				return transport.TopologyStats{}, err
+			}
+			if delayed > math.MaxInt64-lag {
+				return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing delayed count")
+			}
+			delayed += lag
+		}
 	}
 	dlq, err := t.Count(ctx, topology)
 	if err != nil {
@@ -341,10 +404,22 @@ func (t *kafkaTransport) SubscriptionStats(ctx context.Context, sub transport.Su
 	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
 		return transport.TopologyStats{}, fmt.Errorf("kafka: event subscriber required")
 	}
-	lag, err := t.groupLag(ctx, t.mainTopic(sub.Topology), kafkaConsumerGroup(sub.Topology, sub.Group))
+	group := kafkaConsumerGroup(sub.Topology, sub.Group)
+	lag, err := t.groupLag(ctx, t.mainTopic(sub.Topology), group)
 	if err != nil {
 		return transport.TopologyStats{}, err
 	}
+	privateLag, err := t.groupLag(ctx, t.privateReadyTopic(sub.Topology, sub.Group), group)
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
+	if lag > math.MaxInt64-privateLag {
+		return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing subscriber lag")
+	}
+	lag += privateLag
+	// Targeted delay tiers are shared logs and Kafka has no per-header index.
+	// Delayed is therefore unknown for one subscriber and is reported as zero,
+	// rather than incorrectly attributing the entire shared backlog to it.
 	return transport.TopologyStats{Pending: lag, Lag: lag, LagKnown: true, OldestAgeKnown: lag == 0}, nil
 }
 
@@ -352,27 +427,14 @@ func (t *kafkaTransport) statsGroups(ctx context.Context, topology transport.Top
 	if topology.Kind == transport.TaskTopology {
 		return []string{kafkaConsumerGroup(topology, "")}, nil
 	}
-	listed, err := t.adm.ListGroups(ctx)
+	privateTopics, err := t.registeredPrivateTopics(ctx, topology)
 	if err != nil {
-		return nil, fmt.Errorf("kafka: list event consumer groups: %w", err)
+		return nil, err
 	}
-	prefix := topology.Name() + ".c."
-	if version, _ := topology.Options[transport.ResourceNameVersionOption].(string); version == transport.ResourceNameVersionLegacy {
-		prefix = topology.Name() + "-"
+	groups := make([]string, 0, len(privateTopics))
+	for _, topic := range privateTopics {
+		groups = append(groups, strings.TrimSuffix(topic, ".retry-ready"))
 	}
-	excluded := map[string]struct{}{t.dlqAdminGroup(topology): {}}
-	for _, tier := range delayTiers {
-		excluded[fmt.Sprintf("%s-delay-%s-group", topology.Name(), tier)] = struct{}{}
-	}
-	groups := make([]string, 0)
-	for group := range listed {
-		if strings.HasPrefix(group, prefix) {
-			if _, skip := excluded[group]; !skip {
-				groups = append(groups, group)
-			}
-		}
-	}
-	sort.Strings(groups)
 	return groups, nil
 }
 
@@ -385,11 +447,11 @@ func (t *kafkaTransport) groupLag(ctx context.Context, topic, group string) (int
 }
 
 func (t *kafkaTransport) logicalOffsets(ctx context.Context, topic, group string) (map[int32]int64, map[int32]int64, error) {
-	startResponse, err := t.adm.ListStartOffsets(ctx, topic)
+	startResponse, err := t.listOffsetsWhenLeaderReady(ctx, topic, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("kafka: list start offsets for %q: %w", topic, err)
 	}
-	endResponse, err := t.adm.ListEndOffsets(ctx, topic)
+	endResponse, err := t.listOffsetsWhenLeaderReady(ctx, topic, false)
 	if err != nil {
 		return nil, nil, fmt.Errorf("kafka: list end offsets for %q: %w", topic, err)
 	}
@@ -427,6 +489,44 @@ func (t *kafkaTransport) logicalOffsets(ctx context.Context, topic, group string
 	return starts, ends, nil
 }
 
+func (t *kafkaTransport) listOffsetsWhenLeaderReady(ctx context.Context, topic string, start bool) (kadm.ListedOffsets, error) {
+	backoff := 25 * time.Millisecond
+	for {
+		var (
+			response kadm.ListedOffsets
+			err      error
+		)
+		if start {
+			response, err = t.adm.ListStartOffsets(ctx, topic)
+		} else {
+			response, err = t.adm.ListEndOffsets(ctx, topic)
+		}
+		if err == nil {
+			err = response.Error()
+		}
+		if err == nil {
+			return response, nil
+		}
+		if !isKafkaLeaderTransition(err) {
+			return nil, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(250*time.Millisecond, backoff*2)
+	}
+}
+
+func isKafkaLeaderTransition(err error) bool {
+	return errors.Is(err, kerr.LeaderNotAvailable) ||
+		errors.Is(err, kerr.UnknownTopicOrPartition) ||
+		errors.Is(err, kerr.NotLeaderForPartition)
+}
+
 func offsetDistance(starts, ends map[int32]int64) (int64, error) {
 	var total int64
 	for partition, end := range ends {
@@ -439,8 +539,43 @@ func offsetDistance(starts, ends map[int32]int64) (int64, error) {
 	return total, nil
 }
 
-func (t *kafkaTransport) commitDLQCursor(ctx context.Context, topology transport.Topology, offsets kadm.Offsets) error {
+func (t *kafkaTransport) commitDLQCursor(ctx context.Context, topology transport.Topology, lease *dlqAdminLease, generation uint64, offsets kadm.Offsets) error {
 	if len(offsets) == 0 {
+		return nil
+	}
+	if err := lease.check(generation); err != nil {
+		return err
+	}
+	if lease.client != nil {
+		commitOffsets := make(map[string]map[int32]kgo.EpochOffset, len(offsets))
+		for topic, partitions := range offsets {
+			commitOffsets[topic] = make(map[int32]kgo.EpochOffset, len(partitions))
+			for partition, offset := range partitions {
+				commitOffsets[topic][partition] = kgo.EpochOffset{Epoch: offset.LeaderEpoch, Offset: offset.At}
+			}
+		}
+		var commitErr error
+		lease.client.CommitOffsetsSync(ctx, commitOffsets, func(_ *kgo.Client, _ *kmsg.OffsetCommitRequest, response *kmsg.OffsetCommitResponse, err error) {
+			if err != nil {
+				commitErr = err
+				return
+			}
+			if response == nil {
+				commitErr = errors.New("missing broker response")
+				return
+			}
+			for _, topic := range response.Topics {
+				for _, partition := range topic.Partitions {
+					if err := kerr.ErrorForCode(partition.ErrorCode); err != nil {
+						commitErr = err
+						return
+					}
+				}
+			}
+		})
+		if commitErr != nil {
+			return fmt.Errorf("kafka: commit DLQ admin cursor: %w", commitErr)
+		}
 		return nil
 	}
 	responses, err := t.adm.CommitOffsets(ctx, t.dlqAdminGroup(topology), offsets)
@@ -519,7 +654,7 @@ func decodeKafkaDLQRecord(raw *kgo.Record) (transport.DeadLetter, error) {
 		ID: kafkaDLQID(raw.Partition, raw.Offset), Message: record.Message,
 		Reason: record.Reason, LastError: record.LastError, Attempts: record.Attempts,
 		FailedAt: time.UnixMilli(record.FailedAt), Source: record.SourceTopic,
-		SourcePosition: kafkaDLQID(record.SourcePartition, record.SourceOffset),
+		SourceGroup: record.SourceGroup, SourcePosition: kafkaDLQID(record.SourcePartition, record.SourceOffset),
 	}, nil
 }
 

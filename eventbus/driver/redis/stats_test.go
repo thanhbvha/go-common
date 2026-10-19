@@ -29,6 +29,7 @@ func addStatsMessages(t *testing.T, backend *redisTransport, rc *goredis.Client,
 
 func createStatsGroup(t *testing.T, backend *redisTransport, rc *goredis.Client, topo transport.Topology, group string) {
 	t.Helper()
+	ensureTargetedEventTopology(t, backend, topo)
 	if err := rc.XGroupCreateMkStream(context.Background(), backend.streamKey(topo), group, "0").Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestRedisStatsFallbackPagination(t *testing.T) {
 
 func TestRedisStatsEventAggregatesSubscriberObligations(t *testing.T) {
 	backend, rc := delayedBackend(t)
-	topo := transport.Topology{Namespace: "test", JobType: "stats-event", Kind: transport.EventTopology}
+	topo := targetedEventTopology("test", "stats-event")
 	createStatsGroup(t, backend, rc, topo, "subscriber:email")
 	createStatsGroup(t, backend, rc, topo, "subscriber:audit")
 	createStatsGroup(t, backend, rc, topo, "foreign")
@@ -152,6 +153,42 @@ func TestRedisStatsEventAggregatesSubscriberObligations(t *testing.T) {
 	}
 	if stats.Pending != 3 || stats.InFlight != 3 || stats.Lag != 6 || !stats.LagKnown || !stats.OldestAgeKnown {
 		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestRedisStatsIncludeSubscriberPrivateLanes(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	ctx := context.Background()
+	topo := targetedEventTopology("test", "stats-private")
+	ensureTargetedEventTopology(t, backend, topo)
+	alpha := transport.Subscription{Topology: topo, Group: "alpha"}
+	beta := transport.Subscription{Topology: topo, Group: "beta"}
+	for _, sub := range []transport.Subscription{alpha, beta} {
+		if err := backend.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alphaGroup := backend.groupName(alpha)
+	if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.subscriberRetryStreamKey(topo, alphaGroup), Values: map[string]any{"payload": "ready"}}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, alphaGroup), goredis.Z{Score: 1, Member: "delayed"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := backend.Stats(ctx, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pending != 1 || stats.InFlight != 0 || stats.Lag != 1 || stats.Delayed != 1 {
+		t.Fatalf("topology stats = %+v", stats)
+	}
+	alphaStats, err := backend.SubscriptionStats(ctx, alpha)
+	if err != nil || alphaStats.Pending != 1 || alphaStats.Delayed != 1 || alphaStats.Lag != 1 {
+		t.Fatalf("alpha stats = %+v, %v", alphaStats, err)
+	}
+	betaStats, err := backend.SubscriptionStats(ctx, beta)
+	if err != nil || betaStats.Pending != 0 || betaStats.Delayed != 0 || betaStats.Lag != 0 {
+		t.Fatalf("beta stats = %+v, %v", betaStats, err)
 	}
 }
 

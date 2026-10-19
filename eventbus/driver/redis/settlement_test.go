@@ -28,6 +28,26 @@ func pendingDelivery(t *testing.T, backend *redisTransport, rc *goredis.Client, 
 	return &redisDelivery{transport: backend, topo: topo, stream: stream, group: "workers", xmsgID: id, msg: transport.Message{Payload: []byte("original")}, count: 1}
 }
 
+func pendingEventDelivery(t *testing.T, backend *redisTransport, rc *goredis.Client, topo transport.Topology, subscriber string) *redisDelivery {
+	t.Helper()
+	ensureTargetedEventTopology(t, backend, topo)
+	ctx := context.Background()
+	sub := transport.Subscription{Topology: topo, Group: subscriber}
+	if err := backend.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	group := backend.groupName(sub)
+	stream := backend.streamKey(topo)
+	id, err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": "original"}}).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rc.XReadGroup(ctx, &goredis.XReadGroupArgs{Group: group, Consumer: "test", Streams: []string{stream, ">"}, Count: 1}).Result(); err != nil {
+		t.Fatal(err)
+	}
+	return &redisDelivery{transport: backend, topo: topo, stream: stream, group: group, consumer: "test", xmsgID: id, msg: transport.Message{Payload: []byte("original")}, count: 1}
+}
+
 func transferDecision(kind transport.DecisionKind) transport.Decision {
 	return transport.Decision{Kind: kind, Next: transport.Message{Payload: []byte(`{"id":"retry","attempt":2}`)}, Source: &transport.Message{Payload: []byte(`{"id":"source","headers":{"correlation-id":"synthetic"}}`)}, RetryAt: time.Unix(1700000000, 0), Reason: "synthetic", Cause: errors.New("synthetic error"), ErrorCode: "synthetic_error", Attempts: 2, FailedAt: time.Unix(1699999999, 0)}
 }
@@ -207,5 +227,39 @@ func TestAtomicTransferConcurrentInstances(t *testing.T) {
 	}
 	if count, err := rc.XLen(ctx, backend.dlqKey(topo)).Result(); err != nil || count != 1 {
 		t.Fatal("concurrent DLQ duplication")
+	}
+}
+
+func TestEventRetryUsesPrivateLaneAndDeletesPrivateSource(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	ctx := context.Background()
+	topo := targetedEventTopology("test", "private-retry")
+	delivery := pendingEventDelivery(t, backend, rc, topo, "alpha")
+	decision := transferDecision(transport.DecisionRetry)
+	if err := delivery.Settle(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	privateDelayed := backend.subscriberRetryDelayedKey(topo, delivery.group)
+	if count, err := rc.ZCard(ctx, privateDelayed).Result(); err != nil || count != 1 {
+		t.Fatalf("private delayed = %d, %v", count, err)
+	}
+	if count, err := rc.ZCard(ctx, backend.delayedKey(topo)).Result(); err != nil || count != 0 {
+		t.Fatalf("retry leaked to shared delayed lane: %d, %v", count, err)
+	}
+	if moved, err := backend.dispatchDue(ctx, topo, decision.RetryAt); err != nil || moved != 1 {
+		t.Fatalf("dispatch = %d, %v", moved, err)
+	}
+	privateStream := backend.subscriberRetryStreamKey(topo, delivery.group)
+	result, err := rc.XReadGroup(ctx, &goredis.XReadGroupArgs{Group: delivery.group, Consumer: "retry", Streams: []string{privateStream, ">"}, Count: 1}).Result()
+	if err != nil || len(result) != 1 || len(result[0].Messages) != 1 {
+		t.Fatalf("private read = %#v, %v", result, err)
+	}
+	message := result[0].Messages[0]
+	retry := &redisDelivery{transport: backend, topo: topo, stream: privateStream, group: delivery.group, consumer: "retry", xmsgID: message.ID, msg: transport.Message{Payload: []byte(message.Values["payload"].(string))}, count: 1}
+	if err := retry.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := rc.XLen(ctx, privateStream).Result(); err != nil || count != 0 {
+		t.Fatalf("settled private source retained: %d, %v", count, err)
 	}
 }

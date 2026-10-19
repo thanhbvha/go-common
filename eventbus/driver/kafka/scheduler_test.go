@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -75,6 +76,21 @@ func TestDelayDestinationUsesBoundedTiers(t *testing.T) {
 				t.Fatalf("destination = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRelatedTopicPartitionsWaitsForLeader(t *testing.T) {
+	backend := &kafkaTransport{}
+	admin := &fakeKafkaAdmin{metadata: kafkaAdminMetadata([]string{"related"}, 1, 1)}
+	admin.metadata.Topics["related"].Partitions[0] = kadm.PartitionDetail{Topic: "related", Partition: 0, Leader: -1}
+	backend.adm = admin
+
+	ready, err := backend.relatedTopicPartitionsReady(context.Background(), []string{"related"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("leaderless topic reported ready")
 	}
 }
 
@@ -250,6 +266,58 @@ func TestDelaySchedulerMalformedRecordRemainsUncommitted(t *testing.T) {
 	}
 }
 
+func TestTargetedDelaySchedulerRoutesOnlyToPrivateReadyAndStripsInternalHeaders(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "events", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
+	tier := time.Minute
+	backend := &kafkaTransport{}
+	admin := &fakeKafkaAdmin{}
+	provisionKafkaSubscriber(backend, admin, topo, "alpha")
+	backend.adm = admin
+	var produced *kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
+		produced = record
+		return nil
+	})
+	message := transport.Message{Payload: []byte("retry"), OrderingKey: "account-7", Headers: map[string]string{
+		"traceparent": "synthetic", kafkaTargetGroupHeader: "alpha",
+	}}
+	record := scheduledMessageRecord(backend.targetedDelayTopic(topo, tier), message, now)
+	record.Partition, record.Offset = 0, 3
+	client := &fakeDelayConsumer{}
+	if err := backend.processDelayBatchFor(context.Background(), topo, tier, true, client, []*kgo.Record{record}, now); err != nil {
+		t.Fatal(err)
+	}
+	if produced == nil || produced.Topic != backend.privateReadyTopic(topo, "alpha") {
+		t.Fatalf("target = %#v", produced)
+	}
+	if got := recordMessage(produced).Headers; !reflect.DeepEqual(got, map[string]string{"traceparent": "synthetic"}) {
+		t.Fatalf("ready headers = %#v", got)
+	}
+	if len(client.commits) != 1 || client.commits[0] != record {
+		t.Fatal("targeted source was not committed after confirmed private publish")
+	}
+}
+
+func TestTargetedDelaySchedulerFailsClosedWithoutTargetGroup(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "events", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
+	tier := time.Minute
+	backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error {
+		t.Fatal("record without a target group was published")
+		return nil
+	})}
+	record := scheduledMessageRecord(backend.targetedDelayTopic(topo, tier), transport.Message{Payload: []byte("old")}, now)
+	record.Partition, record.Offset = 1, 4
+	client := &fakeDelayConsumer{}
+	if err := backend.processDelayBatchFor(context.Background(), topo, tier, true, client, []*kgo.Record{record}, now); err == nil {
+		t.Fatal("targetless record unexpectedly succeeded")
+	}
+	if len(client.commits) != 0 || client.rewinds[record.Topic][record.Partition].Offset != record.Offset {
+		t.Fatal("targetless record did not remain durable and uncommitted")
+	}
+}
+
 func TestKafkaSchedulerHealthRecordsAndClearsFailures(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	topo := transport.Topology{Namespace: "test", JobType: "health"}
@@ -272,6 +340,33 @@ func TestKafkaSchedulerHealthRecordsAndClearsFailures(t *testing.T) {
 	status = backend.SchedulerHealth(topo)
 	if len(status) != 1 || status[0].Degraded || status[0].ConsecutiveErrors != 0 || status[0].LastSuccess.IsZero() {
 		t.Fatalf("recovered status = %#v", status)
+	}
+}
+
+func TestKafkaSchedulerHealthCountsPartialBatchProgress(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "partial-health"}
+	tier := 5 * time.Second
+	injected := errors.New("synthetic second publish failure")
+	produced := 0
+	backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error {
+		produced++
+		if produced == 2 {
+			return injected
+		}
+		return nil
+	})}
+	client := &fakeDelayConsumer{}
+	records := []*kgo.Record{
+		delayedRecord(backend.delayTopic(topo, tier), 0, 0, now),
+		delayedRecord(backend.delayTopic(topo, tier), 0, 1, now),
+	}
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, records, now); !errors.Is(err, injected) {
+		t.Fatalf("error = %v", err)
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Transfers != 1 || status[0].Commits != 1 || status[0].Retries != 1 || !status[0].Degraded {
+		t.Fatalf("partial status = %#v", status)
 	}
 }
 
@@ -305,7 +400,7 @@ func TestDelayTierPollIsBoundedAndShutdownJoins(t *testing.T) {
 		}}
 		done := make(chan struct{})
 		go func() {
-			(&kafkaTransport{}).runDelayTier(ctx, topo, time.Second, client)
+			(&kafkaTransport{}).runDelayTier(ctx, topo, time.Second, false, client)
 			close(done)
 		}()
 		if got := <-polled; got != 7 {

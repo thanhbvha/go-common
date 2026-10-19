@@ -63,7 +63,10 @@ Integration prerequisites:
   require a separately installed NATS server. The suite includes the shared
   transport contract plus restart/reconnect, `AckWait`, heartbeat,
   `MaxAckPending`, duplicate-publish, multi-instance scheduler, and scheduler
-  health failure/recovery coverage.
+  health failure/recovery coverage. Event topology tests also require the typed
+  `nats.WithEventLayoutTargeted()` declaration option and verify that a missing
+  or conflicting broker layout marker fences publish, provisioning, consume,
+  scheduler, private-lane, statistics, cleanup, and DLQ requeue paths.
 - Redis driver unit/contract/fault tests use `miniredis` and remain part of the
   hermetic default suite. Deterministic tests also prove scheduler health
   failure/recovery and that `Close` waits for owned delayed sweepers or returns
@@ -99,6 +102,18 @@ unit tests cover unsafe compaction rejection, replication/config reconciliation,
 partition decreases, and deterministic partial expansion reporting. The live
 Kafka topology-admin test verifies retention reconciliation, expansion of main/
 DLQ/all delay topics, and cross-process exclusion by the DLQ operator lease.
+
+P6.7.6 expands `transport/contracttest` with single-use settlement, stats state
+transitions, same-logical-name task/event isolation, complete DLQ purge/requeue,
+dedupe namespace/kind/publication-state checks, and scheduler-health checks.
+Memory and Redis run this suite by default; embedded NATS and live Kafka run it
+under `integration`. Subscriber retry isolation currently runs only for Memory;
+the durable drivers capability-skip that scenario and it remains an explicit
+release gate in `CONTRACT_TESTS.md`.
+
+Production-scale backlog and soak runs are not Go tests. Use the disposable
+fixture and guarded orchestrator documented in `PRODUCTION_SCALE.md`; never run
+the destructive scale matrix against shared developer brokers.
 
 When running in the restricted Windows workspace, use a workspace-local build
 cache:

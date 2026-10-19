@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus/transport"
@@ -39,10 +40,22 @@ func (t *kafkaTransport) ExpandPartitions(ctx context.Context, topology transpor
 	if err := t.ValidateTopology(topology); err != nil {
 		return result, err
 	}
+	if err := requireTargetedEventLayout(topology); err != nil {
+		return result, err
+	}
 	if target <= 0 {
 		return result, fmt.Errorf("kafka: partition target must be positive")
 	}
 	topics := append([]string{t.mainTopic(topology), t.dlqTopic(topology)}, t.delayTopics(topology)...)
+	if topology.Kind == transport.EventTopology {
+		topics = append(topics, t.targetedDelayTopics(topology)...)
+		privateTopics, err := t.registeredPrivateTopics(ctx, topology)
+		if err != nil {
+			return result, err
+		}
+		topics = append(topics, privateTopics...)
+	}
+	topics = uniqueStrings(topics)
 	metadata, err := t.adm.Metadata(ctx, topics...)
 	if err != nil {
 		return result, fmt.Errorf("kafka: inspect related partitions: %w", err)
@@ -87,41 +100,184 @@ func (t *kafkaTransport) ExpandPartitions(ctx context.Context, topology transpor
 	return result, nil
 }
 
-type dlqAdminLease struct{ client *kgo.Client }
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
 
-func (l *dlqAdminLease) release() {
-	if l.client != nil {
-		l.client.CloseAllowingRebalance()
+type dlqAdminLease struct {
+	client *kgo.Client
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+
+	mu          sync.Mutex
+	generation  uint64
+	owned       bool
+	closeOnce   sync.Once
+	releaseOnce sync.Once
+	done        chan struct{}
+	closed      chan struct{}
+}
+
+func newDLQAdminLease(ctx context.Context, client *kgo.Client) *dlqAdminLease {
+	leaseCtx, cancel := context.WithCancelCause(ctx)
+	return &dlqAdminLease{
+		client: client, ctx: leaseCtx, cancel: cancel,
+		done: make(chan struct{}), closed: make(chan struct{}),
 	}
 }
 
-var errKafkaDLQAdminBusy = errors.New("kafka: DLQ administration is already active")
+func newLocalDLQAdminLease(ctx context.Context) *dlqAdminLease {
+	lease := newDLQAdminLease(ctx, nil)
+	lease.assign()
+	close(lease.done)
+	close(lease.closed)
+	return lease
+}
+
+func (l *dlqAdminLease) assign() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.generation++
+	l.owned = true
+	return l.generation
+}
+
+func (l *dlqAdminLease) lose() {
+	l.mu.Lock()
+	if l.owned {
+		l.generation++
+		l.owned = false
+	}
+	l.mu.Unlock()
+	l.cancel(errKafkaDLQAdminLeaseLost)
+	if l.client != nil {
+		// Closing from a partition callback can deadlock the group loop. Start
+		// shutdown after the callback returns so a fenced member cannot rejoin.
+		go l.closeClient()
+	}
+}
+
+func (l *dlqAdminLease) operation() (context.Context, uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.owned {
+		return nil, 0, errKafkaDLQAdminLeaseLost
+	}
+	return l.ctx, l.generation, nil
+}
+
+func (l *dlqAdminLease) check(generation uint64) error {
+	if errors.Is(context.Cause(l.ctx), errKafkaDLQAdminLeaseLost) {
+		return errKafkaDLQAdminLeaseLost
+	}
+	if err := l.ctx.Err(); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.owned || l.generation != generation {
+		return errKafkaDLQAdminLeaseLost
+	}
+	return nil
+}
+
+func (l *dlqAdminLease) monitor() {
+	defer close(l.done)
+	for {
+		// LeaveGroupContext does not wake a parked poll. Bound each poll so a
+		// queued revoke/lost callback is serviced without waiting for records.
+		pollCtx, cancel := context.WithTimeout(l.ctx, 250*time.Millisecond)
+		fetches := l.client.PollRecords(pollCtx, 1)
+		cancel()
+		if fetches.IsClientClosed() {
+			l.lose()
+			return
+		}
+		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			l.lose()
+			return
+		}
+		if l.ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+func (l *dlqAdminLease) release() {
+	l.releaseOnce.Do(func() {
+		l.cancel(context.Canceled)
+		if l.client == nil {
+			return
+		}
+		l.closeClient()
+		<-l.done
+	})
+}
+
+func (l *dlqAdminLease) closeClient() {
+	l.closeOnce.Do(func() {
+		l.client.CloseAllowingRebalance()
+		close(l.closed)
+	})
+}
+
+var (
+	errKafkaDLQAdminBusy      = errors.New("kafka: DLQ administration is already active")
+	errKafkaDLQAdminLeaseLost = errors.New("kafka: DLQ administration lease lost")
+)
 
 func (t *kafkaTransport) acquireDLQAdminLease(ctx context.Context, topology transport.Topology) (*dlqAdminLease, error) {
+	if t.dlqLease != nil {
+		return t.dlqLease(ctx, topology)
+	}
+	return t.acquireBrokerDLQAdminLease(ctx, topology)
+}
+
+func (t *kafkaTransport) acquireBrokerDLQAdminLease(ctx context.Context, topology transport.Topology) (*dlqAdminLease, error) {
 	// Unit tests construct the private transport directly without a native
 	// factory. Supported constructors always provide one and therefore always
 	// use the broker-backed lease below.
 	if t.factory == nil {
-		return &dlqAdminLease{}, nil
+		return newLocalDLQAdminLease(ctx), nil
 	}
 	assigned := make(chan bool, 1)
 	topic := t.dlqAdminLockTopic(topology)
+	lease := newDLQAdminLease(ctx, nil)
 	client, err := t.newManualConsumer(
-		kgo.ConsumerGroup(topology.Name()+"-dlq-admin-lease"),
+		kgo.ConsumerGroup(t.dlqAdminGroup(topology)),
 		kgo.ConsumeTopics(topic),
 		kgo.OnPartitionsAssigned(func(_ context.Context, _ *kgo.Client, partitions map[string][]int32) {
+			owns := len(partitions[topic]) == 1
+			if owns {
+				lease.assign()
+			}
 			select {
-			case assigned <- len(partitions[topic]) == 1:
+			case assigned <- owns:
 			default:
 			}
 		}),
-		kgo.OnPartitionsRevoked(func(context.Context, *kgo.Client, map[string][]int32) {
+		kgo.OnPartitionsRevoked(func(_ context.Context, _ *kgo.Client, partitions map[string][]int32) {
+			if len(partitions[topic]) > 0 {
+				lease.lose()
+			}
 			select {
 			case assigned <- false:
 			default:
 			}
 		}),
-		kgo.OnPartitionsLost(func(context.Context, *kgo.Client, map[string][]int32) {
+		kgo.OnPartitionsLost(func(_ context.Context, _ *kgo.Client, partitions map[string][]int32) {
+			if len(partitions[topic]) > 0 {
+				lease.lose()
+			}
 			select {
 			case assigned <- false:
 			default:
@@ -131,11 +287,13 @@ func (t *kafkaTransport) acquireDLQAdminLease(ctx context.Context, topology tran
 	if err != nil {
 		return nil, fmt.Errorf("kafka: create DLQ admin lease consumer: %w", err)
 	}
+	lease.client = client
 	for {
 		select {
 		case owns := <-assigned:
 			if owns {
-				return &dlqAdminLease{client: client}, nil
+				go lease.monitor()
+				return lease, nil
 			}
 			client.CloseAllowingRebalance()
 			return nil, errKafkaDLQAdminBusy
@@ -155,7 +313,8 @@ func (t *kafkaTransport) acquireDLQAdminLease(ctx context.Context, topology tran
 		select {
 		case owns := <-assigned:
 			if owns {
-				return &dlqAdminLease{client: client}, nil
+				go lease.monitor()
+				return lease, nil
 			}
 			client.CloseAllowingRebalance()
 			return nil, errKafkaDLQAdminBusy

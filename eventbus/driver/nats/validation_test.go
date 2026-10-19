@@ -2,6 +2,7 @@ package nats
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,23 @@ func TestValidateTopologyRejectsInvalidNATSOptions(t *testing.T) {
 				t.Fatal("ValidateTopology unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestNATSEventLayoutMustBeExplicit(t *testing.T) {
+	validator := &natsTransport{}
+	topology := transport.Topology{JobType: "events", Kind: transport.EventTopology}
+	if err := validator.ValidateTopology(topology); err == nil || !strings.Contains(err.Error(), natsEventLayoutOption) {
+		t.Fatalf("event topology without targeted layout = %v", err)
+	}
+	WithEventLayoutTargeted()(&topology)
+	if err := validator.ValidateTopology(topology); err != nil {
+		t.Fatalf("targeted event topology rejected: %v", err)
+	}
+	task := transport.Topology{JobType: "tasks", Kind: transport.TaskTopology}
+	WithEventLayoutTargeted()(&task)
+	if err := validator.ValidateTopology(task); err == nil {
+		t.Fatal("event layout option was accepted on task topology")
 	}
 }
 

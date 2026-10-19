@@ -87,6 +87,9 @@ func (t *kafkaTransport) relatedTopicPartitionsReady(ctx context.Context, topics
 			if partitionDetail.Err != nil {
 				return false, fmt.Errorf("kafka: inspect related topic %q partition %d: %w", topic, partition, partitionDetail.Err)
 			}
+			if partitionDetail.Leader < 0 {
+				return false, nil
+			}
 		}
 	}
 	return true, nil
@@ -94,26 +97,36 @@ func (t *kafkaTransport) relatedTopicPartitionsReady(ctx context.Context, topics
 
 func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySchedulerHandle, error) {
 	type tierConsumer struct {
-		tier   time.Duration
-		client *kgo.Client
+		tier     time.Duration
+		targeted bool
+		client   *kgo.Client
 	}
-	consumers := make([]tierConsumer, 0, len(delayTiers))
+	consumers := make([]tierConsumer, 0, len(delayTiers)*2)
 	for _, tier := range delayTiers {
-		topic := t.delayTopic(topo, tier)
-		opts := []kgo.Opt{
-			kgo.ConsumerGroup(fmt.Sprintf("%s-delay-%s-group", topo.Name(), tier)),
-			kgo.ConsumeTopics(topic),
-			kgo.BlockRebalanceOnPoll(),
+		workers := []tierConsumer{{tier: tier}}
+		if topo.Kind == transport.EventTopology {
+			workers = append(workers, tierConsumer{tier: tier, targeted: true})
 		}
-		opts = append(opts, topologyFetchOptions(topo)...)
-		client, err := t.newManualConsumer(opts...)
-		if err != nil {
-			for _, consumer := range consumers {
-				consumer.client.CloseAllowingRebalance()
+		for _, worker := range workers {
+			topic, group := t.delayTopic(topo, tier), fmt.Sprintf("%s-delay-%s-group", topo.Name(), tier)
+			if worker.targeted {
+				topic, group = t.targetedDelayTopic(topo, tier), fmt.Sprintf("%s-target-delay-%s-group", topo.Name(), tier)
 			}
-			return nil, err
+			opts := []kgo.Opt{
+				kgo.ConsumerGroup(group), kgo.ConsumeTopics(topic),
+				kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kgo.BlockRebalanceOnPoll(),
+			}
+			opts = append(opts, topologyFetchOptions(topo)...)
+			client, err := t.newManualConsumer(opts...)
+			if err != nil {
+				for _, consumer := range consumers {
+					consumer.client.CloseAllowingRebalance()
+				}
+				return nil, err
+			}
+			worker.client = client
+			consumers = append(consumers, worker)
 		}
-		consumers = append(consumers, tierConsumer{tier: tier, client: client})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,10 +134,10 @@ func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySch
 	var workers sync.WaitGroup
 	workers.Add(len(consumers))
 	for _, consumer := range consumers {
-		go func(tier time.Duration, client *kgo.Client) {
+		go func(tier time.Duration, targeted bool, client *kgo.Client) {
 			defer workers.Done()
-			t.runDelayTier(ctx, topo, tier, client)
-		}(consumer.tier, consumer.client)
+			t.runDelayTier(ctx, topo, tier, targeted, client)
+		}(consumer.tier, consumer.targeted, consumer.client)
 	}
 	go func() {
 		workers.Wait()
@@ -133,7 +146,7 @@ func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySch
 	return handle, nil
 }
 
-func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topology, tier time.Duration, client delayConsumerClient) {
+func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient) {
 	defer client.CloseAllowingRebalance()
 	ticker := time.NewTicker(delaySchedulerInterval)
 	defer ticker.Stop()
@@ -142,7 +155,7 @@ func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topolo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.recordSchedulerPoll(topo, tier, time.Now())
+			t.recordSchedulerPoll(topo, schedulerWorker(tier, targeted), time.Now())
 			pollCtx, cancel := context.WithTimeout(ctx, delayPollTimeout)
 			fetches := client.PollRecords(pollCtx, delayBatchSize(topo))
 			cancel()
@@ -150,14 +163,14 @@ func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topolo
 				return
 			}
 			if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-				t.recordSchedulerError(topo, tier, "poll", err, time.Now())
+				t.recordSchedulerError(topo, schedulerWorker(tier, targeted), "poll", err, time.Now())
 				client.AllowRebalance()
 				continue
 			}
 			if len(fetches.Records()) > 0 {
-				_ = t.processDelayBatch(ctx, topo, tier, client, fetches.Records(), time.Now())
+				_ = t.processDelayBatchFor(ctx, topo, tier, targeted, client, fetches.Records(), time.Now())
 			} else {
-				t.recordSchedulerSuccess(topo, tier, 0, time.Now())
+				t.recordSchedulerSuccess(topo, schedulerWorker(tier, targeted), 0, time.Now())
 			}
 			client.AllowRebalance()
 		}
@@ -169,6 +182,10 @@ func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topolo
 // lower tier or the main topic only after confirmed production, and its source
 // offset is committed synchronously afterward.
 func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.Topology, tier time.Duration, client delayConsumerClient, records []*kgo.Record, now time.Time) error {
+	return t.processDelayBatchFor(ctx, topo, tier, false, client, records, now)
+}
+
+func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient, records []*kgo.Record, now time.Time) error {
 	queues := make(map[partitionKey][]*kgo.Record)
 	keys := make([]partitionKey, 0)
 	for _, record := range records {
@@ -180,9 +197,14 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 	}
 	rewind := make(map[string]map[int32]kgo.EpochOffset)
 	var failures []error
+	transfers, commits := 0, 0
 	for _, key := range keys {
 		for _, record := range queues[key] {
-			if record.Topic != t.delayTopic(topo, tier) {
+			expectedTopic := t.delayTopic(topo, tier)
+			if targeted {
+				expectedTopic = t.targetedDelayTopic(topo, tier)
+			}
+			if record.Topic != expectedTopic {
 				setDelayRewind(rewind, record)
 				failures = append(failures, fmt.Errorf("kafka: delay tier %s received unexpected topic %q", tier, record.Topic))
 				break
@@ -193,12 +215,29 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 				failures = append(failures, fmt.Errorf("kafka: decode delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
 				break
 			}
+			message := recordMessage(record)
 			target := t.delayDestination(topo, runAt, now)
+			if targeted {
+				group := message.Headers[kafkaTargetGroupHeader]
+				if group == "" {
+					setDelayRewind(rewind, record)
+					failures = append(failures, fmt.Errorf("kafka: targeted delayed record %s[%d]@%d has no target group", record.Topic, record.Partition, record.Offset))
+					break
+				}
+				if err := t.validateProvisionedSubscriber(ctx, topo, group); err != nil {
+					setDelayRewind(rewind, record)
+					failures = append(failures, fmt.Errorf("kafka: targeted delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
+					break
+				}
+				target = t.targetedDelayDestination(topo, group, runAt, now)
+				if target == t.privateReadyTopic(topo, group) {
+					removeMessageHeader(&message, kafkaTargetGroupHeader)
+				}
+			}
 			// Rotate a not-yet-due partition head to the tail of the same durable
 			// tier. Confirmed publish-before-commit lets later, earlier deadlines
 			// progress without losing the blocker on an ambiguous boundary.
-			message := recordMessage(record)
-			if target == t.mainTopic(topo) {
+			if target == t.mainTopic(topo) || targeted && !strings.Contains(target, ".target-delay-") {
 				removeMessageHeader(&message, kafkaRunAtHeader)
 			}
 			if err := t.produceConfirmed(ctx, messageRecord(target, message)); err != nil {
@@ -206,52 +245,68 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 				failures = append(failures, fmt.Errorf("kafka: forward delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
 				break
 			}
+			transfers++
 			if err := client.CommitRecords(ctx, record); err != nil {
 				setDelayRewind(rewind, record)
 				failures = append(failures, fmt.Errorf("kafka: commit delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
 				break
 			}
+			commits++
 		}
 	}
 	if len(rewind) > 0 {
 		client.SetOffsets(rewind)
 	}
 	err := errors.Join(failures...)
+	t.recordSchedulerProgress(topo, schedulerWorker(tier, targeted), transfers, commits)
 	if err == nil {
-		t.recordSchedulerSuccess(topo, tier, len(records), now)
+		t.recordSchedulerSuccess(topo, schedulerWorker(tier, targeted), len(records), now)
 	} else {
-		t.recordSchedulerError(topo, tier, kafkaSchedulerOperation(err), err, now)
+		t.recordSchedulerError(topo, schedulerWorker(tier, targeted), kafkaSchedulerOperation(err), err, now)
 	}
 	return err
 }
 
-func (t *kafkaTransport) recordSchedulerPoll(topo transport.Topology, tier time.Duration, now time.Time) {
+func (t *kafkaTransport) recordSchedulerProgress(topo transport.Topology, worker string, transfers, commits int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	status := t.schedulerStatusLocked(topo, tier)
+	status := t.schedulerStatusLocked(topo, worker)
+	status.Transfers += uint64(transfers)
+	status.Commits += uint64(commits)
+}
+
+func schedulerWorker(tier time.Duration, targeted bool) string {
+	if targeted {
+		return "target-" + tier.String()
+	}
+	return tier.String()
+}
+
+func (t *kafkaTransport) recordSchedulerPoll(topo transport.Topology, worker string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	status := t.schedulerStatusLocked(topo, worker)
 	status.LastPoll = now
 	status.Polls++
 }
 
-func (t *kafkaTransport) recordSchedulerSuccess(topo transport.Topology, tier time.Duration, processed int, now time.Time) {
+func (t *kafkaTransport) recordSchedulerSuccess(topo transport.Topology, worker string, processed int, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	status := t.schedulerStatusLocked(topo, tier)
+	status := t.schedulerStatusLocked(topo, worker)
 	status.LastSuccess = now
 	status.Dispatches++
-	status.Transfers += uint64(processed)
-	status.Commits += uint64(processed)
 	status.ConsecutiveErrors = 0
 	status.Degraded = false
 }
 
-func (t *kafkaTransport) recordSchedulerError(topo transport.Topology, tier time.Duration, operation string, err error, now time.Time) {
+func (t *kafkaTransport) recordSchedulerError(topo transport.Topology, worker, operation string, err error, now time.Time) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	status := t.schedulerStatusLocked(topo, tier)
+	status := t.schedulerStatusLocked(topo, worker)
 	status.LastErrorAt = now
 	status.LastErrorOperation = operation
 	status.LastError = kafkaSchedulerError(err)
@@ -260,7 +315,7 @@ func (t *kafkaTransport) recordSchedulerError(topo transport.Topology, tier time
 	status.Degraded = true
 }
 
-func (t *kafkaTransport) schedulerStatusLocked(topo transport.Topology, tier time.Duration) *transport.SchedulerStatus {
+func (t *kafkaTransport) schedulerStatusLocked(topo transport.Topology, worker string) *transport.SchedulerStatus {
 	key := topo.Name()
 	if t.schedulerStatuses == nil {
 		t.schedulerStatuses = make(map[string]map[string]*transport.SchedulerStatus)
@@ -268,7 +323,6 @@ func (t *kafkaTransport) schedulerStatusLocked(topo transport.Topology, tier tim
 	if t.schedulerStatuses[key] == nil {
 		t.schedulerStatuses[key] = make(map[string]*transport.SchedulerStatus)
 	}
-	worker := tier.String()
 	status := t.schedulerStatuses[key][worker]
 	if status == nil {
 		status = &transport.SchedulerStatus{Transport: "kafka", Topology: key, Worker: worker}
@@ -284,6 +338,9 @@ func (t *kafkaTransport) SchedulerHealth(topo transport.Topology) []transport.Sc
 	result := make([]transport.SchedulerStatus, 0, len(delayTiers))
 	for _, tier := range delayTiers {
 		if status := workers[tier.String()]; status != nil {
+			result = append(result, *status)
+		}
+		if status := workers[schedulerWorker(tier, true)]; status != nil {
 			result = append(result, *status)
 		}
 	}
@@ -343,6 +400,21 @@ func (t *kafkaTransport) delayDestination(topo transport.Topology, runAt, now ti
 		}
 	}
 	return t.delayTopic(topo, tier)
+}
+
+func (t *kafkaTransport) targetedDelayDestination(topo transport.Topology, group string, runAt, now time.Time) string {
+	delay := runAt.Sub(now)
+	if delay <= 0 {
+		return t.privateReadyTopic(topo, group)
+	}
+	tier := delayTiers[0]
+	for i := len(delayTiers) - 1; i >= 0; i-- {
+		if delay >= delayTiers[i] {
+			tier = delayTiers[i]
+			break
+		}
+	}
+	return t.targetedDelayTopic(topo, tier)
 }
 
 func setDelayRewind(offsets map[string]map[int32]kgo.EpochOffset, record *kgo.Record) {

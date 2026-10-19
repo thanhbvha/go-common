@@ -17,18 +17,23 @@ collisions), but never use the same key prefix.
 | --- | --- |
 | Main stream | `:stream` |
 | Delayed sorted set | `:delayed` |
+| Subscriber retry stream | `:retry:<base64url(subscriber-group)>:stream` |
+| Subscriber retry delayed set | `:retry:<base64url(subscriber-group)>:delayed` |
 | Dead-letter stream | `:dlq` |
 | Topology metadata hash | `:metadata` |
+| Subscriber scheduler index | `:group-index` |
 | Dedupe reservation | `:dedupe:<base64url(user-key)>` |
 
 Every key above shares the same Redis Cluster hash tag. Future atomic delayed
 dispatch and settlement scripts can operate on those keys without CROSSSLOT.
 `EnsureTopology` persists `layout_version`, `namespace`, `kind`, and `name` in
-the metadata hash before starting the topology scheduler. Scheduler identity is
-the canonical prefix, not the delimiter-joined logical display name.
+the metadata hash before starting the topology scheduler. Event topologies also
+persist the immutable `event_layout=targeted-v1` migration fence. Scheduler
+identity is the canonical prefix, not the delimiter-joined logical display name.
 
 Consumer groups belong to their stream: task group is `workers`, subscriber
-groups are `subscriber:<subscriber-name>`. Dedupe scope is namespace + kind +
+groups are `subscriber:<subscriber-name>`. Event subscriptions provision the
+same group on the shared event stream and their private retry stream. Dedupe scope is namespace + kind +
 name + user key. Engine publications use `transport.PublicationDeduper`: values
 are owned `reserved` records until broker acceptance is confirmed, then become
 `published`; abort/confirm scripts compare the reservation ID before mutation.
@@ -59,6 +64,39 @@ If draining is impractical, design and verify a durable migration separately.
 Do not use RENAME across old/new keys in a cluster: their slots may differ.
 Do not run mixed old/new producers and assume they share a queue. Existing
 `queue`, `queue_nats`, and `queue_kafka` modules retain their own storage APIs.
+
+## Targeted event retry migration fence
+
+Subscriber-private event retry lanes require an explicit declaration with
+`redis.WithEventLayoutTargeted()`. It sets the Redis-specific topology option
+`redis.event_layout=targeted-v1`. Drivers predating the targeted layout reject
+that unknown option during `ValidateTopology`, so they cannot join the same
+declared event topology and silently broadcast retries.
+
+`EnsureTopology` atomically verifies the canonical metadata identity and the
+existing event marker before writing `event_layout=targeted-v1`. It never
+replaces a different marker. Event publication, delayed publication, consume,
+subscription provisioning, retry/DLQ settlement, delayed dispatch, capacity
+reconciliation, retention, statistics, and DLQ administration fail closed when
+the marker is absent or different. Task topologies do not use this option or
+marker and retain their existing behavior.
+
+For an existing event topology, deploy in this order:
+
+1. Stop all old Redis EventBus processes for that topology. Confirm no old
+   producer, consumer, scheduler, or administration process remains.
+2. Upgrade every process and add `redis.WithEventLayoutTargeted()` to each event
+   declaration. Do not add it to task declarations.
+3. Run normal topology startup so `EnsureTopology` establishes the marker before
+   publication, subscription provisioning, or administration begins.
+4. Treat a missing or mismatched marker as an incomplete or conflicting
+   migration. Do not manually overwrite a different marker; isolate or drain the
+   old topology and resolve its storage semantics first.
+
+Removing the option after migration is not a rollback: new drivers reject the
+event declaration, while old drivers remain incompatible with private retry
+lanes. Roll back only by stopping the targeted deployment and restoring a fully
+isolated pre-migration topology and backlog.
 
 Default tests verify exact hash-tag equality, tuple separation and scoped
 dedupe using miniredis; they do not claim a live Redis Cluster integration run.
@@ -111,14 +149,25 @@ later ACK unexpectedly fails, a destination copy may exist alongside a pending
 source, allowing duplicates but not silent loss. Redis durability/replication
 settings still govern crash/failover guarantees. Missing pending state cannot
 prove which external actor acknowledged a record; it is an explicit stale
-settlement error, not a success receipt. Scripts never trim DLQ records;
+settlement error, not a success receipt. Task retry uses topology delayed
+storage. Event retry uses the source subscriber's private delayed set and ready
+stream. The metadata hash stores topology-wide ready and delayed usage counters;
+admission, retry transfer, dispatch, requeue, private ACK, retirement, and
+retention update them in the same Lua operation as their data mutation. The
+bounded sweeper uses cursor-based manifest pages and rotates across shared and
+private lanes. ACK and
+transfer from a private retry stream also XDEL the private source after XACK.
+Scripts never trim DLQ records;
 `redis.dlq_maxlen` is retained as a compatibility option but no longer trims on
 settlement. Admin retention is separate work.
 
 ## Reclaim
 
-Consume scans pending work with Redis 6.2+ `XAUTOCLAIM` on startup and every
-30 seconds after a full scan. Each pass scans at most 100 claimed entries;
+Consume scans pending work with Redis 6.2+ `XAUTOCLAIM` on startup and at the
+smaller of 30 seconds or `redis.ack_wait` after a full scan. Reclaim and fresh
+intake share one permit budget of `Concurrency + Prefetch`; one broker entry is
+acquired per permit across the shared and private streams, so there is no
+fetched-but-undelivered excess. Each reclaim command claims at most one entry;
 cursor progress is retained across empty pages. Fresh intake runs between
 pages; read blocking is capped at two seconds so a larger `redis.block` cannot
 starve reclaim. The same synchronous callback handles new and claimed work,
@@ -167,7 +216,10 @@ partial or fabricated record.
 
 Requeue accepts at most 1,000 record IDs. A same-slot Lua operation validates
 the DLQ and ready-stream types and every selected payload before mutation, then
-XADDs the original envelope to the ready stream and XDELs its DLQ record.
+XADDs the original envelope to the task/shared ready stream, or for events to
+the recorded source subscriber's private retry stream, and XDELs its DLQ record.
+The event destination's manifest state is checked inside that same Lua script,
+so retirement cannot race requeue into recreating a deleted private lane.
 Missing/already-requeued IDs are successful no-ops, so retrying after an
 ambiguous response cannot publish that DLQ record again. Lua isolation is not
 rollback across Redis crash/failover; durability still depends on Redis
@@ -180,8 +232,8 @@ scans that can overlap requeue or purge activity.
 
 ## Statistics
 
-`transport.StatsReader` combines the main stream, consumer groups, delayed
-sorted set, and DLQ stream. The meanings are operational obligations, not just
+`transport.StatsReader` combines the main stream, consumer groups, topology and
+subscriber-private delayed sets/streams, and DLQ stream. The meanings are operational obligations, not just
 physical entries:
 
 - `Pending` is ready work not yet delivered to a consumer.

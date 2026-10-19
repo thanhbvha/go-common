@@ -80,7 +80,7 @@ func TestMainConsumerOverridesFactoryAutoCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := factory.NewManualConsumer(mainConsumerOptions("jobs", "workers", transport.Topology{})...)
+	client, err := factory.NewManualConsumer(mainConsumerOptions([]string{"jobs"}, "workers", transport.Topology{})...)
 	if err != nil {
 		t.Fatal(err)
 	}

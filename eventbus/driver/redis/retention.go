@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,22 +36,35 @@ var (
 local stream = KEYS[1]
 local groups = KEYS[2]
 local metadata = KEYS[3]
+local private = KEYS[4]
+local group_index = KEYS[5]
 local group = ARGV[1]
+local stream_type = redis.call("TYPE", stream).ok
+local private_type = redis.call("TYPE", private).ok
+if stream_type ~= "none" and stream_type ~= "stream" then return redis.error_reply("subscription source must be a stream") end
+if private_type ~= "none" and private_type ~= "stream" then return redis.error_reply("subscription retry source must be a stream") end
 local created = redis.pcall("XGROUP", "CREATE", stream, group, "0", "MKSTREAM")
 if type(created) == "table" and created.err and not string.find(created.err, "BUSYGROUP", 1, true) then
     return redis.error_reply(created.err)
 end
 local state = redis.call("HGET", groups, group)
 if state and string.sub(state, 1, 9) == "retiring:" then return -1 end
+created = redis.pcall("XGROUP", "CREATE", private, group, "0", "MKSTREAM")
+if type(created) == "table" and created.err and not string.find(created.err, "BUSYGROUP", 1, true) then
+    return redis.error_reply(created.err)
+end
 if state ~= "active" then
     redis.call("HSET", groups, group, "active")
+    redis.call("ZADD", group_index, 0, group)
     return redis.call("HINCRBY", metadata, "retention_epoch", 1)
 end
+redis.call("ZADD", group_index, 0, group)
 local epoch = redis.call("HGET", metadata, "retention_epoch")
 if not epoch then return 0 end
 return tonumber(epoch)
 `)
 	trimAtEpochScript = goredis.NewScript(`
+if redis.call("HGET", KEYS[2], "capacity_state") ~= "ready" then return redis.error_reply("capacity counters are initializing") end
 local epoch = redis.call("HGET", KEYS[2], "retention_epoch")
 if not epoch then epoch = "0" end
 if epoch ~= ARGV[1] then return -1 end
@@ -72,7 +86,12 @@ local candidates = redis.call("XRANGE", KEYS[1], "-", "(" .. ARGV[2], "COUNT", b
 if #candidates == 0 then return 0 end
 local threshold = ARGV[2]
 if #candidates > batch then threshold = candidates[batch + 1][1] end
-return redis.call("XTRIM", KEYS[1], "MINID", threshold)
+local trimmed = redis.call("XTRIM", KEYS[1], "MINID", threshold)
+if trimmed > 0 then
+    local ready = tonumber(redis.call("HGET", KEYS[2], "ready_entries")) or trimmed
+    redis.call("HSET", KEYS[2], "ready_entries", math.max(0, ready - trimmed))
+end
+return trimmed
 `)
 	releaseRetentionLeaseScript = goredis.NewScript(`
 if redis.call("GET", KEYS[1]) ~= ARGV[1] then return 0 end
@@ -120,9 +139,23 @@ for _, group in ipairs(groups) do
 end
 if not delivered then return -4 end
 local pending = redis.call("XPENDING", KEYS[1], ARGV[1])[1]
-if ARGV[3] ~= "1" and (pending > 0 or not id_ge(delivered, ARGV[2])) then return -2 end
+local private_pending = redis.call("XPENDING", KEYS[4], ARGV[1])[1]
+local private_ready = redis.call("XLEN", KEYS[4])
+local private_delayed = redis.call("ZCARD", KEYS[5])
+if ARGV[3] ~= "1" and (pending > 0 or not id_ge(delivered, ARGV[2]) or private_pending > 0 or private_ready > 0 or private_delayed > 0) then return -2 end
 redis.call("XGROUP", "DESTROY", KEYS[1], ARGV[1])
+redis.call("XGROUP", "DESTROY", KEYS[4], ARGV[1])
+redis.call("DEL", KEYS[4], KEYS[5])
+if private_ready > 0 then
+    local ready = tonumber(redis.call("HGET", KEYS[3], "ready_entries")) or private_ready
+    redis.call("HSET", KEYS[3], "ready_entries", math.max(0, ready - private_ready))
+end
+if private_delayed > 0 then
+    local delayed = tonumber(redis.call("HGET", KEYS[3], "delayed_entries")) or private_delayed
+    redis.call("HSET", KEYS[3], "delayed_entries", math.max(0, delayed - private_delayed))
+end
 redis.call("HDEL", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[6], ARGV[1])
 redis.call("HINCRBY", KEYS[3], "retention_epoch", 1)
 return pending
 `)
@@ -185,9 +218,17 @@ func (t *redisTransport) EnsureSubscription(ctx context.Context, sub transport.S
 	if sub.Topology.Kind == transport.TaskTopology && sub.Group != "" {
 		return fmt.Errorf("redis: task subscription group must be empty")
 	}
+	if err := t.validateEventLayout(ctx, sub.Topology); err != nil {
+		return err
+	}
 	group := t.groupName(sub)
+	privateStream := t.streamKey(sub.Topology)
+	if sub.Topology.Kind == transport.EventTopology {
+		privateStream = t.subscriberRetryStreamKey(sub.Topology, group)
+	}
 	epoch, err := ensureSubscriptionScript.Run(ctx, t.rc, []string{
 		t.streamKey(sub.Topology), t.groupManifestKey(sub.Topology), t.metadataKey(sub.Topology),
+		privateStream, t.groupIndexKey(sub.Topology),
 	}, group).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: ensure subscription %q: %w", group, err)
@@ -262,6 +303,9 @@ func (t *redisTransport) retentionLoop(ctx context.Context) {
 
 func (t *redisTransport) compactReadyStream(ctx context.Context, topo transport.Topology) (int64, error) {
 	if err := t.ValidateTopology(topo); err != nil {
+		return 0, err
+	}
+	if err := t.validateEventLayout(ctx, topo); err != nil {
 		return 0, err
 	}
 	now := time.Now()
@@ -393,7 +437,15 @@ func (t *redisTransport) RetireSubscription(ctx context.Context, sub transport.S
 	if err := t.ValidateTopology(sub.Topology); err != nil {
 		return SubscriptionRetirement{}, err
 	}
+	if sub.Topology.Kind != transport.EventTopology || strings.TrimSpace(sub.Group) == "" {
+		return SubscriptionRetirement{}, fmt.Errorf("redis: event subscriber required")
+	}
+	if err := t.validateEventLayout(ctx, sub.Topology); err != nil {
+		return SubscriptionRetirement{}, err
+	}
 	group := t.groupName(sub)
+	privateStream := t.subscriberRetryStreamKey(sub.Topology, group)
+	privateDelayed := t.subscriberRetryDelayedKey(sub.Topology, group)
 	barrier, err := beginRetirementScript.Run(ctx, t.rc, []string{
 		t.streamKey(sub.Topology), t.groupManifestKey(sub.Topology), t.metadataKey(sub.Topology),
 	}, group).Text()
@@ -424,8 +476,25 @@ func (t *redisTransport) RetireSubscription(ctx context.Context, sub transport.S
 	if err != nil {
 		return result, err
 	}
+	if sub.Topology.Kind == transport.EventTopology {
+		privatePending, err := t.rc.XPending(ctx, privateStream, group).Result()
+		if err != nil {
+			return result, fmt.Errorf("redis: inspect retiring retry pending work: %w", err)
+		}
+		privateEntries, err := t.rc.XLen(ctx, privateStream).Result()
+		if err != nil {
+			return result, fmt.Errorf("redis: inspect retiring retry ready work: %w", err)
+		}
+		privateDelayedCount, err := t.rc.ZCard(ctx, privateDelayed).Result()
+		if err != nil {
+			return result, fmt.Errorf("redis: inspect retiring retry delayed work: %w", err)
+		}
+		result.Pending += privatePending.Count
+		result.Unread += privateEntries - privatePending.Count + privateDelayedCount
+	}
 	finished, err := finishRetirementScript.Run(ctx, t.rc, []string{
-		t.streamKey(sub.Topology), t.groupManifestKey(sub.Topology), t.metadataKey(sub.Topology),
+		t.streamKey(sub.Topology), t.groupManifestKey(sub.Topology), t.metadataKey(sub.Topology), privateStream, privateDelayed,
+		t.groupIndexKey(sub.Topology),
 	}, group, barrier, boolInt(force)).Int64()
 	if err != nil {
 		return result, fmt.Errorf("redis: finish retirement %q: %w", group, err)
@@ -531,6 +600,9 @@ func (t *redisTransport) RetentionReport(ctx context.Context, topo transport.Top
 	if err := t.ValidateTopology(topo); err != nil {
 		return RetentionReport{}, err
 	}
+	if err := t.validateEventLayout(ctx, topo); err != nil {
+		return RetentionReport{}, err
+	}
 	report := RetentionReport{
 		RetentionStatus: t.RetentionStatus(topo),
 		ReadyLimit:      maxReadyEntries(topo),
@@ -567,6 +639,23 @@ func (t *redisTransport) RetentionReport(ctx context.Context, topo transport.Top
 		report.ManifestEpoch = "0"
 	} else if err != nil {
 		return report, fmt.Errorf("redis: retention epoch report: %w", err)
+	}
+	if topo.Kind == transport.EventTopology {
+		for group := range manifest {
+			privateReady, err := t.rc.XLen(ctx, t.subscriberRetryStreamKey(topo, group)).Result()
+			if err != nil {
+				return report, fmt.Errorf("redis: subscriber retry ready usage: %w", err)
+			}
+			privateDelayed, err := t.rc.ZCard(ctx, t.subscriberRetryDelayedKey(topo, group)).Result()
+			if err != nil {
+				return report, fmt.Errorf("redis: subscriber retry delayed usage: %w", err)
+			}
+			if report.ReadyEntries > math.MaxInt64-privateReady || report.DelayedEntries > math.MaxInt64-privateDelayed {
+				return report, fmt.Errorf("redis: retention usage count overflow")
+			}
+			report.ReadyEntries += privateReady
+			report.DelayedEntries += privateDelayed
+		}
 	}
 
 	groups, err := t.rc.XInfoGroups(ctx, t.streamKey(topo)).Result()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,45 +19,68 @@ var (
 	redisStreamID = regexp.MustCompile(`^[0-9]+-[0-9]+$`)
 	requeueScript = goredis.NewScript(`
 local dlq = KEYS[1]
-local ready = KEYS[2]
+local metadata = KEYS[2]
+local groups = KEYS[3]
 local capacity = tonumber(ARGV[1])
+if redis.call("HGET", metadata, "capacity_state") ~= "ready" then return redis.error_reply("capacity counters are initializing") end
 local dlq_type = redis.call("TYPE", dlq).ok
-local ready_type = redis.call("TYPE", ready).ok
 if dlq_type ~= "none" and dlq_type ~= "stream" then
     return redis.error_reply("DLQ source must be a stream")
-end
-if ready_type ~= "none" and ready_type ~= "stream" then
-    return redis.error_reply("requeue destination must be a stream")
 end
 if dlq_type == "none" then return 0 end
 
 local selected = {}
-for index = 2, #ARGV do
+local additions = {}
+for index = 2, #ARGV, 3 do
     local id = ARGV[index]
+    local destination = tonumber(ARGV[index + 1])
+    local expected_group = ARGV[index + 2]
+    if not destination or destination < 4 or destination > #KEYS then
+        return redis.error_reply("invalid requeue destination")
+    end
     local records = redis.call("XRANGE", dlq, id, id, "COUNT", 1)
     if #records > 0 then
         local fields = records[1][2]
         local payload = nil
-        for index = 1, #fields, 2 do
-            if fields[index] == "payload" then
-                payload = fields[index + 1]
-                break
+        local source_group = nil
+        for field = 1, #fields, 2 do
+            if fields[field] == "payload" then
+                payload = fields[field + 1]
+            elseif fields[field] == "source_group" then
+                source_group = fields[field + 1]
             end
         end
         if not payload then
             return redis.error_reply("DLQ record has no payload")
         end
-        table.insert(selected, {id, payload})
+        if expected_group ~= "" and source_group ~= expected_group then
+            return redis.error_reply("DLQ source group changed")
+        end
+        if expected_group ~= "" and redis.call("HGET", groups, expected_group) ~= "active" then
+            return -1000000001
+        end
+        table.insert(selected, {id, payload, destination})
+        additions[destination] = (additions[destination] or 0) + 1
     end
 end
 
-local current = redis.call("XLEN", ready)
-if current + #selected > capacity then return -(current + 1) end
+local current = tonumber(redis.call("HGET", metadata, "ready_entries"))
+if not current then return redis.error_reply("ready capacity counter is missing") end
+local total = 0
+for destination, count in pairs(additions) do
+    local ready_type = redis.call("TYPE", KEYS[destination]).ok
+    if ready_type ~= "none" and ready_type ~= "stream" then
+        return redis.error_reply("requeue destination must be a stream")
+    end
+    total = total + count
+end
+if current + total > capacity then return -(current + 1) end
 
 for _, record in ipairs(selected) do
-    redis.call("XADD", ready, "*", "payload", record[2])
+    redis.call("XADD", KEYS[record[3]], "*", "payload", record[2])
     redis.call("XDEL", dlq, record[1])
 end
+if total > 0 then redis.call("HSET", metadata, "ready_entries", current + total) end
 return #selected
 `)
 )
@@ -65,6 +89,9 @@ return #selected
 // stable when earlier records are requeued/deleted, so pages do not shift.
 func (t *redisTransport) ListPage(ctx context.Context, topology transport.Topology, cursor string, limit int) (transport.DLQPage, error) {
 	if err := t.ValidateTopology(topology); err != nil {
+		return transport.DLQPage{}, err
+	}
+	if err := t.validateEventLayout(ctx, topology); err != nil {
 		return transport.DLQPage{}, err
 	}
 	if limit < 1 || limit > maxDLQAdminBatch {
@@ -139,11 +166,13 @@ func (t *redisTransport) Requeue(ctx context.Context, topology transport.Topolog
 	if err := t.ValidateTopology(topology); err != nil {
 		return err
 	}
+	if err := t.ensureCapacityCounters(ctx, topology); err != nil {
+		return err
+	}
 	if len(messageIDs) > maxDLQAdminBatch {
 		return fmt.Errorf("redis: DLQ requeue batch exceeds %d records", maxDLQAdminBatch)
 	}
-	unique := make([]any, 0, len(messageIDs)+1)
-	unique = append(unique, maxReadyEntries(topology))
+	unique := make([]string, 0, len(messageIDs))
 	seen := make(map[string]struct{}, len(messageIDs))
 	for _, id := range messageIDs {
 		if !redisStreamID.MatchString(id) {
@@ -155,14 +184,53 @@ func (t *redisTransport) Requeue(ctx context.Context, topology transport.Topolog
 		seen[id] = struct{}{}
 		unique = append(unique, id)
 	}
-	if len(unique) == 1 {
+	if len(unique) == 0 {
 		return nil
 	}
-	result, err := requeueScript.Run(ctx, t.rc, []string{t.dlqKey(topology), t.streamKey(topology)}, unique...).Int64()
+	dlq := t.dlqKey(topology)
+	keys := []string{dlq, t.metadataKey(topology), t.groupManifestKey(topology), t.streamKey(topology)}
+	keyIndexes := map[string]int{keys[3]: 4}
+	args := []any{maxReadyEntries(topology)}
+	for _, id := range unique {
+		destination := keys[3]
+		expectedGroup := ""
+		if topology.Kind == transport.EventTopology {
+			records, err := t.rc.XRangeN(ctx, dlq, id, id, 1).Result()
+			if err != nil {
+				return fmt.Errorf("redis: inspect DLQ requeue source: %w", err)
+			}
+			if len(records) == 0 {
+				continue
+			}
+			group, err := requiredDLQString(records[0], "source_group")
+			if err != nil {
+				return err
+			}
+			if !strings.HasPrefix(group, "subscriber:") {
+				return fmt.Errorf("redis: event DLQ record %s has invalid source group", id)
+			}
+			expectedGroup = group
+			destination = t.subscriberRetryStreamKey(topology, group)
+		}
+		index, ok := keyIndexes[destination]
+		if !ok {
+			keys = append(keys, destination)
+			index = len(keys)
+			keyIndexes[destination] = index
+		}
+		args = append(args, id, index, expectedGroup)
+	}
+	if len(args) == 1 {
+		return nil
+	}
+	result, err := requeueScript.Run(ctx, t.rc, keys, args...).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: requeue DLQ: %w", err)
 	}
 	if result < 0 {
+		if result == -1000000001 {
+			return fmt.Errorf("%w: DLQ target is not active", ErrSubscriptionRetiring)
+		}
 		return t.capacityError(topology, "ready", -result-1, maxReadyEntries(topology))
 	}
 	return nil
@@ -170,6 +238,9 @@ func (t *redisTransport) Requeue(ctx context.Context, topology transport.Topolog
 
 func (t *redisTransport) Purge(ctx context.Context, topology transport.Topology) error {
 	if err := t.ValidateTopology(topology); err != nil {
+		return err
+	}
+	if err := t.validateEventLayout(ctx, topology); err != nil {
 		return err
 	}
 	if err := t.rc.Del(ctx, t.dlqKey(topology)).Err(); err != nil {
@@ -180,6 +251,9 @@ func (t *redisTransport) Purge(ctx context.Context, topology transport.Topology)
 
 func (t *redisTransport) Count(ctx context.Context, topology transport.Topology) (int64, error) {
 	if err := t.ValidateTopology(topology); err != nil {
+		return 0, err
+	}
+	if err := t.validateEventLayout(ctx, topology); err != nil {
 		return 0, err
 	}
 	count, err := t.rc.XLen(ctx, t.dlqKey(topology)).Result()

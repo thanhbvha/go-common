@@ -8,12 +8,23 @@ import (
 )
 
 const (
+	redisEventLayoutOption = "redis.event_layout"
+	redisTargetedLayoutV1  = "targeted-v1"
+
 	defaultMaxReadyEntries   int64 = 1_000_000
 	defaultMaxDelayedEntries int64 = 1_000_000
 	defaultMaxDLQEntries     int64 = 50_000
 	defaultRetentionBatch    int64 = 10_000
 	defaultRetentionInterval       = 30 * time.Second
+	schedulerLaneScanMax           = 16
 )
+
+// WithEventLayoutTargeted opts an event topology into subscriber-targeted
+// retries. Older Redis drivers reject this Redis-specific option, preventing
+// mixed-version deployments from silently using incompatible retry layouts.
+func WithEventLayoutTargeted() eventbus.TopologyOption {
+	return eventbus.WithOption(redisEventLayoutOption, redisTargetedLayoutV1)
+}
 
 // WithMaxLen requests the retired lossy ready-stream cap. Validation rejects
 // this option because MAXLEN can remove accepted work ahead of slow groups.

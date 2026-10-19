@@ -24,7 +24,7 @@ func TestDedupeIsTopologyScopedAndHonorsPerReservationTTL(t *testing.T) {
 		{Namespace: "one", JobType: "job"},
 		{Namespace: "two", JobType: "job"},
 		{Namespace: "one", JobType: "other"},
-		{Namespace: "one", JobType: "job", Kind: transport.EventTopology},
+		targetedEventTopology("one", "job"),
 	}
 	for _, topo := range topologies {
 		if err := backend.EnsureTopology(ctx, topo); err != nil {

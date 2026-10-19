@@ -44,9 +44,12 @@ func (h *postSuccessErrorHook) ProcessPipelineHook(next goredis.ProcessPipelineH
 // and may retry, so duplication is allowed; silent loss is not.
 func TestPublishResponseLossLeavesAcceptedSource(t *testing.T) {
 	backend, rc := delayedBackend(t)
-	rc.AddHook(&postSuccessErrorHook{commands: map[string]bool{"eval": true, "evalsha": true}})
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "fault", JobType: "publish-response"}
+	if err := backend.ensureCapacityCounters(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	rc.AddHook(&postSuccessErrorHook{commands: map[string]bool{"eval": true, "evalsha": true}})
 	err := backend.Publish(ctx, topo, transport.Message{Payload: []byte("accepted")})
 	if !errors.Is(err, errSyntheticResponseLoss) {
 		t.Fatalf("publish error = %v", err)
@@ -109,6 +112,9 @@ func TestTransferResponseLossIsIdempotent(t *testing.T) {
 			ctx := context.Background()
 			topo := transport.Topology{Namespace: "fault", JobType: "transfer-response-" + kind.String()}
 			delivery := pendingDelivery(t, backend, rc, topo)
+			if err := backend.ensureCapacityCounters(ctx, topo); err != nil {
+				t.Fatal(err)
+			}
 			rc.AddHook(&postSuccessErrorHook{commands: map[string]bool{"eval": true, "evalsha": true}})
 			decision := transferDecision(kind)
 			if err := delivery.Settle(ctx, decision); !errors.Is(err, errSyntheticResponseLoss) {

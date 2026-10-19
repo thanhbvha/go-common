@@ -139,6 +139,19 @@ func TopologyOptions(driver string) []eventbus.TopologyOption {
 	}
 }
 
+func EventTopologyOptions(driver string) []eventbus.TopologyOption {
+	options := TopologyOptions(driver)
+	switch driver {
+	case "redis":
+		options = append(options, redisdriver.WithEventLayoutTargeted())
+	case "nats":
+		options = append(options, natsdriver.WithEventLayoutTargeted())
+	case "kafka":
+		options = append(options, kafkadriver.WithEventLayoutTargeted())
+	}
+	return options
+}
+
 func SupportsDedupe(tr transport.Transport) bool {
 	if _, ok := tr.(transport.TopologyDeduper); ok {
 		return true

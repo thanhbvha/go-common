@@ -71,10 +71,14 @@ func runLiveRedisContract(t *testing.T, rc goredis.UniversalClient, mode string)
 			return backend
 		},
 		Topology: func(name string, kind transport.TopologyKind) transport.Topology {
-			return transport.Topology{
+			topo := transport.Topology{
 				Namespace: namespace, JobType: name, Kind: kind,
 				Options: map[string]any{"redis.block": 25 * time.Millisecond, "redis.ack_wait": time.Minute},
 			}
+			if kind == transport.EventTopology {
+				topo.Options[redisEventLayoutOption] = redisTargetedLayoutV1
+			}
+			return topo
 		},
 		DispatchDue: func(ctx context.Context, tr transport.Transport, topo transport.Topology, now time.Time) (int64, error) {
 			return tr.(*redisTransport).dispatchDue(ctx, topo, now)
@@ -83,7 +87,9 @@ func runLiveRedisContract(t *testing.T, rc goredis.UniversalClient, mode string)
 			t.Helper()
 			time.Sleep(ttl + 50*time.Millisecond)
 		},
-		ReceiveWithin: 10 * time.Second,
+		SubscriberRetryIsolation: true,
+		SubscriberDLQIsolation:   true,
+		ReceiveWithin:            10 * time.Second,
 	})
 }
 

@@ -34,7 +34,7 @@ func TestTopologyKeysShareClusterHashTagAndIsolateTuples(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, topo := range topologies {
-		keys := []string{backend.streamKey(topo), backend.delayedKey(topo), backend.dlqKey(topo), backend.metadataKey(topo), backend.dedupeKey(topo, "user}:key{")}
+		keys := []string{backend.streamKey(topo), backend.delayedKey(topo), backend.dlqKey(topo), backend.metadataKey(topo), backend.groupIndexKey(topo), backend.dedupeKey(topo, "user}:key{"), backend.subscriberRetryStreamKey(topo, "subscriber:user}:key{"), backend.subscriberRetryDelayedKey(topo, "subscriber:user}:key{")}
 		tag := hashTag(t, keys[0])
 		if seen[tag] {
 			t.Fatal("distinct topology tuples share identity")
@@ -56,7 +56,7 @@ func TestScopedDedupeIsolationExpiryAndRelease(t *testing.T) {
 	defer rc.Close()
 	backend := New(rc).(*redisTransport)
 	ctx := context.Background()
-	topologies := []transport.Topology{{Namespace: "one", JobType: "job"}, {Namespace: "two", JobType: "job"}, {Namespace: "one", JobType: "other"}, {Namespace: "one", JobType: "job", Kind: transport.EventTopology}}
+	topologies := []transport.Topology{{Namespace: "one", JobType: "job"}, {Namespace: "two", JobType: "job"}, {Namespace: "one", JobType: "other"}, targetedEventTopology("one", "job")}
 	for _, topo := range topologies {
 		ok, err := backend.ReserveTopology(ctx, topo, "same", time.Minute)
 		if err != nil || !ok {
@@ -130,10 +130,15 @@ func TestEngineUsesTopologyScopedRedisDedupe(t *testing.T) {
 		if kind == transport.TaskTopology {
 			err = bus.DeclareTask("same")
 		} else {
-			err = bus.DeclareEvent("same")
+			err = bus.DeclareEvent("same", WithEventLayoutTargeted())
 		}
 		if err != nil {
 			t.Fatal(err)
+		}
+		topo := transport.Topology{Namespace: cfg.Namespace, Kind: kind, JobType: "same"}
+		if kind == transport.EventTopology {
+			topo.Options = map[string]any{redisEventLayoutOption: redisTargetedLayoutV1}
+			ensureTargetedEventTopology(t, backend, topo)
 		}
 		publish := bus.Enqueue
 		if kind == transport.EventTopology {
@@ -144,7 +149,6 @@ func TestEngineUsesTopologyScopedRedisDedupe(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		topo := transport.Topology{Namespace: cfg.Namespace, Kind: kind, JobType: "same"}
 		if n, err := rc.XLen(ctx, backend.streamKey(topo)).Result(); err != nil || n != 1 {
 			t.Fatalf("published count = %d, %v", n, err)
 		}
@@ -160,12 +164,12 @@ func TestTopologyMetadataUsesCanonicalKey(t *testing.T) {
 	defer rc.Close()
 	backend := New(rc).(*redisTransport)
 	defer backend.Close(context.Background())
-	topo := transport.Topology{Namespace: "namespace", Kind: transport.EventTopology, JobType: "name"}
+	topo := targetedEventTopology("namespace", "name")
 	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
 		t.Fatal(err)
 	}
 	metadata, err := rc.HGetAll(context.Background(), backend.metadataKey(topo)).Result()
-	if err != nil || metadata["layout_version"] != "1" || metadata["namespace"] != topo.Namespace || metadata["kind"] != "event" || metadata["name"] != topo.JobType {
+	if err != nil || metadata["layout_version"] != "1" || metadata["event_layout"] != redisTargetedLayoutV1 || metadata["namespace"] != topo.Namespace || metadata["kind"] != "event" || metadata["name"] != topo.JobType {
 		t.Fatal("metadata not persisted")
 	}
 }

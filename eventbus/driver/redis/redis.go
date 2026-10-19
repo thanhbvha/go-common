@@ -24,31 +24,60 @@ func init() {
 }
 
 const (
+	ensureTopologyMetadataLua = `
+local metadata = KEYS[1]
+local expected = {"layout_version", ARGV[1], "namespace", ARGV[2], "kind", ARGV[3], "name", ARGV[4]}
+for index = 1, #expected, 2 do
+    local current = redis.call("HGET", metadata, expected[index])
+    if current and current ~= expected[index + 1] then return -1 end
+end
+if ARGV[5] ~= "" then
+    local current = redis.call("HGET", metadata, "event_layout")
+    if current and current ~= ARGV[5] then return -2 end
+end
+redis.call("HSET", metadata, unpack(expected))
+if ARGV[5] ~= "" then redis.call("HSET", metadata, "event_layout", ARGV[5]) end
+return 1
+`
 	luaPublishReady = `
 local stream = KEYS[1]
+local metadata = KEYS[2]
 local limit = tonumber(ARGV[1])
-local current = redis.call("XLEN", stream)
+if redis.call("HGET", metadata, "capacity_state") ~= "ready" then return redis.error_reply("capacity counters are initializing") end
+local current = tonumber(redis.call("HGET", metadata, "ready_entries"))
+if not current then return redis.error_reply("ready capacity counter is missing") end
 if current >= limit then return -(current + 1) end
 redis.call("XADD", stream, "*", "payload", ARGV[2])
+redis.call("HSET", metadata, "ready_entries", current + 1)
 return current + 1
 `
 	luaPublishDelayed = `
 local delayed = KEYS[1]
+local metadata = KEYS[2]
 local limit = tonumber(ARGV[1])
-local current = redis.call("ZCARD", delayed)
-if not redis.call("ZSCORE", delayed, ARGV[3]) and current >= limit then
+if redis.call("HGET", metadata, "capacity_state") ~= "ready" then return redis.error_reply("capacity counters are initializing") end
+local current = tonumber(redis.call("HGET", metadata, "delayed_entries"))
+if not current then return redis.error_reply("delayed capacity counter is missing") end
+local exists = redis.call("ZSCORE", delayed, ARGV[3])
+if not exists and current >= limit then
     return -(current + 1)
 end
 redis.call("ZADD", delayed, ARGV[2], ARGV[3])
-return current + 1
+if not exists then
+    current = current + 1
+    redis.call("HSET", metadata, "delayed_entries", current)
+end
+return current
 `
 	// Lua script to move delayed jobs to the stream atomically
 	luaMoveDelayed = `
 local zset = KEYS[1]
 local stream = KEYS[2]
+local metadata = KEYS[3]
 local max_score = ARGV[1]
 local limit = ARGV[2]
 local ready_limit = tonumber(ARGV[3])
+if redis.call("HGET", metadata, "capacity_state") ~= "ready" then return redis.error_reply("capacity counters are initializing") end
 limit = tonumber(limit)
 if not limit or limit < 1 or limit > 1000 or limit ~= math.floor(limit) then
     return redis.error_reply("invalid delayed dispatch batch limit")
@@ -62,11 +91,17 @@ if target_type ~= "none" and target_type ~= "stream" then
     return redis.error_reply("delayed destination must be a stream")
 end
 local jobs = redis.call("ZRANGEBYSCORE", zset, "-inf", max_score, "LIMIT", 0, limit)
-local current = redis.call("XLEN", stream)
+local current = tonumber(redis.call("HGET", metadata, "ready_entries"))
+if not current then return redis.error_reply("ready capacity counter is missing") end
 if current + #jobs > ready_limit then return -(current + 1) end
 for _, job in ipairs(jobs) do
     redis.call("XADD", stream, "*", "payload", job)
     redis.call("ZREM", zset, job)
+end
+if #jobs > 0 then
+    redis.call("HSET", metadata, "ready_entries", current + #jobs)
+    local delayed = tonumber(redis.call("HGET", metadata, "delayed_entries")) or #jobs
+    redis.call("HSET", metadata, "delayed_entries", math.max(0, delayed - #jobs))
 end
 return #jobs
 `
@@ -96,6 +131,8 @@ return 1
 `
 )
 
+var ensureTopologyMetadataScript = goredis.NewScript(ensureTopologyMetadataLua)
+
 type redisTransport struct {
 	rc goredis.UniversalClient
 
@@ -108,6 +145,8 @@ type redisTransport struct {
 	retentionTopologies map[string]transport.Topology
 	retentionStatuses   map[string]RetentionStatus
 	capacityRejections  map[string]map[string]uint64
+	dispatchCursors     map[string]string
+	dispatchShared      map[string]bool
 	retentionCancel     context.CancelFunc
 	retentionDone       chan struct{}
 	retentionWake       chan struct{}
@@ -137,6 +176,8 @@ func New(rc goredis.UniversalClient) transport.Transport {
 		retentionTopologies: make(map[string]transport.Topology),
 		retentionStatuses:   make(map[string]RetentionStatus),
 		capacityRejections:  make(map[string]map[string]uint64),
+		dispatchCursors:     make(map[string]string),
+		dispatchShared:      make(map[string]bool),
 		retentionCancel:     cancel, retentionDone: make(chan struct{}), retentionWake: make(chan struct{}, 1),
 	}
 	t.sweepDelay = t.dispatchDue
@@ -164,11 +205,23 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
-	if err := t.rc.HSet(ctx, t.metadataKey(topo), map[string]any{
-		"layout_version": "1", "namespace": topo.Namespace,
-		"kind": topo.Kind.String(), "name": topo.JobType,
-	}).Err(); err != nil {
+	eventLayout := ""
+	if topo.Kind == transport.EventTopology {
+		eventLayout = redisTargetedLayoutV1
+	}
+	result, err := ensureTopologyMetadataScript.Run(ctx, t.rc, []string{t.metadataKey(topo)},
+		"1", topo.Namespace, topo.Kind.String(), topo.JobType, eventLayout).Int64()
+	if err != nil {
 		return fmt.Errorf("redis EnsureTopology metadata: %w", err)
+	}
+	if result == -1 {
+		return fmt.Errorf("redis: topology metadata identity mismatch")
+	}
+	if result == -2 {
+		return fmt.Errorf("redis: event layout marker mismatch")
+	}
+	if err := t.ensureCapacityCounters(ctx, topo); err != nil {
+		return err
 	}
 
 	t.mu.Lock()
@@ -199,7 +252,10 @@ func (t *redisTransport) Publish(ctx context.Context, topo transport.Topology, m
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
-	result, err := publishReadyScript.Run(ctx, t.rc, []string{t.streamKey(topo)}, maxReadyEntries(topo), msg.Payload).Int64()
+	if err := t.ensureCapacityCounters(ctx, topo); err != nil {
+		return err
+	}
+	result, err := publishReadyScript.Run(ctx, t.rc, []string{t.streamKey(topo), t.metadataKey(topo)}, maxReadyEntries(topo), msg.Payload).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: publish ready: %w", err)
 	}
@@ -213,10 +269,13 @@ func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology,
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
+	if err := t.ensureCapacityCounters(ctx, topo); err != nil {
+		return err
+	}
 	delayed := t.delayedKey(topo)
 	score := float64(runAt.UnixMilli())
 
-	result, err := publishDelayedScript.Run(ctx, t.rc, []string{delayed}, maxDelayedEntries(topo), score, msg.Payload).Int64()
+	result, err := publishDelayedScript.Run(ctx, t.rc, []string{delayed, t.metadataKey(topo)}, maxDelayedEntries(topo), score, msg.Payload).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: publish delayed: %w", err)
 	}
@@ -255,19 +314,72 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
 	}
+	if err := t.ensureCapacityCounters(ctx, topo); err != nil {
+		t.recordSchedulerError(topo, "capacity-init", err, now)
+		return 0, err
+	}
 	limit := 100
 	if value, ok := topo.Options["redis.delay_batch_size"].(int); ok {
 		limit = value
 	}
-	moved, err := moveDelayedScript.Run(ctx, t.rc, []string{t.delayedKey(topo), t.streamKey(topo)}, now.UnixMilli(), limit, maxReadyEntries(topo)).Int64()
-	if err != nil {
-		t.recordSchedulerError(topo, "dispatch", err, now)
-		return 0, err
+	type lane struct{ delayed, ready string }
+	lanes := make([]lane, 0, schedulerLaneScanMax+1)
+	key := topologyPrefix(topo)
+	t.mu.Lock()
+	cursor, shared := t.dispatchCursors[key], t.dispatchShared[key]
+	t.mu.Unlock()
+	if topo.Kind != transport.EventTopology || shared {
+		lanes = append(lanes, lane{t.delayedKey(topo), t.streamKey(topo)})
 	}
-	if moved < 0 {
-		err := t.capacityError(topo, "ready", -moved-1, maxReadyEntries(topo))
-		t.recordSchedulerError(topo, "transfer", err, now)
-		return 0, err
+	if topo.Kind == transport.EventTopology {
+		minimum := "-"
+		if cursor != "" {
+			minimum = "(" + cursor
+		}
+		groups, err := t.rc.ZRangeByLex(ctx, t.groupIndexKey(topo), &goredis.ZRangeBy{Min: minimum, Max: "+", Offset: 0, Count: schedulerLaneScanMax}).Result()
+		if err != nil {
+			t.recordSchedulerError(topo, "dispatch", err, now)
+			return 0, fmt.Errorf("redis: scan subscriber retry lanes: %w", err)
+		}
+		if len(groups) == 0 && cursor != "" {
+			groups, err = t.rc.ZRangeByLex(ctx, t.groupIndexKey(topo), &goredis.ZRangeBy{Min: "-", Max: "+", Offset: 0, Count: schedulerLaneScanMax}).Result()
+			if err != nil {
+				t.recordSchedulerError(topo, "dispatch", err, now)
+				return 0, fmt.Errorf("redis: wrap subscriber retry lanes: %w", err)
+			}
+		}
+		for _, group := range groups {
+			lanes = append(lanes, lane{t.subscriberRetryDelayedKey(topo, group), t.subscriberRetryStreamKey(topo, group)})
+		}
+		t.mu.Lock()
+		if len(groups) > 0 {
+			t.dispatchCursors[key] = groups[len(groups)-1]
+		} else {
+			t.dispatchCursors[key] = ""
+		}
+		t.dispatchShared[key] = !shared
+		t.mu.Unlock()
+	}
+	var moved int64
+	for _, current := range lanes {
+		if moved >= int64(limit) {
+			break
+		}
+		batch := limit - int(moved)
+		if topo.Kind == transport.EventTopology {
+			batch = 1
+		}
+		count, err := moveDelayedScript.Run(ctx, t.rc, []string{current.delayed, current.ready, t.metadataKey(topo)}, now.UnixMilli(), batch, maxReadyEntries(topo)).Int64()
+		if err != nil {
+			t.recordSchedulerError(topo, "dispatch", err, now)
+			return moved, err
+		}
+		if count < 0 {
+			err := t.capacityError(topo, "ready", -count-1, maxReadyEntries(topo))
+			t.recordSchedulerError(topo, "transfer", err, now)
+			return moved, err
+		}
+		moved += count
 	}
 	t.recordSchedulerSuccess(topo, moved, now)
 	return moved, nil
@@ -355,15 +467,31 @@ func (t *redisTransport) capacityError(topo transport.Topology, resource string,
 func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stream := t.streamKey(sub.Topology)
+	streams := []string{t.streamKey(sub.Topology)}
 	group := t.groupName(sub)
+	if sub.Topology.Kind == transport.EventTopology {
+		streams = append(streams, t.subscriberRetryStreamKey(sub.Topology, group))
+	}
 	consumer := "consumer-" + generateID() // need a unique consumer name
 
 	if err := t.EnsureSubscription(ctx, sub); err != nil {
 		return err
 	}
 
-	batchSize := consumerBatchSize(sub)
+	capacity := sub.Concurrency + sub.Prefetch
+	if capacity <= 0 {
+		capacity = 1
+	}
+	permits := make(chan struct{}, capacity)
+	acquire := func() error {
+		select {
+		case permits <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	release := func() { <-permits }
 
 	blockTime := 2 * time.Second
 	if val, ok := sub.Topology.Options["redis.block"].(time.Duration); ok && val > 0 {
@@ -372,46 +500,84 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 
 	// Serialize reclaim and fresh intake through the same callback. Each pass
 	// scans one bounded page; preserve the cursor even when no entries qualify.
-	cursor := "0-0"
+	cursors := make([]string, len(streams))
+	for i := range cursors {
+		cursors[i] = "0-0"
+	}
 	nextReclaim := time.Time{}
+	preferred := 0
 	for ctx.Err() == nil {
 		if !time.Now().Before(nextReclaim) {
-			next, err := t.reclaimPage(ctx, sub, consumer, cursor, deliver)
-			if err != nil {
-				return fmt.Errorf("redis reclaim: %w", err)
+			complete := true
+			for offset := range len(streams) {
+				index := (preferred + offset) % len(streams)
+				if err := acquire(); err != nil {
+					return err
+				}
+				next, delivered, err := t.reclaimStreamPageWithRelease(ctx, sub, streams[index], consumer, cursors[index], deliver, 1, release)
+				if err != nil {
+					if !delivered {
+						release()
+					}
+					return fmt.Errorf("redis reclaim: %w", err)
+				}
+				if !delivered {
+					release()
+				}
+				cursors[index] = next
+				complete = complete && next == "0-0"
 			}
-			cursor = next
-			if cursor == "0-0" {
-				nextReclaim = time.Now().Add(30 * time.Second)
+			if complete {
+				interval := 30 * time.Second
+				if ackWait, ok := sub.Topology.Options["redis.ack_wait"].(time.Duration); ok {
+					interval = min(interval, ackWait)
+				}
+				nextReclaim = time.Now().Add(interval)
 			}
 		}
-		// Read from Stream
+		if err := acquire(); err != nil {
+			return err
+		}
+		stream := streams[preferred]
 		res, err := t.rc.XReadGroup(ctx, &goredis.XReadGroupArgs{
 			Group:    group,
 			Consumer: consumer,
 			Streams:  []string{stream, ">"},
-			Count:    batchSize,
+			Count:    1,
 			Block:    min(blockTime, 2*time.Second),
 		}).Result()
 
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
+				release()
 				return ctx.Err()
 			}
 			if err == goredis.Nil {
+				release()
 				// Block timeout
+				preferred = (preferred + 1) % len(streams)
 				continue
 			}
+			release()
 			return err
 		}
 
+		delivered := false
 		for _, streamMsgs := range res {
 			for _, xmsg := range streamMsgs.Messages {
-				if err := t.deliverMessage(ctx, sub, xmsg, deliver, consumer); err != nil {
+				delivered, err = t.deliverStreamMessageWithRelease(ctx, sub, streamMsgs.Stream, xmsg, deliver, release, consumer)
+				if err != nil {
+					if !delivered {
+						release()
+					}
 					return err
 				}
 			}
 		}
+		if !delivered {
+			release()
+		}
+		preferred = (preferred + 1) % len(streams)
 	}
 	return ctx.Err()
 }
@@ -443,7 +609,7 @@ func (t *redisTransport) Release(ctx context.Context, dedupeKey string) error {
 }
 
 func (t *redisTransport) ReserveTopology(ctx context.Context, topo transport.Topology, key string, ttl time.Duration) (bool, error) {
-	if err := t.ValidateTopology(topo); err != nil {
+	if err := t.validateTopologyOptions(topo, false); err != nil {
 		return false, err
 	}
 	if key == "" || ttl <= 0 {
@@ -453,7 +619,7 @@ func (t *redisTransport) ReserveTopology(ctx context.Context, topo transport.Top
 }
 
 func (t *redisTransport) ReleaseTopology(ctx context.Context, topo transport.Topology, key string) error {
-	if err := t.ValidateTopology(topo); err != nil {
+	if err := t.validateTopologyOptions(topo, false); err != nil {
 		return err
 	}
 	if key == "" {
@@ -469,7 +635,7 @@ var (
 )
 
 func (t *redisTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
-	if err := t.ValidateTopology(topo); err != nil {
+	if err := t.validateTopologyOptions(topo, false); err != nil {
 		return 0, err
 	}
 	if key == "" || reservationID == "" || ttl <= 0 {
@@ -536,15 +702,17 @@ func (t *redisTransport) Close(ctx context.Context) error {
 
 // redisDelivery implements Delivery
 type redisDelivery struct {
-	transport *redisTransport
-	topo      transport.Topology
-	stream    string
-	group     string
-	consumer  string
-	xmsgID    string
-	msg       transport.Message
-	count     int
-	settled   transport.SettlementGuard
+	transport   *redisTransport
+	topo        transport.Topology
+	stream      string
+	group       string
+	consumer    string
+	xmsgID      string
+	msg         transport.Message
+	count       int
+	settled     transport.SettlementGuard
+	release     func()
+	releaseOnce sync.Once
 }
 
 func (d *redisDelivery) Message() transport.Message { return d.msg }
@@ -552,7 +720,16 @@ func (d *redisDelivery) DeliveryAttempt() int       { return d.count }
 
 func (d *redisDelivery) ack(ctx context.Context) error {
 	if d.consumer != "" {
-		n, err := ackOwnedScript.Run(ctx, d.transport.rc, []string{d.stream}, d.group, d.xmsgID, d.consumer).Int64()
+		deleteSource := d.topo.Kind == transport.EventTopology && d.stream != d.transport.streamKey(d.topo)
+		if deleteSource {
+			if err := d.transport.ensureCapacityCounters(ctx, d.topo); err != nil {
+				return err
+			}
+		}
+		if err := d.transport.validateEventLayout(ctx, d.topo); err != nil {
+			return err
+		}
+		n, err := ackOwnedScript.Run(ctx, d.transport.rc, []string{d.stream, d.transport.metadataKey(d.topo)}, d.group, d.xmsgID, d.consumer, boolInt(deleteSource)).Int64()
 		if err != nil {
 			return err
 		}
@@ -565,7 +742,7 @@ func (d *redisDelivery) ack(ctx context.Context) error {
 }
 
 func (d *redisDelivery) Settle(ctx context.Context, decision transport.Decision) error {
-	return d.settled.Settle(decision, func() error {
+	err := d.settled.Settle(decision, func() error {
 		switch decision.Kind {
 		case transport.DecisionAck:
 			return d.ack(ctx)
@@ -577,4 +754,12 @@ func (d *redisDelivery) Settle(ctx context.Context, decision transport.Decision)
 		}
 		return d.transfer(ctx, decision)
 	})
+	if err == nil {
+		d.releaseOnce.Do(func() {
+			if d.release != nil {
+				d.release()
+			}
+		})
+	}
+	return err
 }

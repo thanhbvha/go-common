@@ -20,6 +20,9 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 	if err := t.ValidateTopology(topology); err != nil {
 		return transport.TopologyStats{}, err
 	}
+	if err := t.validateEventLayout(ctx, topology); err != nil {
+		return transport.TopologyStats{}, err
+	}
 
 	stream := t.streamKey(topology)
 	typeName, err := t.rc.Type(ctx, stream).Result()
@@ -42,6 +45,21 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 		DLQ:      dlqCmd.Val(),
 		LagKnown: true,
 	}
+	if topology.Kind == transport.EventTopology {
+		manifest, err := t.rc.HKeys(ctx, t.groupManifestKey(topology)).Result()
+		if err != nil {
+			return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber manifest: %w", err)
+		}
+		for _, group := range manifest {
+			count, err := t.rc.ZCard(ctx, t.subscriberRetryDelayedKey(topology, group)).Result()
+			if err != nil {
+				return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber delayed: %w", err)
+			}
+			if err := addStatCount(&stats.Delayed, count); err != nil {
+				return transport.TopologyStats{}, err
+			}
+		}
+	}
 	streamLen := streamLenCmd.Val()
 	if typeName == "none" && streamLen > 0 {
 		// A concurrent publisher created the stream between TYPE and the count
@@ -49,15 +67,18 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 		typeName = "stream"
 	}
 
-	if typeName == "none" {
+	if typeName == "none" && topology.Kind != transport.EventTopology {
 		stats.OldestAgeKnown = true
 		return stats, nil
 	}
-	groups, err := t.rc.XInfoGroups(ctx, stream).Result()
-	if err != nil {
-		return transport.TopologyStats{}, fmt.Errorf("redis: stats groups: %w", err)
+	var groups []goredis.XInfoGroup
+	if typeName == "stream" {
+		groups, err = t.rc.XInfoGroups(ctx, stream).Result()
+		if err != nil {
+			return transport.TopologyStats{}, fmt.Errorf("redis: stats groups: %w", err)
+		}
+		groups = statsGroups(topology.Kind, groups)
 	}
-	groups = statsGroups(topology.Kind, groups)
 
 	// A producer-only task has no consumer group yet. When its first consumer
 	// creates workers at 0, every retained stream entry becomes ready work.
@@ -106,6 +127,27 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 			oldest = candidate
 		}
 	}
+	if topology.Kind == transport.EventTopology {
+		manifest, err := t.rc.HKeys(ctx, t.groupManifestKey(topology)).Result()
+		if err != nil {
+			return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber manifest: %w", err)
+		}
+		for _, group := range manifest {
+			lane, err := t.streamGroupStats(ctx, t.subscriberRetryStreamKey(topology, group), group)
+			if err != nil {
+				return transport.TopologyStats{}, err
+			}
+			if err := addStatCount(&stats.Pending, lane.Pending); err != nil {
+				return transport.TopologyStats{}, err
+			}
+			if err := addStatCount(&stats.InFlight, lane.InFlight); err != nil {
+				return transport.TopologyStats{}, err
+			}
+			if lane.Pending+lane.InFlight > 0 {
+				oldestKnown = false
+			}
+		}
+	}
 	if err := addStatCount(&stats.Lag, stats.Pending); err != nil {
 		return transport.TopologyStats{}, err
 	}
@@ -127,6 +169,12 @@ func (t *redisTransport) SubscriptionStats(ctx context.Context, sub transport.Su
 	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
 		return transport.TopologyStats{}, fmt.Errorf("redis: event subscriber required")
 	}
+	if err := t.ValidateTopology(sub.Topology); err != nil {
+		return transport.TopologyStats{}, err
+	}
+	if err := t.validateEventLayout(ctx, sub.Topology); err != nil {
+		return transport.TopologyStats{}, err
+	}
 	stream := t.streamKey(sub.Topology)
 	groups, err := t.rc.XInfoGroups(ctx, stream).Result()
 	if err != nil {
@@ -145,10 +193,54 @@ func (t *redisTransport) SubscriptionStats(ctx context.Context, sub transport.Su
 		if err != nil {
 			return transport.TopologyStats{}, err
 		}
-		lag := ready + pending.Count
-		return transport.TopologyStats{Pending: ready, InFlight: pending.Count, Lag: lag, LagKnown: true, OldestAgeKnown: lag == 0}, nil
+		stats := transport.TopologyStats{Pending: ready, InFlight: pending.Count, LagKnown: true}
+		lane, err := t.streamGroupStats(ctx, t.subscriberRetryStreamKey(sub.Topology, wanted), wanted)
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		stats.Pending += lane.Pending
+		stats.InFlight += lane.InFlight
+		stats.Lag = stats.Pending + stats.InFlight
+		stats.Delayed, err = t.rc.ZCard(ctx, t.subscriberRetryDelayedKey(sub.Topology, wanted)).Result()
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		stats.OldestAgeKnown = stats.Lag == 0
+		return stats, nil
 	}
 	return transport.TopologyStats{}, fmt.Errorf("redis: subscriber group %q is not provisioned", sub.Group)
+}
+
+func (t *redisTransport) streamGroupStats(ctx context.Context, stream, groupName string) (transport.TopologyStats, error) {
+	typeName, err := t.rc.Type(ctx, stream).Result()
+	if err != nil {
+		return transport.TopologyStats{}, fmt.Errorf("redis: subscriber retry stats type: %w", err)
+	}
+	if typeName == "none" {
+		return transport.TopologyStats{}, nil
+	}
+	if typeName != "stream" {
+		return transport.TopologyStats{}, fmt.Errorf("redis: subscriber retry source must be a stream")
+	}
+	groups, err := t.rc.XInfoGroups(ctx, stream).Result()
+	if err != nil {
+		return transport.TopologyStats{}, fmt.Errorf("redis: subscriber retry stats groups: %w", err)
+	}
+	for _, group := range groups {
+		if group.Name != groupName {
+			continue
+		}
+		ready, err := t.readyCount(ctx, stream, group)
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		pending, err := t.rc.XPending(ctx, stream, groupName).Result()
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		return transport.TopologyStats{Pending: ready, InFlight: pending.Count}, nil
+	}
+	return transport.TopologyStats{}, fmt.Errorf("redis: subscriber retry group %q is not provisioned", groupName)
 }
 
 // Redis 7 reports EntriesRead and Lag in XINFO GROUPS. Redis 6 and miniredis

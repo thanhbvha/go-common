@@ -9,7 +9,8 @@ do not create an atomic snapshot across topics, partitions, or consumer groups.
 New DLQ entries are versioned JSON wrappers around the original normalized
 `transport.Message`. The wrapper records the fixed failure reason/error code,
 attempt count, failure time, and the source Kafka topic, partition, offset, and
-record timestamp. `DeadLetter.ID` is the stable DLQ coordinate
+record timestamp. Event entries additionally retain the source subscriber group.
+`DeadLetter.ID` is the stable DLQ coordinate
 `<partition>:<offset>`; it is not the logical message ID.
 
 Older raw-payload DLQ entries cannot be listed or requeued by this API. Drain
@@ -26,7 +27,11 @@ cursor:
   can shift while records are concurrently appended or administered.
 - `Requeue` accepts at most 1,000 IDs. IDs must include the complete logical
   prefix of each selected partition. The driver synchronously publishes every
-  original message to the main topic, then advances that partition's cursor.
+  original task message to the main topic, or an event message to the source
+  subscriber's private ready topic, then advances that partition's cursor.
+  Event records written before source-group metadata existed fail closed and
+  cannot be requeued because broadcasting them would violate subscriber
+  isolation.
   A publish failure leaves the cursor unchanged. A crash, response loss, or
   cursor-commit failure after publication can duplicate the requeued message.
 - `Purge` advances every partition cursor to a snapshot of its end offset. It is
@@ -44,7 +49,13 @@ commit ambiguity can still duplicate records.
 
 ## Topology reconciliation and expansion
 
-Startup reconciles every main, DLQ, delay, and admin-lock topic. It validates
+Startup reconciles every main, DLQ, ordinary delay, targeted event-delay, event
+layout marker, and admin-lock topic. Event topologies must explicitly use
+`kafka.WithEventLayoutTargeted()`, which sets
+`kafka.event_layout=targeted-v1`; older drivers reject this option, which makes
+mixed-version startup fail closed instead of allowing old instances to broadcast
+targeted retries. `EnsureSubscription` provisions each event subscriber's
+private ready topic plus a durable, non-expiring broker registry marker. It validates
 the configured replication factor on every partition, rejects any cleanup
 policy containing `compact`, and explicitly alters caller-owned topic configs
 such as `retention.ms` when they differ. Immutable/unauthorized mismatches fail
@@ -52,7 +63,8 @@ startup. Ordinary startup validates partition equality but never changes the
 partition count.
 
 `ExpandPartitions` is an explicit driver administration operation for main,
-DLQ, and all delay topics. It rejects decreases, updates topics in stable order,
+DLQ, all delay topics, and broker-registered private ready topics. Registry marker
+topics remain one partition. Expansion rejects decreases, updates topics in stable order,
 and returns `PartitionExpansionResult`; `PartitionExpansionError` includes the
 successful prefix if Kafka reports partial success. Expansion changes the
 ordering-key hash-to-partition mapping. Drain producers/consumers or accept an
@@ -69,6 +81,10 @@ explicit event subscriber group without aggregating its peers.
 
 Kafka group offsets do not distinguish fetched-but-uncommitted records from
 records that have not been fetched. Consequently `Pending` contains all main
-topic lag, `InFlight` is zero, and `Lag = Pending`. `Delayed` is the sum of lag
-for the three durable scheduler groups. `DLQ` uses the logical DLQ count above.
+topic plus private-ready lag, `InFlight` is zero, and `Lag = Pending`. `Delayed`
+in topology stats includes ordinary and targeted scheduler-group lag. Kafka has
+no per-header index for shared targeted tiers, so subscriber stats report
+`Delayed=0` as unknown rather than attributing the entire shared backlog to every
+subscriber. `DLQ`
+uses the logical DLQ count above.
 `OldestAge` is unknown while lag is nonzero.

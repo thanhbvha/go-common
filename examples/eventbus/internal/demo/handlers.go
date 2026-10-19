@@ -80,5 +80,5 @@ func DeclareTask(bus eventbus.Bus, driver string, withHandler bool, logger *Logg
 }
 
 func DeclareEvent(bus eventbus.Bus, driver string) error {
-	return bus.DeclareEvent(EventName, TopologyOptions(driver)...)
+	return bus.DeclareEvent(EventName, EventTopologyOptions(driver)...)
 }

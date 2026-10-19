@@ -280,7 +280,7 @@ func TestKafkaOffsetCoordinator_ContiguousBrokerCommit(t *testing.T) {
 		}
 	}
 
-	opts := mainConsumerOptions(topic, group, transport.Topology{})
+	opts := mainConsumerOptions([]string{topic}, group, transport.Topology{})
 	opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	consumer, err := backend.newManualConsumer(opts...)
 	if err != nil {
@@ -413,7 +413,7 @@ func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
 		t.Helper()
 		rebalances := newRebalanceController()
 		rebalances.onBlocked = onBlocked
-		opts := mainConsumerOptions(topic, group, transport.Topology{})
+		opts := mainConsumerOptions([]string{topic}, group, transport.Topology{})
 		opts = append(opts,
 			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 			kgo.Balancers(kgo.RangeBalancer()),
@@ -431,7 +431,7 @@ func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
 			done: make(chan error, 1), deliveries: make(chan *kafkaDelivery, 4),
 		}
 		go func() {
-			s.done <- backend.consumeRecords(sessionCtx, transport.Topology{}, client, coordinator, rebalances, 4,
+			s.done <- backend.consumeRecords(sessionCtx, transport.Subscription{}, client, coordinator, rebalances, 4,
 				func(delivery transport.Delivery) { s.deliveries <- delivery.(*kafkaDelivery) })
 		}()
 		return s

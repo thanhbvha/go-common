@@ -7,6 +7,11 @@ import (
 	"github.com/thanhbvha/go-common/eventbus"
 )
 
+const (
+	natsEventLayoutOption = "nats.event_layout"
+	natsTargetedLayoutV1  = "targeted-v1"
+)
+
 // WithMaxAge sets the maximum age for messages in the NATS stream.
 // Default is no limit (or NATS default).
 func WithMaxAge(maxAge time.Duration) eventbus.TopologyOption {
@@ -55,4 +60,17 @@ func WithDelayBatchSize(size int) eventbus.TopologyOption {
 // before another instance may recover it. The default is 30 seconds.
 func WithDelayLease(lease time.Duration) eventbus.TopologyOption {
 	return eventbus.WithOption("nats.delay_lease", lease)
+}
+
+// WithDuplicateWindow sets the broker deduplication bound used by immediate,
+// delayed, retry-lane, and DLQ publications. The default is two minutes.
+func WithDuplicateWindow(window time.Duration) eventbus.TopologyOption {
+	return eventbus.WithOption("nats.duplicate_window", window)
+}
+
+// WithEventLayoutTargeted opts an event topology into subscriber-targeted
+// retries. Older NATS drivers reject this unknown option, fencing them out of
+// mixed-version deployments before they can broadcast retry work.
+func WithEventLayoutTargeted() eventbus.TopologyOption {
+	return eventbus.WithOption(natsEventLayoutOption, natsTargetedLayoutV1)
 }

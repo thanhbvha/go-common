@@ -44,7 +44,7 @@ func (d *natsDelivery) deadLetterRecord(msg transport.Message, decision transpor
 	record.Reason, record.LastError = transport.NormalizeDecisionMetadata(decision)
 	if metadata, err := d.nmsg.Metadata(); err == nil {
 		record.Source = metadata.Stream
-		record.SourceGroup = metadata.Consumer
+		record.SourceGroup = d.sourceGroup
 		record.SourcePosition = strconv.FormatUint(metadata.Sequence.Stream, 10)
 	}
 	encoded, err := json.Marshal(record)
@@ -140,6 +140,9 @@ func (t *natsTransport) Requeue(ctx context.Context, topology transport.Topology
 	if err := t.ValidateTopology(topology); err != nil {
 		return err
 	}
+	if err := t.validateEventLayout(ctx, topology); err != nil {
+		return err
+	}
 	if len(messageIDs) > maxDLQAdminBatch {
 		return fmt.Errorf("nats: DLQ requeue batch exceeds %d records", maxDLQAdminBatch)
 	}
@@ -166,7 +169,31 @@ func (t *natsTransport) Requeue(ctx context.Context, topology transport.Topology
 			return err
 		}
 		brokerID := stableTransferID("dlq-requeue", stream+":"+id)
-		if _, err := t.publish(ctx, t.streamName(topology), record.Message.ID, brokerID, record.Message.Payload); err != nil {
+		subject := t.broadcastSubject(topology)
+		destination := t.streamName(topology)
+		if topology.Kind == transport.EventTopology {
+			if record.SourceGroup == "" {
+				return fmt.Errorf("nats: event DLQ record %d has no source subscriber", sequence)
+			}
+			subject = t.retrySubject(topology, record.SourceGroup)
+			destination = t.retryStreamName(topology, record.SourceGroup)
+			if err := t.withSubscriberLane(ctx, topology, record.SourceGroup, "dlq-requeue", func(lease *subscriberLaneLeaseHandle, _ subscriberLaneState) error {
+				if err := lease.checkOwnership(ctx); err != nil {
+					return err
+				}
+				if _, err := t.publishToStream(ctx, destination, subject, record.Message.ID, brokerID, record.Message.Payload); err != nil {
+					return err
+				}
+				if err := lease.checkOwnership(ctx); err != nil {
+					return err
+				}
+				return t.js.DeleteMsg(stream, sequence, gonats.Context(ctx))
+			}); err != nil {
+				return fmt.Errorf("nats: requeue DLQ record %d: %w", sequence, err)
+			}
+			continue
+		}
+		if _, err := t.publishToStream(ctx, destination, subject, record.Message.ID, brokerID, record.Message.Payload); err != nil {
 			return fmt.Errorf("nats: requeue DLQ record %d: %w", sequence, err)
 		}
 		if err := t.js.DeleteMsg(stream, sequence, gonats.Context(ctx)); err != nil && !errors.Is(err, gonats.ErrMsgNotFound) {

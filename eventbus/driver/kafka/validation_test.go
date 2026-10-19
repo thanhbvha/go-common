@@ -1,9 +1,11 @@
 package kafka
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/thanhbvha/go-common/eventbus"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
@@ -65,5 +67,46 @@ func TestKafkaRejectsCompactedQueueTopics(t *testing.T) {
 	topo := transport.Topology{JobType: "jobs", Options: map[string]any{"kafka.topic_configs": map[string]string{"cleanup.policy": "delete"}}}
 	if err := backend.ValidateTopology(topo); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKafkaEventLayoutMustBeExplicit(t *testing.T) {
+	backend := &kafkaTransport{}
+	topology := transport.Topology{JobType: "events", Kind: transport.EventTopology}
+	if err := backend.ValidateTopology(topology); err == nil {
+		t.Fatal("event topology without rollout marker was accepted")
+	}
+	WithEventLayoutTargeted()(&topology)
+	if err := backend.ValidateTopology(topology); err != nil {
+		t.Fatal(err)
+	}
+	task := transport.Topology{JobType: "tasks", Options: topology.Options}
+	if err := backend.ValidateTopology(task); err == nil {
+		t.Fatal("event layout option was accepted on task topology")
+	}
+}
+
+func TestKafkaDeclareEventRejectsMissingTargetedLayout(t *testing.T) {
+	bus, err := eventbus.Open(eventbus.DefaultConfig(), eventbus.WithTransport(&kafkaTransport{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.DeclareEvent("events"); err == nil {
+		t.Fatal("DeclareEvent without targeted layout unexpectedly succeeded")
+	}
+	if err := bus.DeclareEvent("events", WithEventLayoutTargeted()); err != nil {
+		t.Fatalf("DeclareEvent with targeted layout: %v", err)
+	}
+}
+
+func TestKafkaEventPublishPathsRejectMissingTargetedLayout(t *testing.T) {
+	backend := &kafkaTransport{}
+	topology := transport.Topology{JobType: "events", Kind: transport.EventTopology}
+	message := transport.Message{Payload: []byte("event")}
+	if err := backend.Publish(context.Background(), topology, message); err == nil {
+		t.Fatal("Publish without targeted layout unexpectedly succeeded")
+	}
+	if err := backend.PublishAt(context.Background(), topology, message, time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("PublishAt without targeted layout unexpectedly succeeded")
 	}
 }

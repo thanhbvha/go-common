@@ -209,6 +209,50 @@ func TestKafkaSettlementRoutingAndMetadata(t *testing.T) {
 	})
 }
 
+func TestKafkaEventRetryRetainsSourceSubscriber(t *testing.T) {
+	topo := transport.Topology{Namespace: "settlement", JobType: "event", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
+	backend := &kafkaTransport{}
+	admin := &fakeKafkaAdmin{}
+	provisionKafkaSubscriber(backend, admin, topo, "alpha")
+	backend.adm = admin
+	var produced *kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
+		produced = record
+		return nil
+	})
+	coordinator := newOffsetCoordinator(&processingConsumer{}, 1)
+	defer coordinator.close()
+	record := processingRecord(0, 1)
+	if err := coordinator.register(context.Background(), []*kgo.Record{record}); err != nil {
+		t.Fatal(err)
+	}
+	delivery := &kafkaDelivery{transport: backend, topo: topo, group: "alpha", coordinator: coordinator, record: record}
+	decision := transport.Decision{Kind: transport.DecisionRetry, Next: transport.Message{Payload: []byte("retry")}, RetryAt: time.Now().Add(2 * time.Minute)}
+	if err := delivery.Settle(context.Background(), decision); err != nil {
+		t.Fatal(err)
+	}
+	if produced == nil || produced.Topic != backend.targetedDelayTopic(topo, time.Minute) {
+		t.Fatalf("retry record = %#v", produced)
+	}
+	message := recordMessage(produced)
+	if message.Headers[kafkaTargetGroupHeader] != "alpha" {
+		t.Fatalf("target group = %q", message.Headers[kafkaTargetGroupHeader])
+	}
+}
+
+func TestKafkaPublicPublishStripsReservedTargetHeader(t *testing.T) {
+	backend := &kafkaTransport{}
+	var produced *kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error { produced = record; return nil })
+	message := transport.Message{Payload: []byte("public"), Headers: map[string]string{kafkaTargetGroupHeader: "hostile", "traceparent": "ok"}}
+	if err := backend.Publish(context.Background(), transport.Topology{JobType: "event"}, message); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordMessage(produced).Headers; !reflect.DeepEqual(got, map[string]string{"traceparent": "ok"}) {
+		t.Fatalf("published headers = %#v", got)
+	}
+}
+
 func TestKafkaSettlementRejectsUnsafeProducer(t *testing.T) {
 	for _, scenario := range []string{"no ack", "transactional", "leader ack", "all ack"} {
 		t.Run(scenario, func(t *testing.T) {

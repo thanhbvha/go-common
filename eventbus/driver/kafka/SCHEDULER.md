@@ -48,7 +48,11 @@ then rejects any existing mismatch before starting workers. Kafka cannot reduce
 an existing topic's partition count; migrate or recreate inconsistent related
 topics before rollout. Equal counts plus the preserved key keep a retry on the
 same derived partition as it moves between related topics when all producers use
-compatible key partitioning.
+compatible key partitioning. This does not create a cross-topic ordering
+guarantee: ordering is preserved only within one physical Kafka topic-partition.
+Movement between a delay topic, the main topic, and a subscriber-private topic
+crosses independent logs and may be observed around unrelated records in either
+log.
 
 The reported precision is five seconds when the tier group is healthy and the
 number of records ahead of the deadline is within one bounded poll. Larger
@@ -68,3 +72,23 @@ oldest delayed age.
 the scheduler owns source commits manually, `ConsumerCommitInterval=0` is now
 valid for EventBus construction; this setting no longer controls main or delay
 consumer settlement.
+
+Event-handler retries use a separate topology-wide set of targeted delay tiers.
+Their records carry the reserved `X-EventBus-Internal-Target-Group` header, and
+the targeted scheduler releases due records to that subscriber's private ready
+topic rather than the event's main fanout topic. The subscriber consumes the
+main and private topics under the same Kafka group. The scheduler strips both
+private headers before handler delivery. A targeted record without a target
+group remains uncommitted, preventing an old scheduler or malformed record from
+broadcasting a retry. Ordinary `Publish` and `PublishAt` also strip the reserved
+target header so callers cannot select a subscriber through public metadata.
+
+Targeted event retry is enabled only when the topology explicitly uses
+`kafka.WithEventLayoutTargeted()`, which sets `kafka.event_layout` to
+`targeted-v1`. Older driver versions reject this unknown option, so a
+mixed-version deployment cannot silently start an old broadcast scheduler for
+the topology. Provisioning also creates a broker-owned layout
+marker and a durable marker topic for each subscriber. Before any targeted
+scheduler or DLQ requeue publish, the driver validates the marker, private topic,
+partition count, and delete-only/non-expiring registry configuration. Raw record
+headers and consumer-group metadata are never treated as provisioning authority.

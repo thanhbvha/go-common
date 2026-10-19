@@ -6,6 +6,11 @@ import (
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus"
+	kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
+	natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
+	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/kafka"
 )
 
 func TestMemoryRuntimeEndToEnd(t *testing.T) {
@@ -67,6 +72,55 @@ func TestConfigValidationAndCapabilities(t *testing.T) {
 	defer rt.Close()
 	if !SupportsDedupe(rt.Transport) {
 		t.Fatal("memory transport should advertise topology dedupe")
+	}
+}
+
+func TestKafkaEventExampleTopologyIsValid(t *testing.T) {
+	backend, err := kafkadriver.NewWithConfig(commonkafka.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close(context.Background())
+	bus, err := eventbus.Open(eventbus.DefaultConfig(), eventbus.WithTransport(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DeclareEvent(bus, "kafka"); err != nil {
+		t.Fatalf("Kafka example DeclareEvent: %v", err)
+	}
+	validator := backend.(transport.TopologyValidator)
+	if err := validator.ValidateTopology(transport.Topology{JobType: EventName, Kind: transport.EventTopology}); err == nil {
+		t.Fatal("Kafka event topology without the example option was accepted")
+	}
+}
+
+func TestNATSEventExampleTopologyIncludesMigrationFence(t *testing.T) {
+	topology := transport.Topology{JobType: EventName, Kind: transport.EventTopology}
+	for _, option := range EventTopologyOptions("nats") {
+		option(&topology)
+	}
+	validator := natsdriver.New(nil).(transport.TopologyValidator)
+	if err := validator.ValidateTopology(topology); err != nil {
+		t.Fatalf("NATS example event topology: %v", err)
+	}
+	if err := validator.ValidateTopology(transport.Topology{JobType: EventName, Kind: transport.EventTopology}); err == nil {
+		t.Fatal("NATS event topology without the example option was accepted")
+	}
+}
+
+func TestRedisEventExampleTopologyIncludesMigrationFence(t *testing.T) {
+	topology := transport.Topology{JobType: EventName, Kind: transport.EventTopology}
+	for _, option := range EventTopologyOptions("redis") {
+		option(&topology)
+	}
+	backend := redisdriver.New(nil)
+	defer backend.Close(context.Background())
+	validator := backend.(transport.TopologyValidator)
+	if err := validator.ValidateTopology(topology); err != nil {
+		t.Fatalf("Redis example event topology: %v", err)
+	}
+	if err := validator.ValidateTopology(transport.Topology{JobType: EventName, Kind: transport.EventTopology}); err == nil {
+		t.Fatal("Redis event topology without the example option was accepted")
 	}
 }
 

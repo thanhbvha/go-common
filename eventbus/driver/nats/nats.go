@@ -45,11 +45,20 @@ type natsTransport struct {
 	// afterTransfer is a fault-injection seam used by embedded broker tests at
 	// the publish-before-source-settlement boundary.
 	afterTransfer func(transport.DecisionKind) error
+	// laneOperationHook is an embedded-broker test seam invoked while the
+	// broker-backed subscriber lane lease is held.
+	laneOperationHook func(string)
+	// laneRenewalHook and laneLeaseDuration are deterministic lease-fault test
+	// seams. Production transports leave both at their zero values.
+	laneRenewalHook   func(context.Context) error
+	laneLeaseDuration time.Duration
 }
 
 const dedupeBucket = "eventbus_dedupe_v2"
 
 const messageIDHeader = "X-EventBus-Message-Id"
+
+const eventLayoutMarkerKey = "meta.event_layout"
 
 var (
 	_ transport.Transport               = (*natsTransport)(nil)
@@ -60,6 +69,7 @@ var (
 	_ transport.CursorDLQAdmin          = (*natsTransport)(nil)
 	_ transport.StatsReader             = (*natsTransport)(nil)
 	_ transport.SubscriptionStatsReader = (*natsTransport)(nil)
+	_ transport.SubscriptionProvisioner = (*natsTransport)(nil)
 	_ transport.TopologyValidator       = (*natsTransport)(nil)
 	_ transport.SchedulerHealthReader   = (*natsTransport)(nil)
 	_ transport.Delivery                = (*natsDelivery)(nil)
@@ -153,6 +163,9 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 	t.mu.Lock()
 	t.kvs[kvBucket] = kv
 	t.mu.Unlock()
+	if err := t.ensureEventLayoutMarker(ctx, topo, kv); err != nil {
+		return fmt.Errorf("nats EnsureTopology event layout: %w", err)
+	}
 	if err := t.ensureDelayCursor(ctx, kv); err != nil {
 		return fmt.Errorf("nats EnsureTopology delay cursor: %w", err)
 	}
@@ -174,11 +187,18 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 }
 
 func (t *natsTransport) Publish(ctx context.Context, topo transport.Topology, msg transport.Message) error {
-	_, err := t.publish(ctx, t.streamName(topo), msg.ID, msg.ID, msg.Payload)
+	if err := t.validateEventLayout(ctx, topo); err != nil {
+		return err
+	}
+	_, err := t.publish(ctx, t.broadcastSubject(topo), msg.ID, msg.ID, msg.Payload)
 	return err
 }
 
 func (t *natsTransport) publish(ctx context.Context, subject, logicalID, brokerID string, payload []byte) (*gonats.PubAck, error) {
+	return t.publishToStream(ctx, "", subject, logicalID, brokerID, payload)
+}
+
+func (t *natsTransport) publishToStream(ctx context.Context, stream, subject, logicalID, brokerID string, payload []byte) (*gonats.PubAck, error) {
 	msg := &gonats.Msg{Subject: subject, Data: payload, Header: gonats.Header{}}
 	if logicalID != "" {
 		msg.Header.Set(messageIDHeader, logicalID)
@@ -186,10 +206,16 @@ func (t *natsTransport) publish(ctx context.Context, subject, logicalID, brokerI
 	if brokerID != "" {
 		msg.Header.Set(gonats.MsgIdHdr, brokerID)
 	}
+	if stream != "" {
+		msg.Header.Set(gonats.ExpectedStreamHdr, stream)
+	}
 	return t.js.PublishMsg(msg, gonats.Context(ctx))
 }
 
 func (t *natsTransport) PublishAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
+	if err := t.validateEventLayout(ctx, topo); err != nil {
+		return err
+	}
 	delay := runAt.Sub(t.now())
 	if delay <= 0 {
 		return t.Publish(ctx, topo, msg)
@@ -205,25 +231,33 @@ func (t *natsTransport) PublishAt(ctx context.Context, topo transport.Topology, 
 }
 
 func (t *natsTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
+	if err := t.validateEventLayout(ctx, sub.Topology); err != nil {
+		return err
+	}
 	stream := t.streamName(sub.Topology)
 	group := t.consumerName(sub)
-	if err := t.reconcileConsumer(ctx, stream, sub); err != nil {
+	if err := t.EnsureSubscription(ctx, sub); err != nil {
 		return fmt.Errorf("nats provision consumer: %w", err)
 	}
 
-	opts := []gonats.SubOpt{
-		gonats.ManualAck(),
-		gonats.Bind(stream, group),
-	}
-
-	// Use durable Pull Consumer (Bind to the one we just created)
-	nsub, err := t.js.PullSubscribe(stream, group, opts...)
+	nsub, err := t.js.PullSubscribe(t.broadcastSubject(sub.Topology), group, gonats.ManualAck(), gonats.Bind(stream, group))
 	if err != nil {
 		return err
 	}
 	// Bind attaches to an existing durable: Unsubscribe releases the local
 	// subscription without deleting that durable consumer on the server.
 	defer nsub.Unsubscribe()
+	subscriptions := []*gonats.Subscription{nsub}
+	if sub.Topology.Kind == transport.EventTopology {
+		retryStream := t.retryStreamName(sub.Topology, group)
+		retryConsumer := t.retryConsumerName(sub.Topology, group)
+		retrySub, err := t.js.PullSubscribe(t.retrySubject(sub.Topology, group), retryConsumer, gonats.ManualAck(), gonats.Bind(retryStream, retryConsumer))
+		if err != nil {
+			return fmt.Errorf("nats bind subscriber retry consumer: %w", err)
+		}
+		defer retrySub.Unsubscribe()
+		subscriptions = append(subscriptions, retrySub)
+	}
 
 	batchSize := consumerBatchSize(sub)
 
@@ -237,48 +271,42 @@ func (t *natsTransport) Consume(ctx context.Context, sub transport.Subscription,
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-			msgs, err := nsub.Fetch(batchSize, gonats.Context(fetchCtx))
-			cancel()
+			for _, pullSub := range subscriptions {
+				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout/time.Duration(len(subscriptions)))
+				msgs, err := pullSub.Fetch(batchSize, gonats.Context(fetchCtx))
+				cancel()
 
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					if ctx.Err() != nil {
-						return ctx.Err() // Outer context canceled
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						continue
 					}
-					continue // Just fetchCtx timeout, retry
-				}
-				if errors.Is(err, gonats.ErrTimeout) {
-					continue // Fetch timeout, just retry
-				}
-				return err
-			}
-
-			for _, m := range msgs {
-				// Deliver
-				meta, err := m.Metadata()
-				count := 1
-				if err == nil {
-					count = int(meta.NumDelivered)
+					if errors.Is(err, gonats.ErrTimeout) {
+						continue
+					}
+					return err
 				}
 
-				id := m.Header.Get(messageIDHeader)
-				if id == "" {
-					id = m.Header.Get(gonats.MsgIdHdr)
-				}
-				msg := transport.Message{
-					ID:      id,
-					Payload: m.Data,
-				}
+				for _, m := range msgs {
+					meta, err := m.Metadata()
+					count := 1
+					if err == nil {
+						count = int(meta.NumDelivered)
+					}
 
-				deliver(&natsDelivery{
-					transport:         t,
-					topo:              sub.Topology,
-					msg:               msg,
-					nmsg:              m,
-					count:             count,
-					heartbeatInterval: heartbeatInterval(topologyAckWait(sub.Topology)),
-				})
+					id := m.Header.Get(messageIDHeader)
+					if id == "" {
+						id = m.Header.Get(gonats.MsgIdHdr)
+					}
+					msg := transport.Message{ID: id, Payload: m.Data}
+
+					deliver(&natsDelivery{
+						transport: t, topo: sub.Topology, msg: msg, nmsg: m, count: count, sourceGroup: group,
+						heartbeatInterval: heartbeatInterval(topologyAckWait(sub.Topology)),
+					})
+				}
 			}
 		}
 	}
@@ -537,6 +565,7 @@ type natsDelivery struct {
 	nmsg              *gonats.Msg
 	count             int
 	heartbeatInterval time.Duration
+	sourceGroup       string
 	settled           transport.SettlementGuard
 }
 
@@ -598,7 +627,11 @@ func (d *natsDelivery) Settle(ctx context.Context, decision transport.Decision) 
 		case transport.DecisionAck:
 			return d.ack(ctx)
 		case transport.DecisionRetry:
-			if err := d.transport.scheduleRetry(ctx, d.topo, decision.Next, decision.RetryAt, d.transferID("retry")); err != nil {
+			target := ""
+			if d.topo.Kind == transport.EventTopology {
+				target = d.sourceGroup
+			}
+			if err := d.transport.scheduleRetry(ctx, d.topo, decision.Next, decision.RetryAt, d.transferID("retry"), target); err != nil {
 				return err
 			}
 			if err := d.transferred(transport.DecisionRetry); err != nil {

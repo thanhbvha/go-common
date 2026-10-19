@@ -4,6 +4,7 @@ package kafka
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -23,8 +24,9 @@ func TestEncodedTopologyNamesPreventKafkaCrossDelivery(t *testing.T) {
 		t.Skipf("Kafka not available: %v", err)
 	}
 	backend := New(producer, nil).(*kafkaTransport)
-	first := transport.Topology{Namespace: "acme", JobType: "event.foo", Kind: transport.TaskTopology}
-	second := transport.Topology{Namespace: "acme", JobType: "foo", Kind: transport.EventTopology}
+	suffix := time.Now().UnixNano()
+	first := transport.Topology{Namespace: fmt.Sprintf("acme_%d", suffix), JobType: "event.foo", Kind: transport.TaskTopology}
+	second := transport.Topology{Namespace: fmt.Sprintf("acme_%d", suffix), JobType: "foo", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
 	if backend.mainTopic(first) == backend.mainTopic(second) {
 		t.Fatal("hostile task/event tuples share a Kafka topic")
 	}
@@ -39,6 +41,12 @@ func TestEncodedTopologyNamesPreventKafkaCrossDelivery(t *testing.T) {
 		for _, topo := range []transport.Topology{first, second} {
 			topics = append(topics, backend.mainTopic(topo), backend.dlqTopic(topo))
 			topics = append(topics, backend.delayTopics(topo)...)
+			if topo.Kind == transport.EventTopology {
+				topics = append(topics, backend.targetedDelayTopics(topo)...)
+				privateTopics, _ := backend.registeredSubscriberTopics(context.Background(), topo)
+				topics = append(topics, privateTopics...)
+				topics = append(topics, backend.eventLayoutTopic(topo))
+			}
 			topics = append(topics, backend.dlqAdminLockTopic(topo))
 		}
 		_, _ = backend.adm.DeleteTopics(context.Background(), topics...)

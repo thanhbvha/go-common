@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	delayRecordVersion       = 2
+	delayRecordVersion       = 3
+	legacyDelayRecordVersion = 2
 	delayCursorKey           = "meta.cursor"
 	delaySlotWidth           = time.Second
 	defaultDelayBatchSize    = 100
 	defaultDelayLease        = 30 * time.Second
 	defaultDelayCatchupSlots = 60
+	delayQuarantinePrefix    = "quarantine."
 )
 
 type delayRecord struct {
@@ -34,6 +36,7 @@ type delayRecord struct {
 	Owner      string `json:"owner,omitempty"`
 	LeaseUntil int64  `json:"lease_until,omitempty"`
 	TransferID string `json:"transfer_id,omitempty"`
+	Target     string `json:"target,omitempty"`
 }
 
 type delayTransfer struct {
@@ -95,11 +98,26 @@ func (t *natsTransport) schedule(ctx context.Context, kv gonats.KeyValue, msg tr
 	return fmt.Errorf("nats delay: failed to allocate a collision-free schedule ID")
 }
 
-func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time, transferID string) error {
+func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time, transferID, target string) error {
+	if err := t.validateEventLayout(ctx, topo); err != nil {
+		return err
+	}
 	kv, err := t.getKV(t.kvBucketName(topo))
 	if err != nil {
 		return fmt.Errorf("nats retry open delay bucket: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if target != "" {
+		return t.withSubscriberLane(ctx, topo, target, "schedule", func(lease *subscriberLaneLeaseHandle, _ subscriberLaneState) error {
+			return t.scheduleRetryRecord(ctx, kv, msg, runAt, transferID, target, lease)
+		})
+	}
+	return t.scheduleRetryRecord(ctx, kv, msg, runAt, transferID, target, nil)
+}
+
+func (t *natsTransport) scheduleRetryRecord(ctx context.Context, kv gonats.KeyValue, msg transport.Message, runAt time.Time, transferID, target string, lease *subscriberLaneLeaseHandle) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -110,7 +128,7 @@ func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topolo
 	slot := delaySlot(scheduledAt)
 	record := delayRecord{
 		Version: delayRecordVersion, ScheduleID: transferID, MessageID: msg.ID,
-		RunAt: scheduledAt.UnixMilli(), Payload: msg.Payload, TransferID: transferID,
+		RunAt: scheduledAt.UnixMilli(), Payload: msg.Payload, TransferID: transferID, Target: target,
 	}
 	transfer := delayTransfer{
 		Version: delayRecordVersion,
@@ -121,6 +139,11 @@ func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topolo
 	marker, err := json.Marshal(transfer)
 	if err != nil {
 		return fmt.Errorf("nats retry encode transfer: %w", err)
+	}
+	if lease != nil {
+		if err := lease.checkOwnership(ctx); err != nil {
+			return err
+		}
 	}
 	if _, err := kv.Create(markerKey, marker); err != nil {
 		if !errors.Is(err, gonats.ErrKeyExists) {
@@ -133,8 +156,13 @@ func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topolo
 		if err := json.Unmarshal(entry.Value(), &transfer); err != nil {
 			return fmt.Errorf("nats retry decode transfer: %w", err)
 		}
-		if transfer.Version != delayRecordVersion || transfer.Record.TransferID != transferID || transfer.Key == "" {
+		if transfer.Version != delayRecordVersion || transfer.Record.TransferID != transferID || transfer.Record.Target != target || transfer.Key == "" {
 			return fmt.Errorf("nats retry invalid transfer %q", markerKey)
+		}
+	}
+	if lease != nil {
+		if err := lease.checkOwnership(ctx); err != nil {
+			return err
 		}
 	}
 	return createScheduledRecord(kv, transfer.Key, transfer.Record)
@@ -160,7 +188,7 @@ func createScheduledRecord(kv gonats.KeyValue, key string, record delayRecord) e
 	}
 	if existing.Version != record.Version || existing.ScheduleID != record.ScheduleID ||
 		existing.TransferID != record.TransferID || existing.MessageID != record.MessageID ||
-		existing.RunAt != record.RunAt || !bytes.Equal(existing.Payload, record.Payload) {
+		existing.Target != record.Target || existing.RunAt != record.RunAt || !bytes.Equal(existing.Payload, record.Payload) {
 		return fmt.Errorf("nats delay schedule identity collision for %q", key)
 	}
 	return nil
@@ -191,7 +219,7 @@ func (t *natsTransport) delaySweeper(ctx context.Context, topo transport.Topolog
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		_, _ = t.dispatchDue(ctx, topo, kv, t.now())
+		_, _ = t.dispatchDue(ctx, topo, kv, time.Now())
 		select {
 		case <-ctx.Done():
 			return
@@ -204,8 +232,12 @@ func (t *natsTransport) delaySweeper(ctx context.Context, topo transport.Topolog
 // backlog in process memory. KV watchers stream a fixed-size window internally.
 func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time) (int, error) {
 	t.recordSchedulerPoll(topo, now)
+	if err := t.validateEventLayoutKV(topo, kv); err != nil {
+		t.recordSchedulerError(topo, "poll", err, now)
+		return 0, err
+	}
 	batch := delayBatchSize(topo)
-	if _, err := t.migrateLegacyDelayed(ctx, kv, now, batch); err != nil {
+	if _, err := t.migrateLegacyDelayed(ctx, topo, kv, now, batch); err != nil {
 		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
 	}
@@ -395,8 +427,14 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 	if err := json.Unmarshal(entry.Value(), &record); err != nil {
 		return false, true, fmt.Errorf("nats delay decode %q: %w", entry.Key(), err)
 	}
-	if record.Version != delayRecordVersion || record.ScheduleID == "" || record.RunAt <= 0 {
+	if (record.Version != delayRecordVersion && record.Version != legacyDelayRecordVersion) || record.ScheduleID == "" || record.RunAt <= 0 {
 		return false, true, fmt.Errorf("nats delay invalid record %q", entry.Key())
+	}
+	if topo.Kind == transport.EventTopology && record.TransferID != "" && record.Target == "" {
+		if err := quarantineDelayRecord(kv, entry, record, "missing subscriber target", now); err != nil {
+			return false, true, err
+		}
+		return false, false, nil
 	}
 	if record.RunAt > now.UnixMilli() {
 		return false, true, nil
@@ -417,7 +455,48 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 	if err != nil {
 		return false, true, fmt.Errorf("nats delay claim %q: %w", entry.Key(), err)
 	}
-	_, err = t.publish(ctx, t.streamName(topo), record.MessageID, "delay:"+record.ScheduleID, record.Payload)
+	subject := t.broadcastSubject(topo)
+	stream := t.streamName(topo)
+	deleted := false
+	if record.Target != "" {
+		err := t.withSubscriberLane(ctx, topo, record.Target, "dispatch", func(lease *subscriberLaneLeaseHandle, _ subscriberLaneState) error {
+			if err := lease.checkOwnership(ctx); err != nil {
+				return err
+			}
+			_, publishErr := t.publishToStream(ctx, t.retryStreamName(topo, record.Target), t.retrySubject(topo, record.Target), record.MessageID, "delay:"+record.ScheduleID, record.Payload)
+			if publishErr != nil {
+				return publishErr
+			}
+			if err := lease.checkOwnership(ctx); err != nil {
+				return err
+			}
+			if err := kv.Delete(entry.Key(), gonats.LastRevision(claimRevision)); err != nil {
+				return fmt.Errorf("nats delay delete %q after publish: %w", entry.Key(), err)
+			}
+			deleted = true
+			return nil
+		})
+		if err != nil {
+			if !errors.Is(err, errSubscriberLaneUnavailable) && !errors.Is(err, errSubscriberLaneLeaseLost) {
+				record.Owner = ""
+				record.LeaseUntil = 0
+				if released, marshalErr := json.Marshal(record); marshalErr == nil {
+					_, _ = kv.Update(entry.Key(), released, claimRevision)
+				}
+				return false, true, fmt.Errorf("nats delay publish %q: %w", entry.Key(), err)
+			}
+			if errors.Is(err, errSubscriberLaneLeaseLost) {
+				return false, true, fmt.Errorf("nats delay publish %q: %w", entry.Key(), err)
+			}
+			claimedEntry := &delayKVEntry{KeyValueEntry: entry, value: claimed, revision: claimRevision}
+			if quarantineErr := quarantineDelayRecord(kv, claimedEntry, record, err.Error(), now); quarantineErr != nil {
+				return false, true, quarantineErr
+			}
+			return false, false, nil
+		}
+	} else {
+		_, err = t.publishToStream(ctx, stream, subject, record.MessageID, "delay:"+record.ScheduleID, record.Payload)
+	}
 	if err != nil {
 		record.Owner = ""
 		record.LeaseUntil = 0
@@ -426,8 +505,10 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 		}
 		return false, true, fmt.Errorf("nats delay publish %q: %w", entry.Key(), err)
 	}
-	if err := kv.Delete(entry.Key(), gonats.LastRevision(claimRevision)); err != nil {
-		return true, true, fmt.Errorf("nats delay delete %q after publish: %w", entry.Key(), err)
+	if !deleted {
+		if err := kv.Delete(entry.Key(), gonats.LastRevision(claimRevision)); err != nil {
+			return true, true, fmt.Errorf("nats delay delete %q after publish: %w", entry.Key(), err)
+		}
 	}
 	if record.TransferID != "" {
 		// The scheduled record is already durably published and deleted. A marker
@@ -436,6 +517,33 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 		_ = kv.Delete("transfer." + record.TransferID)
 	}
 	return true, false, nil
+}
+
+type quarantinedDelayRecord struct {
+	Version       int         `json:"v"`
+	OriginalKey   string      `json:"original_key"`
+	QuarantinedAt int64       `json:"quarantined_at"`
+	Reason        string      `json:"reason"`
+	Record        delayRecord `json:"record"`
+}
+
+func quarantineDelayRecord(kv gonats.KeyValue, entry gonats.KeyValueEntry, record delayRecord, reason string, now time.Time) error {
+	record.Owner, record.LeaseUntil = "", 0
+	quarantine := quarantinedDelayRecord{
+		Version: delayRecordVersion, OriginalKey: entry.Key(), QuarantinedAt: now.UnixMilli(), Reason: reason, Record: record,
+	}
+	data, err := json.Marshal(quarantine)
+	if err != nil {
+		return fmt.Errorf("nats delay encode quarantine %q: %w", entry.Key(), err)
+	}
+	key := delayQuarantinePrefix + record.ScheduleID
+	if _, err := kv.Create(key, data); err != nil && !errors.Is(err, gonats.ErrKeyExists) {
+		return fmt.Errorf("nats delay quarantine %q: %w", entry.Key(), err)
+	}
+	if err := kv.Delete(entry.Key(), gonats.LastRevision(entry.Revision())); err != nil && !errors.Is(err, gonats.ErrKeyNotFound) && !errors.Is(err, gonats.ErrKeyDeleted) {
+		return fmt.Errorf("nats delay delete quarantined %q: %w", entry.Key(), err)
+	}
+	return nil
 }
 
 func (t *natsTransport) recordSchedulerPoll(topo transport.Topology, now time.Time) {
@@ -515,7 +623,7 @@ func natsSchedulerOperation(err error) string {
 
 // migrateLegacyDelayed transfers the P4.2 timestamp_ID records into v2 keys.
 // Create-before-delete makes interruption duplicate-prone rather than lossy.
-func (t *natsTransport) migrateLegacyDelayed(ctx context.Context, kv gonats.KeyValue, now time.Time, limit int) (int, error) {
+func (t *natsTransport) migrateLegacyDelayed(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time, limit int) (int, error) {
 	watcher, err := kv.Watch("*", gonats.IgnoreDeletes(), gonats.Context(ctx))
 	if err != nil {
 		return 0, fmt.Errorf("nats delay watch legacy records: %w", err)
@@ -544,7 +652,7 @@ func (t *natsTransport) migrateLegacyDelayed(ctx context.Context, kv gonats.KeyV
 			}
 			parts := strings.SplitN(entry.Key(), "_", 2)
 			if len(parts) != 2 {
-				return migrated, fmt.Errorf("nats delay invalid legacy key %q", entry.Key())
+				continue
 			}
 			runAt, err := strconv.ParseInt(parts[0], 10, 64)
 			if err != nil {
@@ -552,13 +660,20 @@ func (t *natsTransport) migrateLegacyDelayed(ctx context.Context, kv gonats.KeyV
 			}
 			hash := sha256.Sum256([]byte(entry.Key()))
 			scheduleID := fmt.Sprintf("legacy-%x", hash[:])
-			minute := delaySlot(time.UnixMilli(runAt))
-			if runAt <= now.UnixMilli() {
-				minute = delaySlot(now)
-			}
 			record := delayRecord{
 				Version: delayRecordVersion, ScheduleID: scheduleID, MessageID: parts[1],
 				RunAt: runAt, Payload: entry.Value(),
+			}
+			if topo.Kind == transport.EventTopology {
+				if err := quarantineDelayRecord(kv, entry, record, "legacy event delay has unknown subscriber provenance", now); err != nil {
+					return migrated, err
+				}
+				migrated++
+				continue
+			}
+			minute := delaySlot(time.UnixMilli(runAt))
+			if runAt <= now.UnixMilli() {
+				minute = delaySlot(now)
 			}
 			data, err := json.Marshal(record)
 			if err != nil {

@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/goccy/go-json"
+	gonats "github.com/nats-io/nats.go"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
@@ -114,6 +116,103 @@ func TestNATSDLQRecordSanitizesMetadataAndBoundsSize(t *testing.T) {
 	}
 }
 
+func TestEventDLQRequeueTargetsSourceSubscriberAndFailsClosed(t *testing.T) {
+	s, js := provisioningJetStream(t)
+	defer s.Shutdown()
+	backend := New(js).(*natsTransport)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	ctx := context.Background()
+	topo := targetedEventTopology(fmt.Sprintf("event_dlq_%d", time.Now().UnixNano()), "event")
+	if err := backend.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	alpha := transport.Subscription{Topology: topo, Group: "alpha", Concurrency: 1, Prefetch: 1}
+	beta := transport.Subscription{Topology: topo, Group: "beta", Concurrency: 1, Prefetch: 1}
+	for _, sub := range []transport.Subscription{alpha, beta} {
+		if err := backend.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backend.Publish(ctx, topo, transport.Message{ID: "source", Payload: []byte("source")}); err != nil {
+		t.Fatal(err)
+	}
+	alphaDelivery, stopAlpha := receiveNATSSubscriptionDelivery(t, backend, alpha)
+	if err := alphaDelivery.Settle(ctx, transport.Decision{Kind: transport.DecisionDeadLetter, Attempts: 1}); err != nil {
+		stopAlpha()
+		t.Fatal(err)
+	}
+	stopAlpha()
+	betaDelivery, stopBeta := receiveNATSSubscriptionDelivery(t, backend, beta)
+	if err := betaDelivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+		stopBeta()
+		t.Fatal(err)
+	}
+	stopBeta()
+	records, err := backend.List(ctx, topo, 0, 1)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("event DLQ records = %#v, %v", records, err)
+	}
+	if records[0].SourceGroup != backend.consumerName(alpha) {
+		t.Fatalf("source group = %q", records[0].SourceGroup)
+	}
+	if err := backend.Requeue(ctx, topo, []string{records[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	requeued, stopRequeued := receiveNATSSubscriptionDelivery(t, backend, alpha)
+	if err := requeued.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+		stopRequeued()
+		t.Fatal(err)
+	}
+	stopRequeued()
+	stats, err := backend.SubscriptionStats(ctx, beta)
+	if err != nil || stats.Lag != 0 {
+		t.Fatalf("beta stats after requeue = %#v, %v", stats, err)
+	}
+
+	legacy := dlqRecord{
+		Version: natsDLQRecordVersion, Message: transport.Message{ID: "legacy", Payload: []byte("legacy")},
+		FailedAt: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.publish(ctx, backend.dlqStreamName(topo), legacy.Message.ID, "legacy-dlq", data); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Requeue(ctx, topo, []string{"2"}); err == nil || !strings.Contains(err.Error(), "no source subscriber") {
+		t.Fatalf("missing-source requeue = %v", err)
+	}
+	if count, err := backend.Count(ctx, topo); err != nil || count != 1 {
+		t.Fatalf("retained DLQ count = %d, %v", count, err)
+	}
+
+	incompatible := legacy
+	incompatible.Message.ID = "incompatible"
+	incompatible.SourceGroup = backend.consumerName(alpha)
+	data, err = json.Marshal(incompatible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.publish(ctx, backend.dlqStreamName(topo), incompatible.Message.ID, "incompatible-dlq", data); err != nil {
+		t.Fatal(err)
+	}
+	retryStream, err := js.StreamInfo(backend.retryStreamName(topo, incompatible.SourceGroup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryStream.Config.Retention = gonats.InterestPolicy
+	if _, err := js.UpdateStream(&retryStream.Config); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Requeue(ctx, topo, []string{"3"}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible-source requeue = %v", err)
+	}
+	if count, err := backend.Count(ctx, topo); err != nil || count != 2 {
+		t.Fatalf("retained incompatible DLQ count = %d, %v", count, err)
+	}
+}
+
 type hostileNATSError struct{}
 
 func (hostileNATSError) Error() string { panic("must not render") }
@@ -194,6 +293,37 @@ func receiveNATSDelivery(t *testing.T, backend *natsTransport, topo transport.To
 		}
 	}
 	return delivery, stop
+}
+
+func receiveNATSSubscriptionDelivery(t *testing.T, backend *natsTransport, sub transport.Subscription) (transport.Delivery, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	deliveries := make(chan transport.Delivery, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- backend.Consume(ctx, sub, func(delivery transport.Delivery) { deliveries <- delivery })
+	}()
+	var delivery transport.Delivery
+	select {
+	case delivery = <-deliveries:
+	case err := <-done:
+		cancel()
+		t.Fatalf("consume ended before delivery: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for NATS subscription delivery")
+	}
+	return delivery, func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("consume shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("consumer did not stop")
+		}
+	}
 }
 
 func assertNATSStats(t *testing.T, backend *natsTransport, topo transport.Topology, pending, delayed, inFlight, dlq int64) {

@@ -350,7 +350,7 @@ func (c *offsetCoordinator) run() {
 // Callback return means acceptance, not handler completion: only successful
 // settlement unlocks the next record. No per-record or per-partition goroutines
 // are needed. A failed settlement ends intake, leaving later offsets untouched.
-func (t *kafkaTransport) dispatchBatch(ctx context.Context, topo transport.Topology, coordinator *offsetCoordinator, rebalances *rebalanceController, records []*kgo.Record, deliver func(transport.Delivery)) (map[string]map[int32]kgo.EpochOffset, error) {
+func (t *kafkaTransport) dispatchBatch(ctx context.Context, topo transport.Topology, group string, coordinator *offsetCoordinator, rebalances *rebalanceController, records []*kgo.Record, deliver func(transport.Delivery)) (map[string]map[int32]kgo.EpochOffset, error) {
 	queues := make(map[partitionKey][]*kgo.Record)
 	var keys []partitionKey
 	for _, record := range records {
@@ -391,8 +391,8 @@ func (t *kafkaTransport) dispatchBatch(ctx context.Context, topo transport.Topol
 		var once sync.Once
 		deliver(&kafkaDelivery{
 			transport: t, topo: topo, coordinator: coordinator, record: record,
-			msg:       transport.Message{Payload: record.Value, OrderingKey: string(record.Key)},
-			count:     count,
+			msg:   deliveryMessage(record),
+			count: count, group: group,
 			completed: func(err error) { once.Do(func() { done <- completion{key, err} }) },
 		})
 		return nil
@@ -442,6 +442,13 @@ func (t *kafkaTransport) dispatchBatch(ctx context.Context, topo transport.Topol
 		return rewindOffsets(queues), errRebalanceRequested
 	}
 	return nil, nil
+}
+
+func deliveryMessage(record *kgo.Record) transport.Message {
+	msg := recordMessage(record)
+	removeMessageHeader(&msg, kafkaRunAtHeader)
+	removeMessageHeader(&msg, kafkaTargetGroupHeader)
+	return msg
 }
 
 func rewindOffsets(queues map[partitionKey][]*kgo.Record) map[string]map[int32]kgo.EpochOffset {

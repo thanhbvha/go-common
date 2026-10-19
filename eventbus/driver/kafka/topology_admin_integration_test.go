@@ -87,3 +87,49 @@ func TestKafkaTopologyReconcileExpansionAndDLQLeaseIntegration(t *testing.T) {
 	}
 	next.release()
 }
+
+func TestKafkaEventPartitionExpansionIncludesTargetedAndPrivateTopics(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cfg := commonkafka.DefaultConfig()
+	created, err := NewWithConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := created.(*kafkaTransport)
+	if err := backend.Ping(ctx); err != nil {
+		_ = backend.Close(context.Background())
+		t.Skipf("Kafka not available: %v", err)
+	}
+	topo := transport.Topology{Namespace: "p675", JobType: fmt.Sprintf("event_expand_%d", time.Now().UnixNano()), Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
+	if err := backend.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	sub := transport.Subscription{Topology: topo, Group: "alpha"}
+	if err := backend.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	topics = append(topics, backend.targetedDelayTopics(topo)...)
+	topics = append(topics, backend.privateReadyTopic(topo, sub.Group), backend.subscriberMarkerTopic(topo, sub.Group), backend.eventLayoutTopic(topo), backend.dlqAdminLockTopic(topo))
+	t.Cleanup(func() {
+		_ = backend.Close(context.Background())
+		cleanup, cleanupErr := kgo.NewClient(kgo.SeedBrokers(cfg.Brokers...))
+		if cleanupErr == nil {
+			defer cleanup.Close()
+			_, _ = kadm.NewClient(cleanup).DeleteTopics(context.Background(), topics...)
+		}
+	})
+	result, err := backend.ExpandPartitions(ctx, topo, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Topics) != len(topics)-3 {
+		t.Fatalf("expanded topics = %d, want %d: %#v", len(result.Topics), len(topics)-3, result.Topics)
+	}
+	for _, topic := range topics[:len(topics)-3] {
+		if !result.Topics[topic] {
+			t.Fatalf("topic %q was not expanded", topic)
+		}
+	}
+}

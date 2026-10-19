@@ -120,3 +120,29 @@ reference transport with atomic fan-out, queued/in-flight redelivery, and one
 joined delayed scheduler. A Linux smoke run and the accepted correctness cost
 are recorded in the ADR addendum; use a same-host three-run comparison before
 promoting those smoke values to a new statistical baseline.
+
+## P6.7.6 production-scale tooling
+
+The benchmark runner now uses a fixed latency histogram, a bounded completion
+notification channel, and one bit per sequence for duplicate detection. It can
+write periodic heap, goroutine, throughput, and topology-stat samples without
+retaining per-message timestamps. `PRODUCTION_SCALE.md` documents the pinned,
+profile-scoped Redis/NATS/Kafka fixture and cleanup-guarded PowerShell runner.
+
+One disposable Redis 7.4.1 run completed on 2026-10-19 with 100,000 immediate
+1 KiB messages, concurrency 100, and a preloaded backlog:
+
+- 100,000 unique completions, zero observed duplicates, and final lag zero.
+- Drain throughput 1,527.67 messages/second.
+- p50/p95/p99 acceptance-to-completion latency 57.91/67.16/67.16 seconds; this
+  includes paused preload time, while throughput starts at resume.
+- Peak Go heap 6,175,912 bytes, peak benchmark RSS about 74.8 MB, and peak
+  goroutines 108.
+- Redis container memory peaked around 159 MB in the sampled series and fell to
+  about 117 MB near completion; the isolated container, network, and named
+  volume were removed by project-scoped cleanup.
+
+Artifacts are intentionally ignored because they contain machine-local paths
+and high-volume samples. This single matrix cell validates the harness, not the
+P6.7.6 release gate. The 1,000,000-message runs, remaining workloads/drivers,
+fault/restart/rebalance cases, and sustained soak remain open.

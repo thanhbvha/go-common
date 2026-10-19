@@ -9,11 +9,19 @@ import (
 )
 
 func (t *redisTransport) ValidateTopology(topology transport.Topology) error {
+	return t.validateTopologyOptions(topology, true)
+}
+
+func (t *redisTransport) validateTopologyOptions(topology transport.Topology, requireEventLayout bool) error {
 	if err := topology.Validate(); err != nil {
 		return fmt.Errorf("redis: %w", err)
 	}
 	for key, value := range topology.Options {
 		switch key {
+		case redisEventLayoutOption:
+			if topology.Kind != transport.EventTopology || value != redisTargetedLayoutV1 {
+				return fmt.Errorf("redis: %s must be %q on event topologies", key, redisTargetedLayoutV1)
+			}
 		case "redis.maxlen":
 			return fmt.Errorf("redis: redis.maxlen is unsafe for durable ready streams and is no longer supported")
 		case "redis.dlq_maxlen", "redis.batch_size", "redis.max_ready_entries",
@@ -45,6 +53,9 @@ func (t *redisTransport) ValidateTopology(topology transport.Topology) error {
 				return fmt.Errorf("redis: unknown option %q", key)
 			}
 		}
+	}
+	if requireEventLayout && topology.Kind == transport.EventTopology && topology.Options[redisEventLayoutOption] != redisTargetedLayoutV1 {
+		return fmt.Errorf("redis: event topology requires WithEventLayoutTargeted")
 	}
 	return nil
 }
