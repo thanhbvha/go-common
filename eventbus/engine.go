@@ -352,7 +352,7 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 		}
 		// A session-local cancellation is reconnectable while the engine is
 		// alive. Even a nil return needs backoff to avoid a hot reconnect loop.
-		e.cfg.Logger.ErrorAsync("transport consume session ended", "job_type", jobType, "handler_name", handlerName, "err", err)
+		e.cfg.Logger.ErrorAsync("transport consume session ended", "job_type", jobType, "handler_name", handlerName, "error_type", safeErrorType(err))
 		if time.Since(started) >= time.Minute {
 			attempt = 1
 		}
@@ -483,11 +483,12 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		err := payloadTooLargeError(len(msg.Payload), maxPayloadBytes)
 		e.cfg.Logger.ErrorAsync("eventbus: oversized envelope, sending to DLQ", "id", msg.ID, "size", len(msg.Payload), "max", maxPayloadBytes)
 		e.settleDelivery(delivery, transport.Decision{
-			Kind:     transport.DecisionDeadLetter,
-			Reason:   "payload_too_large",
-			Cause:    err,
-			Attempts: delivery.DeliveryAttempt(),
-			FailedAt: time.Now(),
+			Kind:      transport.DecisionDeadLetter,
+			Reason:    "payload_too_large",
+			Cause:     err,
+			ErrorCode: "payload_too_large",
+			Attempts:  delivery.DeliveryAttempt(),
+			FailedAt:  time.Now(),
 		}, metricsJobType, msg.ID)
 		return
 	}
@@ -498,7 +499,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		err := delivery.Heartbeat(opCtx)
 		cancel()
 		if err != nil {
-			e.cfg.Logger.WarnAsync("delivery lease unavailable before processing", "err", err)
+			e.cfg.Logger.WarnAsync("delivery lease unavailable before processing", "error_type", safeErrorType(err))
 			return
 		}
 	}
@@ -506,19 +507,27 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	// Decode envelope
 	env, err := e.codec.Decode(msg.Payload)
 	if err != nil {
-		e.cfg.Logger.ErrorAsync("failed to decode envelope, sending to DLQ", "id", msg.ID, "err", err)
+		e.cfg.Logger.ErrorAsync("failed to decode envelope, sending to DLQ", "id", msg.ID, "error_code", "decode_error")
 		e.settleDelivery(delivery, transport.Decision{
-			Kind:     transport.DecisionDeadLetter,
-			Reason:   "decode_error",
-			Cause:    err,
-			Attempts: delivery.DeliveryAttempt(),
-			FailedAt: time.Now(),
+			Kind:      transport.DecisionDeadLetter,
+			Reason:    "decode_error",
+			Cause:     err,
+			ErrorCode: "decode_error",
+			Attempts:  delivery.DeliveryAttempt(),
+			FailedAt:  time.Now(),
+		}, metricsJobType, msg.ID)
+		return
+	}
+	if reason, validationErr := validateEnvelopeRoute(env, kind, jobType); validationErr != nil {
+		e.cfg.Logger.ErrorAsync("invalid envelope, sending to DLQ", "id", msg.ID, "reason", reason)
+		e.settleDelivery(delivery, transport.Decision{
+			Kind: transport.DecisionDeadLetter, Reason: reason, ErrorCode: reason,
+			Attempts: delivery.DeliveryAttempt(), FailedAt: time.Now(),
 		}, metricsJobType, msg.ID)
 		return
 	}
 
 	job := Job{env: env}
-	env.Kind = kind
 	// The envelope is authoritative: raw broker metadata may be missing or
 	// stale. Preserve the original wire payload while restoring all keys.
 	msg.ID = env.ID
@@ -548,11 +557,12 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	if currentAttempt > limit {
 		e.cfg.Logger.WarnAsync("poison message detected, max attempts exceeded", "id", job.ID(), "count", currentAttempt)
 		e.settleDelivery(delivery, transport.Decision{
-			Kind:     transport.DecisionDeadLetter,
-			Reason:   "poison_message",
-			Cause:    errors.New("max attempts exceeded"),
-			Attempts: currentAttempt,
-			FailedAt: time.Now(),
+			Kind:      transport.DecisionDeadLetter,
+			Reason:    "poison_message",
+			Cause:     errors.New("max attempts exceeded"),
+			ErrorCode: "poison_message",
+			Attempts:  currentAttempt,
+			FailedAt:  time.Now(),
 		}, metricsJobType, job.ID())
 		return
 	}
@@ -582,7 +592,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	start := time.Now()
 	err = invokeHandler(procCtx, job, handler, e.cfg.Logger)
 	duration := time.Since(start).Seconds()
-	if errors.Is(err, ErrHandlerPanic) {
+	if safeIs(err, ErrHandlerPanic) {
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
 			metrics.IncHandlerFailure(metricsJobType, "panic")
 		}
@@ -616,8 +626,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	}
 
 	// Check if outcome is Skip
-	var skipErr *SkipError
-	if errors.As(err, &skipErr) {
+	if _, ok := safeAs[*SkipError](err); ok {
 		e.settleDelivery(delivery, transport.Decision{Kind: transport.DecisionAck}, metricsJobType, job.ID())
 		return
 	}
@@ -627,38 +636,45 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		"job_id", job.ID(),
 		"type", jobType,
 		"attempt", currentAttempt,
-		"err", err.Error(),
+		"error_code", safeErrorCode(err),
 	)
 
 	// Check if outcome is Permanent
-	var permErr *PermanentError
-	if errors.As(err, &permErr) {
+	if _, ok := safeAs[*PermanentError](err); ok {
 		e.settleDelivery(delivery, transport.Decision{
-			Kind:     transport.DecisionDeadLetter,
-			Reason:   "permanent_error",
-			Cause:    permErr.Unwrap(),
-			Attempts: currentAttempt,
-			FailedAt: time.Now(),
+			Kind:      transport.DecisionDeadLetter,
+			Reason:    "permanent_error",
+			ErrorCode: "permanent_error",
+			Attempts:  currentAttempt,
+			FailedAt:  time.Now(),
 		}, metricsJobType, job.ID())
 		return
 	}
 
 	if currentAttempt >= limit {
 		e.settleDelivery(delivery, transport.Decision{
-			Kind:     transport.DecisionDeadLetter,
-			Reason:   "max_attempts_exceeded",
-			Cause:    err,
-			Attempts: currentAttempt,
-			FailedAt: time.Now(),
+			Kind:      transport.DecisionDeadLetter,
+			Reason:    "max_attempts_exceeded",
+			Cause:     err,
+			ErrorCode: safeErrorCode(err),
+			Attempts:  currentAttempt,
+			FailedAt:  time.Now(),
 		}, metricsJobType, job.ID())
 		return
 	}
 
-	backoff := e.cfg.RetryPolicy.NextBackoff(currentAttempt)
 	retryCause := err
-	var retryAfterErr *RetryAfterError
-	if errors.As(err, &retryAfterErr) {
-		backoff = retryAfterErr.After
+	backoff := time.Duration(0)
+	var retryPolicyErr error
+	if retryAfterErr, ok := safeAs[*RetryAfterError](err); ok {
+		backoff = normalizeRetryDelay(retryAfterErr.After)
+	} else {
+		backoff, retryPolicyErr = safeRetryBackoff(e.cfg.RetryPolicy, currentAttempt)
+	}
+	if retryPolicyErr != nil {
+		e.cfg.Logger.ErrorAsync("eventbus: retry policy failed", "job_id", job.ID(), "error_code", safeErrorCode(retryPolicyErr))
+		backoff = 0
+		retryCause = retryPolicyErr
 	}
 
 	// Update envelope for the next attempt
@@ -678,11 +694,12 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 
 	// Transport must durably publish the retry before acknowledging the source.
 	e.settleDelivery(delivery, transport.Decision{
-		Kind:     transport.DecisionRetry,
-		Next:     nextMsg,
-		RetryAt:  retryAt,
-		Cause:    retryCause,
-		Attempts: currentAttempt,
+		Kind:      transport.DecisionRetry,
+		Next:      nextMsg,
+		RetryAt:   retryAt,
+		Cause:     retryCause,
+		ErrorCode: safeErrorCode(retryCause),
+		Attempts:  currentAttempt,
 	}, metricsJobType, job.ID())
 }
 
@@ -704,6 +721,7 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	defer cancel()
 
 	started := time.Now()
+	decision.Reason, decision.ErrorCode = transport.NormalizeDecisionMetadata(decision)
 	err := delivery.Settle(opCtx, decision)
 	outcome := "success"
 	if err != nil {
@@ -718,7 +736,7 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 			"job_id", jobID,
 			"decision", decision.Kind.String(),
 			"reason", decision.Reason,
-			"err", err,
+			"error_type", safeErrorType(err),
 		)
 		return
 	}
@@ -753,7 +771,7 @@ func (e *engine) heartbeatLoop(ctx context.Context, delivery transport.Delivery,
 					cancel()
 					return
 				}
-				e.cfg.Logger.WarnAsync("failed to extend delivery heartbeat", "job_type", jobType, "id", jobID, "err", err)
+				e.cfg.Logger.WarnAsync("failed to extend delivery heartbeat", "job_type", jobType, "id", jobID, "error_type", safeErrorType(err))
 				if leaseInterval > 0 {
 					cancel()
 					leaseFailed()

@@ -700,7 +700,7 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     provides no process-restart durability, cross-process coordination,
     distributed ordering, or durable broker lease.
 
-- [ ] **P6.7.3 Correct and observe durable schedulers**
+- [x] **P6.7.3 Correct and observe durable schedulers**
   - Redesign Kafka delayed scheduling so a far-future partition head cannot
     indefinitely block a later near-future deadline, or explicitly reject the
     unsupported deadline pattern and narrow the advertised guarantee (EB-05).
@@ -715,9 +715,35 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   - Acceptance: advertised precision states all preconditions, scheduler faults
     are alertable, and `Close` cannot return while an owned scheduler is still
     using broker resources.
-  - Notes:
+  - Notes: Kafka delay workers now poll every five seconds and remove
+    partition head-of-line blocking by broker-confirmed rotation of a
+    not-yet-due head to the tail of the same durable tier before committing its
+    source. Later near-future deadlines in the same partition can therefore
+    move to a lower tier in the same bounded batch; publish/commit ambiguity
+    remains duplicate-prone but loss-safe. The documented five-second precision
+    now requires a healthy scheduler and at most one bounded poll ahead of the
+    record; larger backlogs add bounded sweep intervals and synchronous transfer
+    time. Added optional `transport.SchedulerHealthReader` with payload-free
+    per-worker snapshots for Redis, NATS, and Kafka, including poll/dispatch/
+    transfer/commit/retry counters, last poll/success/error times, sanitized and
+    bounded error type, consecutive failures, and degraded state. Autonomous
+    loops now retain non-cancellation failures in alertable health instead of
+    silently discarding them, and successful sweeps clear degradation. Redis
+    now tracks every topology delay sweeper in a WaitGroup; `Close` cancels and
+    joins all sweepers plus the retention worker within the caller deadline and
+    cannot report success while one still uses Redis. Deterministic regressions
+    cover far-future then near-future records in one Kafka partition, health
+    failure/recovery for all three durable schedulers, bounded error exposure,
+    and Redis close deadline/join behavior. Updated `CAPABILITIES.md`,
+    `OBSERVABILITY.md`, `TESTING.md`, and Kafka `SCHEDULER.md`. Focused Kafka/
+    Redis regressions passed 20 consecutive runs; the complete embedded-NATS
+    integration suite passed; focused race tests passed for Kafka, Redis, and
+    integration-tagged NATS. Verified `go test ./eventbus/... -count=1`,
+    `go vet ./eventbus/...`, and integration-tag compilation on 2026-10-19.
+    Live Kafka was not required for the deterministic head-of-line regression;
+    production-scale scheduler fault/soak evidence remains assigned to P6.7.6.
 
-- [ ] **P6.7.4 Harden envelope, retry, error, and DLQ boundaries**
+- [x] **P6.7.4 Harden envelope, retry, error, and DLQ boundaries**
   - Validate every decoded v3 envelope before handler invocation: nonempty and
     bounded ID, exact topology kind/type match, attempts, timestamps, headers,
     and required metadata (EB-06). Route mismatches go to DLQ with stable,
@@ -733,9 +759,34 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   - Acceptance: hostile error implementations, malformed envelopes, oversized
     error strings, wrong route metadata, and invalid retry delays have
     deterministic non-panicking tests across the core and applicable drivers.
-  - Notes:
+  - Notes: Added route-aware v3 envelope validation before tracing or handler
+    invocation. Nonempty bounded ID, exact topology kind/name, positive attempts,
+    sane creation/schedule timestamps, valid JSON payload, bounded ordering /
+    dedupe metadata, and bounded control-free headers are required. Stable DLQ
+    reasons distinguish invalid IDs, route mismatches, attempts, timestamps,
+    payloads, dedupe, keys, and headers; the engine no longer overwrites a
+    mismatched kind. Legacy v2 decode remains compatible with its missing
+    creation timestamp. Public `PermanentError`, `RetryAfterError`, and
+    `SkipError` now have nil-safe fixed messages that do not expose caller text.
+    Error inspection and `errors.Is`/`errors.As` traversal are panic-isolated,
+    and operational logs use fixed codes or error types rather than rendering
+    hostile errors. Custom `RetryPolicy.NextBackoff` is recovered; negative
+    delays clamp to zero and delays above 30 days clamp to 30 days, including
+    `MarkRetryAfter`. Added `transport.Decision.ErrorCode` plus shared metadata
+    normalization: reason/error codes allow only `[a-z0-9_.-]`, are bounded to
+    64 bytes, never render `Cause`, and default safely for direct transport
+    callers. Memory, Redis, NATS, and Kafka enforce a 2 MiB final encoded DLQ
+    record bound before source removal/settlement. Deterministic hostile tests
+    cover wrong routes, malformed metadata, panic-capable error implementations,
+    retry-policy panic, pathological delays, metadata sanitization, and encoded
+    DLQ limits across core and all built-in drivers. Updated migration,
+    capability, observability, and testing guidance. Verified default EventBus
+    tests/vet, integration-tag compilation, the complete embedded-NATS suite,
+    and focused race tests for core, Memory, Redis, Kafka, and integration-tagged
+    NATS on 2026-10-19. Production-scale poison/DLQ fault execution remains part
+    of P6.7.6 rather than being claimed here.
 
-- [ ] **P6.7.5 Complete administration and Kafka topology reconciliation**
+- [x] **P6.7.5 Complete administration and Kafka topology reconciliation**
   - Add kind-explicit task/event statistics and stable Bus-level DLQ
     list/count/requeue/purge APIs, including cursor pagination where supported
     (EB-10). Preserve `ErrNotSupported` and keep destructive actions explicit.
@@ -753,7 +804,33 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
   - Acceptance: public admin examples no longer require access to a concrete
     transport; existing-topic mismatch/repair and partial partition expansion
     have deterministic plus live Kafka tests.
-  - Notes:
+  - Notes: Added kind-explicit `TopologyRef`, `TaskRef`, and `EventRef` plus
+    public `Bus.TopologyStats`, `SubscriberStats`, `ListDeadLetters`,
+    `CountDeadLetters`, `RequeueDeadLetters`, and `PurgeDeadLetters`. The legacy
+    `Stats(name)` remains a task-only adapter. Administration validates declared
+    topology/subscriber identity, preserves driver options, supports cursor
+    pages where available, and returns stable `ErrNotSupported` without concrete
+    transport access. The admin example now uses only `Bus`. Memory, Redis,
+    NATS, and Kafka implement explicit subscriber stats. Kafka provisioning now
+    creates/reconciles the main, DLQ, three delay, and one-partition DLQ admin
+    lock topics; it validates every partition's replication factor, rejects any
+    `cleanup.policy` containing `compact`, and alters only caller-declared topic
+    configs such as retention. Ordinary startup still rejects partition mismatch
+    and never expands topics. Added explicit `ExpandPartitions`, which expands
+    main/DLQ/delay topics in stable order, rejects decreases, and returns
+    per-topic success plus `PartitionExpansionError` after partial broker
+    success; ordering-key remapping is documented. Kafka DLQ requeue/purge now
+    acquire a broker-backed consumer-group lease on the topology's single
+    admin-lock partition in addition to the local mutex, so competing processes
+    fail busy rather than racing cursor commits. Deterministic tests cover public
+    admin routing, compaction/replication/config mismatch and repair, decreases,
+    and partial expansion. A live Kafka test at `localhost:9092` verified
+    retention reconciliation, expansion from one to two partitions across all
+    related data topics, and two-transport DLQ lease exclusion/reacquisition on
+    2026-10-19. Verified default EventBus/example tests, integration-tag
+    compilation, and focused Kafka execution. `go test ./... -count=1`,
+    `go vet ./...`, the complete tagged Kafka suite, focused default race tests,
+    and the race-enabled live topology-admin test all passed on 2026-10-19.
 
 - [ ] **P6.7.6 Complete contract coverage and production-scale evidence**
   - Expand `transport/contracttest.Run` so every applicable item in the shared

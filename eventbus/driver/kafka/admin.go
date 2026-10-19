@@ -22,6 +22,9 @@ const (
 
 type kafkaAdmin interface {
 	CreateTopics(context.Context, int32, int16, map[string]*string, ...string) (kadm.CreateTopicResponses, error)
+	DescribeTopicConfigs(context.Context, ...string) (kadm.ResourceConfigs, error)
+	AlterTopicConfigs(context.Context, []kadm.AlterConfig, ...string) (kadm.AlterConfigsResponses, error)
+	CreatePartitions(context.Context, int, ...string) (kadm.CreatePartitionsResponses, error)
 	DeleteTopics(context.Context, ...string) (kadm.DeleteTopicResponses, error)
 	Metadata(context.Context, ...string) (kadm.Metadata, error)
 	ListStartOffsets(context.Context, ...string) (kadm.ListedOffsets, error)
@@ -55,12 +58,10 @@ func (d *kafkaDelivery) deadLetterRecord(msg transport.Message, decision transpo
 		failedAt = time.Now()
 	}
 	record := kafkaDLQRecord{
-		Version: kafkaDLQRecordVersion, Message: msg, Reason: decision.Reason,
+		Version: kafkaDLQRecordVersion, Message: msg,
 		Attempts: decision.Attempts, FailedAt: failedAt.UnixMilli(),
 	}
-	if decision.Cause != nil {
-		record.LastError = decision.Cause.Error()
-	}
+	record.Reason, record.LastError = transport.NormalizeDecisionMetadata(decision)
 	if d.record != nil {
 		record.SourceTopic = d.record.Topic
 		record.SourcePartition = d.record.Partition
@@ -74,6 +75,9 @@ func (d *kafkaDelivery) deadLetterRecord(msg transport.Message, decision transpo
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: encode DLQ record: %w", err)
+	}
+	if len(encoded) > transport.MaxEncodedDLQRecordBytes {
+		return nil, fmt.Errorf("kafka: encoded DLQ record exceeds %d bytes", transport.MaxEncodedDLQRecordBytes)
 	}
 	return encoded, nil
 }
@@ -176,6 +180,11 @@ func (t *kafkaTransport) Requeue(ctx context.Context, topology transport.Topolog
 	}
 	t.dlqAdminMu.Lock()
 	defer t.dlqAdminMu.Unlock()
+	lease, err := t.acquireDLQAdminLease(ctx, topology)
+	if err != nil {
+		return err
+	}
+	defer lease.release()
 	topic := t.dlqTopic(topology)
 	selected := make(map[int32]map[int64]struct{})
 	maxOffset := make(map[int32]int64)
@@ -250,6 +259,11 @@ func (t *kafkaTransport) Purge(ctx context.Context, topology transport.Topology)
 	}
 	t.dlqAdminMu.Lock()
 	defer t.dlqAdminMu.Unlock()
+	lease, err := t.acquireDLQAdminLease(ctx, topology)
+	if err != nil {
+		return err
+	}
+	defer lease.release()
 	topic := t.dlqTopic(topology)
 	ends, err := t.adm.ListEndOffsets(ctx, topic)
 	if err != nil {
@@ -321,6 +335,17 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 		Pending: mainLag, Delayed: delayed, DLQ: dlq, Lag: mainLag,
 		LagKnown: true, OldestAgeKnown: mainLag == 0,
 	}, nil
+}
+
+func (t *kafkaTransport) SubscriptionStats(ctx context.Context, sub transport.Subscription) (transport.TopologyStats, error) {
+	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
+		return transport.TopologyStats{}, fmt.Errorf("kafka: event subscriber required")
+	}
+	lag, err := t.groupLag(ctx, t.mainTopic(sub.Topology), kafkaConsumerGroup(sub.Topology, sub.Group))
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
+	return transport.TopologyStats{Pending: lag, Lag: lag, LagKnown: true, OldestAgeKnown: lag == 0}, nil
 }
 
 func (t *kafkaTransport) statsGroups(ctx context.Context, topology transport.Topology) ([]string, error) {

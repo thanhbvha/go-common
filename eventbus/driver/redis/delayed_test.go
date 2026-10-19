@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -155,5 +156,60 @@ func TestDelayedDispatchFailureRetainsSources(t *testing.T) {
 	cancel()
 	if _, err := backend.dispatchDue(canceled, topo, now); err == nil {
 		t.Fatal("cancellation ignored")
+	}
+}
+
+func TestRedisSchedulerHealthAndCloseJoin(t *testing.T) {
+	backend, _ := delayedBackend(t)
+	topo := transport.Topology{Namespace: "test", JobType: "health"}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backend.sweepDelay = func(ctx context.Context, _ transport.Topology, _ time.Time) (int64, error) {
+		close(started)
+		<-release
+		return 0, errors.New("synthetic scheduler failure")
+	}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := backend.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close error = %v, want deadline", err)
+	}
+	close(release)
+	if err := backend.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisSchedulerHealthRecordsFailureAndRecovery(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	ctx := context.Background()
+	topo := transport.Topology{Namespace: "test", JobType: "health-status"}
+	now := time.Unix(1_700_000_000, 0)
+	if err := backend.PublishAt(ctx, topo, transport.Message{Payload: []byte("job")}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Set(ctx, backend.streamKey(topo), "wrong type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.dispatchDue(ctx, topo, now); err == nil {
+		t.Fatal("expected dispatch failure")
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || !status[0].Degraded || status[0].Retries == 0 || status[0].LastErrorOperation != "dispatch" {
+		t.Fatalf("failure status = %#v", status)
+	}
+	if err := rc.Del(ctx, backend.streamKey(topo)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.dispatchDue(ctx, topo, now); err != nil {
+		t.Fatal(err)
+	}
+	status = backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Degraded || status[0].ConsecutiveErrors != 0 || status[0].LastSuccess.IsZero() {
+		t.Fatalf("recovered status = %#v", status)
 	}
 }

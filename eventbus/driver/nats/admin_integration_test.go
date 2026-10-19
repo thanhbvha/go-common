@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
@@ -21,7 +22,7 @@ func TestNATSDLQAdminPreservesMetadataAndRequeues(t *testing.T) {
 	}
 	decision := transport.Decision{
 		Kind: transport.DecisionDeadLetter, Source: &source, Reason: "permanent_error",
-		Cause: errors.New("synthetic failure"), Attempts: 3, FailedAt: failedAt,
+		Cause: errors.New("synthetic failure"), ErrorCode: "synthetic_failure", Attempts: 3, FailedAt: failedAt,
 	}
 	if err := delivery.Settle(context.Background(), decision); err != nil {
 		stop()
@@ -46,7 +47,7 @@ func TestNATSDLQAdminPreservesMetadataAndRequeues(t *testing.T) {
 		record.Message.Headers["correlation-id"] != "corr-1" || string(record.Message.Payload) != string(source.Payload) {
 		t.Fatalf("DLQ message = %#v", record.Message)
 	}
-	if record.Reason != decision.Reason || record.LastError != decision.Cause.Error() ||
+	if record.Reason != decision.Reason || record.LastError != decision.ErrorCode ||
 		record.Attempts != decision.Attempts || !record.FailedAt.Equal(failedAt) {
 		t.Fatalf("DLQ failure metadata = %#v", record)
 	}
@@ -91,6 +92,31 @@ func TestNATSDLQAdminPreservesMetadataAndRequeues(t *testing.T) {
 		t.Fatalf("DLQ count after purge = %d, %v", count, err)
 	}
 }
+
+func TestNATSDLQRecordSanitizesMetadataAndBoundsSize(t *testing.T) {
+	_, _, _, _, delivery, stop := settlementFixture(t, "dlq_safety")
+	defer stop()
+	message := transport.Message{Payload: []byte(`{"v":3}`)}
+	payload, err := delivery.deadLetterRecord(message, transport.Decision{Reason: "contains secret", ErrorCode: "also secret", Cause: hostileNATSError{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record dlqRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Reason != "delivery_failure" || record.LastError != "delivery_error" {
+		t.Fatalf("metadata = %q/%q", record.Reason, record.LastError)
+	}
+	message.Payload = make([]byte, transport.MaxEncodedDLQRecordBytes+1)
+	if _, err := delivery.deadLetterRecord(message, transport.Decision{Reason: "failure"}); err == nil {
+		t.Fatal("oversized DLQ record unexpectedly encoded")
+	}
+}
+
+type hostileNATSError struct{}
+
+func (hostileNATSError) Error() string { panic("must not render") }
 
 func TestNATSStatsUseConsumerObligations(t *testing.T) {
 	s, js := provisioningJetStream(t)

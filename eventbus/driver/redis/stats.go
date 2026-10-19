@@ -123,6 +123,34 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 	return stats, nil
 }
 
+func (t *redisTransport) SubscriptionStats(ctx context.Context, sub transport.Subscription) (transport.TopologyStats, error) {
+	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
+		return transport.TopologyStats{}, fmt.Errorf("redis: event subscriber required")
+	}
+	stream := t.streamKey(sub.Topology)
+	groups, err := t.rc.XInfoGroups(ctx, stream).Result()
+	if err != nil {
+		return transport.TopologyStats{}, fmt.Errorf("redis: subscriber stats groups: %w", err)
+	}
+	wanted := "subscriber:" + sub.Group
+	for _, group := range groups {
+		if group.Name != wanted {
+			continue
+		}
+		ready, err := t.readyCount(ctx, stream, group)
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		pending, err := t.rc.XPending(ctx, stream, group.Name).Result()
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
+		lag := ready + pending.Count
+		return transport.TopologyStats{Pending: ready, InFlight: pending.Count, Lag: lag, LagKnown: true, OldestAgeKnown: lag == 0}, nil
+	}
+	return transport.TopologyStats{}, fmt.Errorf("redis: subscriber group %q is not provisioned", sub.Group)
+}
+
 // Redis 7 reports EntriesRead and Lag in XINFO GROUPS. Redis 6 and miniredis
 // omit EntriesRead, so fall back to bounded XRANGE pages instead of inventing a
 // value. The fallback is exact but O(ready backlog); callers can cancel it.

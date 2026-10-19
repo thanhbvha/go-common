@@ -90,6 +90,34 @@ func TestDLQUsesNormalizedSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestMemoryDLQSanitizesMetadataAndBoundsRecord(t *testing.T) {
+	backend := New().(*memoryTransport)
+	defer backend.Close(context.Background())
+	topo := transport.Topology{Namespace: "test", JobType: "dlq-safety"}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	oversized := transport.Message{Payload: make([]byte, transport.MaxEncodedDLQRecordBytes+1)}
+	if err := backend.Publish(context.Background(), topo, oversized); err != nil {
+		t.Fatal(err)
+	}
+	deliveries := make(chan transport.Delivery, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = backend.Consume(ctx, transport.Subscription{Topology: topo}, func(d transport.Delivery) { deliveries <- d })
+	}()
+	delivery := <-deliveries
+	decision := transport.Decision{Kind: transport.DecisionDeadLetter, Reason: "contains secret", ErrorCode: "also secret", Cause: hostileMemoryError{}}
+	if err := delivery.Settle(context.Background(), decision); err == nil {
+		t.Fatal("oversized DLQ record unexpectedly settled")
+	}
+}
+
+type hostileMemoryError struct{}
+
+func (hostileMemoryError) Error() string { panic("must not render") }
+
 func TestMemoryPublicationDedupeRequiresConfirmedState(t *testing.T) {
 	backend := New().(*memoryTransport)
 	ctx := context.Background()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,9 +17,10 @@ import (
 )
 
 const (
-	defaultDelayBatchSize = 100
-	maxDelayBatchSize     = 1000
-	delayPollTimeout      = time.Second
+	defaultDelayBatchSize  = 100
+	maxDelayBatchSize      = 1000
+	delayPollTimeout       = time.Second
+	delaySchedulerInterval = 5 * time.Second
 )
 
 type delaySchedulerHandle struct {
@@ -133,13 +135,14 @@ func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySch
 
 func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topology, tier time.Duration, client delayConsumerClient) {
 	defer client.CloseAllowingRebalance()
-	ticker := time.NewTicker(tier)
+	ticker := time.NewTicker(delaySchedulerInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			t.recordSchedulerPoll(topo, tier, time.Now())
 			pollCtx, cancel := context.WithTimeout(ctx, delayPollTimeout)
 			fetches := client.PollRecords(pollCtx, delayBatchSize(topo))
 			cancel()
@@ -147,11 +150,14 @@ func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topolo
 				return
 			}
 			if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				t.recordSchedulerError(topo, tier, "poll", err, time.Now())
 				client.AllowRebalance()
 				continue
 			}
 			if len(fetches.Records()) > 0 {
 				_ = t.processDelayBatch(ctx, topo, tier, client, fetches.Records(), time.Now())
+			} else {
+				t.recordSchedulerSuccess(topo, tier, 0, time.Now())
 			}
 			client.AllowRebalance()
 		}
@@ -188,10 +194,9 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 				break
 			}
 			target := t.delayDestination(topo, runAt, now)
-			if target == record.Topic {
-				setDelayRewind(rewind, record)
-				break
-			}
+			// Rotate a not-yet-due partition head to the tail of the same durable
+			// tier. Confirmed publish-before-commit lets later, earlier deadlines
+			// progress without losing the blocker on an ambiguous boundary.
 			message := recordMessage(record)
 			if target == t.mainTopic(topo) {
 				removeMessageHeader(&message, kafkaRunAtHeader)
@@ -211,7 +216,100 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 	if len(rewind) > 0 {
 		client.SetOffsets(rewind)
 	}
-	return errors.Join(failures...)
+	err := errors.Join(failures...)
+	if err == nil {
+		t.recordSchedulerSuccess(topo, tier, len(records), now)
+	} else {
+		t.recordSchedulerError(topo, tier, kafkaSchedulerOperation(err), err, now)
+	}
+	return err
+}
+
+func (t *kafkaTransport) recordSchedulerPoll(topo transport.Topology, tier time.Duration, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	status := t.schedulerStatusLocked(topo, tier)
+	status.LastPoll = now
+	status.Polls++
+}
+
+func (t *kafkaTransport) recordSchedulerSuccess(topo transport.Topology, tier time.Duration, processed int, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	status := t.schedulerStatusLocked(topo, tier)
+	status.LastSuccess = now
+	status.Dispatches++
+	status.Transfers += uint64(processed)
+	status.Commits += uint64(processed)
+	status.ConsecutiveErrors = 0
+	status.Degraded = false
+}
+
+func (t *kafkaTransport) recordSchedulerError(topo transport.Topology, tier time.Duration, operation string, err error, now time.Time) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	status := t.schedulerStatusLocked(topo, tier)
+	status.LastErrorAt = now
+	status.LastErrorOperation = operation
+	status.LastError = kafkaSchedulerError(err)
+	status.Retries++
+	status.ConsecutiveErrors++
+	status.Degraded = true
+}
+
+func (t *kafkaTransport) schedulerStatusLocked(topo transport.Topology, tier time.Duration) *transport.SchedulerStatus {
+	key := topo.Name()
+	if t.schedulerStatuses == nil {
+		t.schedulerStatuses = make(map[string]map[string]*transport.SchedulerStatus)
+	}
+	if t.schedulerStatuses[key] == nil {
+		t.schedulerStatuses[key] = make(map[string]*transport.SchedulerStatus)
+	}
+	worker := tier.String()
+	status := t.schedulerStatuses[key][worker]
+	if status == nil {
+		status = &transport.SchedulerStatus{Transport: "kafka", Topology: key, Worker: worker}
+		t.schedulerStatuses[key][worker] = status
+	}
+	return status
+}
+
+func (t *kafkaTransport) SchedulerHealth(topo transport.Topology) []transport.SchedulerStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	workers := t.schedulerStatuses[topo.Name()]
+	result := make([]transport.SchedulerStatus, 0, len(delayTiers))
+	for _, tier := range delayTiers {
+		if status := workers[tier.String()]; status != nil {
+			result = append(result, *status)
+		}
+	}
+	return result
+}
+
+func kafkaSchedulerError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := fmt.Sprintf("%T", err)
+	if len(text) > transport.MaxSchedulerErrorBytes {
+		text = text[:transport.MaxSchedulerErrorBytes]
+	}
+	return text
+}
+
+func kafkaSchedulerOperation(err error) string {
+	text := err.Error()
+	if strings.Contains(text, "forward delayed record") {
+		return "transfer"
+	}
+	if strings.Contains(text, "commit delayed record") {
+		return "commit"
+	}
+	return "dispatch"
 }
 
 func delayedRecordRunAt(record *kgo.Record) (time.Time, error) {

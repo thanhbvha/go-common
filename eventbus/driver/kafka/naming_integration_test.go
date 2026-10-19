@@ -39,6 +39,7 @@ func TestEncodedTopologyNamesPreventKafkaCrossDelivery(t *testing.T) {
 		for _, topo := range []transport.Topology{first, second} {
 			topics = append(topics, backend.mainTopic(topo), backend.dlqTopic(topo))
 			topics = append(topics, backend.delayTopics(topo)...)
+			topics = append(topics, backend.dlqAdminLockTopic(topo))
 		}
 		_, _ = backend.adm.DeleteTopics(context.Background(), topics...)
 	})

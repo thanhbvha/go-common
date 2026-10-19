@@ -101,6 +101,10 @@ type redisTransport struct {
 
 	mu                  sync.Mutex
 	sweepers            map[string]context.CancelFunc
+	sweeperWG           sync.WaitGroup
+	schedulerStatuses   map[string]transport.SchedulerStatus
+	sweepDelay          func(context.Context, transport.Topology, time.Time) (int64, error)
+	closed              bool
 	retentionTopologies map[string]transport.Topology
 	retentionStatuses   map[string]RetentionStatus
 	capacityRejections  map[string]map[string]uint64
@@ -117,8 +121,10 @@ var (
 	_ transport.DLQAdmin                = (*redisTransport)(nil)
 	_ transport.CursorDLQAdmin          = (*redisTransport)(nil)
 	_ transport.StatsReader             = (*redisTransport)(nil)
+	_ transport.SubscriptionStatsReader = (*redisTransport)(nil)
 	_ transport.TopologyValidator       = (*redisTransport)(nil)
 	_ transport.SubscriptionProvisioner = (*redisTransport)(nil)
+	_ transport.SchedulerHealthReader   = (*redisTransport)(nil)
 	_ RetentionAdmin                    = (*redisTransport)(nil)
 	_ transport.Delivery                = (*redisDelivery)(nil)
 )
@@ -127,11 +133,13 @@ func New(rc goredis.UniversalClient) transport.Transport {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &redisTransport{
 		rc: rc, sweepers: make(map[string]context.CancelFunc),
+		schedulerStatuses:   make(map[string]transport.SchedulerStatus),
 		retentionTopologies: make(map[string]transport.Topology),
 		retentionStatuses:   make(map[string]RetentionStatus),
 		capacityRejections:  make(map[string]map[string]uint64),
 		retentionCancel:     cancel, retentionDone: make(chan struct{}), retentionWake: make(chan struct{}, 1),
 	}
+	t.sweepDelay = t.dispatchDue
 	go t.retentionLoop(ctx)
 	return t
 }
@@ -165,11 +173,18 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed {
+		return fmt.Errorf("redis: transport closed")
+	}
 	topoName := topologyPrefix(topo)
 	if _, ok := t.sweepers[topoName]; !ok {
 		sweepCtx, cancel := context.WithCancel(context.Background())
 		t.sweepers[topoName] = cancel
-		go t.delaySweeper(sweepCtx, topo)
+		t.sweeperWG.Add(1)
+		go func() {
+			defer t.sweeperWG.Done()
+			t.delaySweeper(sweepCtx, topo)
+		}()
 	}
 	t.retentionTopologies[topoName] = topo
 	select {
@@ -220,11 +235,7 @@ func (t *redisTransport) delaySweeper(ctx context.Context, topo transport.Topolo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, err := t.dispatchDue(ctx, topo, time.Now())
-			if err != nil && !errors.Is(err, context.Canceled) {
-				// We don't have logger here, just silently retry on next tick
-				// In a real production transport, we should have a logger injected
-			}
+			_, _ = t.sweepDelay(ctx, topo, time.Now())
 		}
 	}
 }
@@ -239,7 +250,9 @@ var (
 // back prior writes: validate types first and remove each source only after
 // its destination write, so partial failure cannot silently lose a job.
 func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topology, now time.Time) (int64, error) {
+	t.recordSchedulerPoll(topo, now)
 	if err := t.ValidateTopology(topo); err != nil {
+		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
 	}
 	limit := 100
@@ -248,12 +261,80 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 	}
 	moved, err := moveDelayedScript.Run(ctx, t.rc, []string{t.delayedKey(topo), t.streamKey(topo)}, now.UnixMilli(), limit, maxReadyEntries(topo)).Int64()
 	if err != nil {
+		t.recordSchedulerError(topo, "dispatch", err, now)
 		return 0, err
 	}
 	if moved < 0 {
-		return 0, t.capacityError(topo, "ready", -moved-1, maxReadyEntries(topo))
+		err := t.capacityError(topo, "ready", -moved-1, maxReadyEntries(topo))
+		t.recordSchedulerError(topo, "transfer", err, now)
+		return 0, err
 	}
+	t.recordSchedulerSuccess(topo, moved, now)
 	return moved, nil
+}
+
+func (t *redisTransport) recordSchedulerPoll(topo transport.Topology, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topologyPrefix(topo)
+	status := t.schedulerStatuses[key]
+	status.Transport, status.Topology, status.Worker = "redis", topo.Name(), "delayed"
+	status.LastPoll = now
+	status.Polls++
+	t.schedulerStatuses[key] = status
+}
+
+func (t *redisTransport) recordSchedulerSuccess(topo transport.Topology, moved int64, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topologyPrefix(topo)
+	status := t.schedulerStatuses[key]
+	status.LastSuccess = now
+	status.Dispatches++
+	status.Transfers += uint64(moved)
+	status.Commits += uint64(moved)
+	status.ConsecutiveErrors = 0
+	status.Degraded = false
+	t.schedulerStatuses[key] = status
+}
+
+func (t *redisTransport) recordSchedulerError(topo transport.Topology, operation string, err error, now time.Time) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topologyPrefix(topo)
+	status := t.schedulerStatuses[key]
+	status.Transport, status.Topology, status.Worker = "redis", topo.Name(), "delayed"
+	status.LastErrorAt = now
+	status.LastErrorOperation = operation
+	status.LastError = boundedSchedulerError(err)
+	status.Retries++
+	status.ConsecutiveErrors++
+	status.Degraded = true
+	t.schedulerStatuses[key] = status
+}
+
+func (t *redisTransport) SchedulerHealth(topo transport.Topology) []transport.SchedulerStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	status, ok := t.schedulerStatuses[topologyPrefix(topo)]
+	if !ok {
+		return nil
+	}
+	return []transport.SchedulerStatus{status}
+}
+
+func boundedSchedulerError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := fmt.Sprintf("%T", err)
+	if len(text) > transport.MaxSchedulerErrorBytes {
+		text = text[:transport.MaxSchedulerErrorBytes]
+	}
+	return text
 }
 
 func (t *redisTransport) capacityError(topo transport.Topology, resource string, current, limit int64) error {
@@ -430,6 +511,7 @@ func (t *redisTransport) Ping(ctx context.Context) error {
 
 func (t *redisTransport) Close(ctx context.Context) error {
 	t.mu.Lock()
+	t.closed = true
 	for _, cancel := range t.sweepers {
 		cancel()
 	}
@@ -438,8 +520,14 @@ func (t *redisTransport) Close(ctx context.Context) error {
 	retentionDone := t.retentionDone
 	t.mu.Unlock()
 	retentionCancel()
+	done := make(chan struct{})
+	go func() {
+		t.sweeperWG.Wait()
+		<-retentionDone
+		close(done)
+	}()
 	select {
-	case <-retentionDone:
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -489,11 +577,4 @@ func (d *redisDelivery) Settle(ctx context.Context, decision transport.Decision)
 		}
 		return d.transfer(ctx, decision)
 	})
-}
-
-func decisionError(decision transport.Decision) string {
-	if decision.Cause == nil {
-		return ""
-	}
-	return decision.Cause.Error()
 }

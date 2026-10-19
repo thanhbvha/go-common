@@ -346,9 +346,11 @@ func TestStatsReportQueuedInFlightDelayedAndDLQ(t *testing.T) {
 	}
 	delivery, stop := receiveMemory(t, backend, transport.Subscription{Topology: topo})
 	defer stop()
-	if err := backend.Publish(context.Background(), topo, transport.Message{ID: "ready"}); err != nil {
-		t.Fatal(err)
-	}
+	backend.mu.Lock()
+	backend.topologies[topo.Name()].groups[""].ready = append(backend.topologies[topo.Name()].groups[""].ready, memoryQueued{
+		message: transport.Message{ID: "ready"}, readyAt: time.Now(),
+	})
+	backend.mu.Unlock()
 	if err := backend.PublishAt(context.Background(), topo, transport.Message{ID: "delayed"}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}

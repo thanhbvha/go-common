@@ -9,10 +9,13 @@ type PermanentError struct {
 }
 
 func (e *PermanentError) Error() string {
-	return "permanent: " + e.Err.Error()
+	return "eventbus: permanent error"
 }
 
 func (e *PermanentError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.Err
 }
 
@@ -32,10 +35,13 @@ type RetryAfterError struct {
 }
 
 func (e *RetryAfterError) Error() string {
-	return "retry-after: " + e.Err.Error()
+	return "eventbus: retry requested"
 }
 
 func (e *RetryAfterError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.Err
 }
 
@@ -54,7 +60,7 @@ type SkipError struct {
 }
 
 func (e *SkipError) Error() string {
-	return "skipped: " + e.Reason
+	return "eventbus: skipped"
 }
 
 // MarkSkip returns a SkipError.

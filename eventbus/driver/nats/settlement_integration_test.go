@@ -166,7 +166,7 @@ func TestNATSDLQTransferIsIdempotentBeforeSourceTerm(t *testing.T) {
 		}
 		return injected
 	}
-	decision := transport.Decision{Kind: transport.DecisionDeadLetter, Reason: "synthetic", Cause: errors.New("failed")}
+	decision := transport.Decision{Kind: transport.DecisionDeadLetter, Reason: "synthetic", Cause: errors.New("failed"), ErrorCode: "failed"}
 	if err := delivery.Settle(ctx, decision); !errors.Is(err, injected) {
 		t.Fatalf("first settlement = %v", err)
 	}

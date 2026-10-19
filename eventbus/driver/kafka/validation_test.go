@@ -53,3 +53,17 @@ func TestKafkaLegacyConsumerGroupMatchesPreV2Layout(t *testing.T) {
 		t.Fatalf("legacy consumer group = %q", got)
 	}
 }
+
+func TestKafkaRejectsCompactedQueueTopics(t *testing.T) {
+	backend := &kafkaTransport{}
+	for _, policy := range []string{"compact", "delete,compact", "compact,delete"} {
+		topo := transport.Topology{JobType: "jobs", Options: map[string]any{"kafka.topic_configs": map[string]string{"cleanup.policy": policy}}}
+		if err := backend.ValidateTopology(topo); err == nil {
+			t.Fatalf("accepted cleanup.policy %q", policy)
+		}
+	}
+	topo := transport.Topology{JobType: "jobs", Options: map[string]any{"kafka.topic_configs": map[string]string{"cleanup.policy": "delete"}}}
+	if err := backend.ValidateTopology(topo); err != nil {
+		t.Fatal(err)
+	}
+}

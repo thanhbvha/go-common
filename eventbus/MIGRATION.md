@@ -390,6 +390,28 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
   `Decision.Source`, when non-nil, for DLQ source records; nil means decoding
   failed or a caller settled directly, so retain the raw delivery message.
   Source payload bytes remain unchanged. Never mutate the supplied metadata.
+- Decoded v3 envelopes are now validated against the active consumer route
+  before tracing or handler invocation. ID, exact topology kind/name, attempts,
+  creation/schedule timestamps, payload JSON, dedupe metadata, ordering/dedupe
+  key lengths, and bounded control-free headers are required. Invalid records
+  go directly to DLQ with a fixed reason such as `topology_type_mismatch` or
+  `invalid_headers`; the engine no longer overwrites a mismatched envelope kind.
+  Legacy v2 decode compatibility remains, including records that predate the v3
+  creation timestamp requirement.
+- Handler error text is no longer copied to logs, traces, or DLQ records.
+  `PermanentError`, `RetryAfterError`, and `SkipError` return fixed public
+  messages and are nil-safe. `transport.Decision.ErrorCode` carries a fixed
+  lower-case classification; direct transport callers that omit or provide an
+  invalid code receive `delivery_error`. DLQ reason/error codes are limited to
+  64 bytes and `[a-z0-9_.-]`, and every built-in driver rejects an encoded DLQ
+  record above 2 MiB without acknowledging/removing the source. This is an
+  intentional metadata compatibility change: applications must not parse raw
+  handler text from `DeadLetter.LastError`.
+- Caller-provided retry policies and error wrapper traversal are panic-isolated.
+  Negative retry delays clamp to immediate retry; delays above 30 days clamp to
+  30 days. A panicking policy produces an immediate retry classified as
+  `retry_policy_panic`, preserving the at-least-once source rather than crashing
+  a worker. `MarkRetryAfter` is normalized by the same bounds.
 - `Bus` now includes `Drain(ctx)`. Implementations and mocks must add it.
   `Drain`, `Stop`, and `Close` share one terminal shutdown: stop intake, finish
   accepted/prefetched deliveries and settlement within the first caller's grace
@@ -421,6 +443,20 @@ if err := bus.PublishEvent(ctx, "missing", payload); errors.Is(err, eventbus.Err
 - Statistics, DLQ administration, deduplication, and pause/resume are optional
   transport capabilities. A custom transport must implement the corresponding
   optional interface or callers receive `ErrNotSupported`.
+- Public administration no longer requires retaining or type-asserting a
+  concrete transport. Use `TopologyStats(TaskRef|EventRef)`, `SubscriberStats`,
+  `ListDeadLetters`, `CountDeadLetters`, `RequeueDeadLetters`, and
+  `PurgeDeadLetters`. The old `Stats(name)` remains a task-only compatibility
+  adapter. Admin operations require a topology declared on that Bus and preserve
+  `ErrNotSupported` when the selected driver lacks the optional capability.
+- Kafka startup now reconciles replication and explicitly requested topic
+  configs for main, DLQ, delay, and DLQ-admin-lock topics. Any cleanup policy
+  containing `compact` is rejected because repeated ordering keys could delete
+  accepted queue records. Startup never changes partition counts. Operators may
+  call the Kafka driver's explicit `ExpandPartitions`; it expands main, DLQ, and
+  all delay topics, rejects decreases, reports per-topic partial success, and
+  requires an ordering-key remapping plan. Kafka DLQ requeue/purge acquire a
+  broker-backed single-operator lease rather than relying only on a local mutex.
 - Strict validation now rejects blank or padded names, nil handlers/options,
   invalid numeric values, conflicting schedule options, and driver options
   unsupported by the selected transport. Values that were previously ignored

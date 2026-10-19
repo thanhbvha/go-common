@@ -120,6 +120,7 @@ var (
 	_ transport.PublicationDeduper      = (*memoryTransport)(nil)
 	_ transport.DLQAdmin                = (*memoryTransport)(nil)
 	_ transport.StatsReader             = (*memoryTransport)(nil)
+	_ transport.SubscriptionStatsReader = (*memoryTransport)(nil)
 	_ transport.TopologyValidator       = (*memoryTransport)(nil)
 	_ transport.SubscriptionProvisioner = (*memoryTransport)(nil)
 	_ transport.Delivery                = (*memoryDelivery)(nil)
@@ -745,6 +746,24 @@ func (m *memoryTransport) Stats(ctx context.Context, topology transport.Topology
 	return stats, nil
 }
 
+func (m *memoryTransport) SubscriptionStats(ctx context.Context, sub transport.Subscription) (transport.TopologyStats, error) {
+	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
+		return transport.TopologyStats{}, fmt.Errorf("memory: event subscriber required")
+	}
+	if err := ctx.Err(); err != nil {
+		return transport.TopologyStats{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	topo := m.topologies[sub.Topology.Name()]
+	if topo == nil || topo.groups[sub.Group] == nil {
+		return transport.TopologyStats{}, fmt.Errorf("memory: subscriber group %q is not provisioned", sub.Group)
+	}
+	group := topo.groups[sub.Group]
+	pending, inFlight := int64(len(group.ready)), int64(len(group.inFlight))
+	return transport.TopologyStats{Pending: pending, InFlight: inFlight, Lag: pending + inFlight, LagKnown: true}, nil
+}
+
 func (m *memoryTransport) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -839,14 +858,14 @@ func (d *memoryDelivery) Settle(ctx context.Context, decision transport.Decision
 			if failedAt.IsZero() {
 				failedAt = time.Now()
 			}
-			lastError := ""
-			if decision.Cause != nil {
-				lastError = decision.Cause.Error()
+			reason, lastError := transport.NormalizeDecisionMetadata(decision)
+			if len(msg.Payload)+len(reason)+len(lastError) > transport.MaxEncodedDLQRecordBytes {
+				return fmt.Errorf("memory: encoded DLQ record exceeds %d bytes", transport.MaxEncodedDLQRecordBytes)
 			}
 			m.dlqSeq++
 			m.dlqs[name] = append(m.dlqs[name], transport.DeadLetter{
 				ID: strconv.FormatUint(m.dlqSeq, 10), Message: cloneMessage(msg),
-				Reason: decision.Reason, LastError: lastError, Attempts: decision.Attempts, FailedAt: failedAt,
+				Reason: reason, LastError: lastError, Attempts: decision.Attempts, FailedAt: failedAt,
 				Source: d.topologyName, SourceGroup: d.group, SourcePosition: strconv.FormatUint(d.id, 10),
 			})
 			m.ackSourceLocked(d)

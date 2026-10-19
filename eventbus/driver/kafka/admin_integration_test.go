@@ -33,6 +33,7 @@ func TestKafkaDLQAdminAndStatsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	topics = append(topics, backend.dlqAdminLockTopic(topo))
 	defer func() {
 		_ = backend.Close(context.Background())
 		cleanup, err := kgo.NewClient(kgo.SeedBrokers(cfg.Brokers...))
@@ -54,7 +55,7 @@ func TestKafkaDLQAdminAndStatsIntegration(t *testing.T) {
 		t.Fatalf("published stats = %#v, %v", stats, err)
 	}
 	settleKafkaIntegrationDelivery(t, ctx, backend, topo, transport.Decision{
-		Kind: transport.DecisionDeadLetter, Source: &message, Reason: "integration", Cause: errors.New("synthetic"), Attempts: 2,
+		Kind: transport.DecisionDeadLetter, Source: &message, Reason: "integration", Cause: errors.New("synthetic"), ErrorCode: "synthetic", Attempts: 2,
 	})
 
 	if count, err := backend.Count(ctx, topo); err != nil || count != 1 {

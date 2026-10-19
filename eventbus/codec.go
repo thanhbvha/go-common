@@ -92,6 +92,7 @@ func (c *Codec) Decode(data []byte) (*Envelope, error) {
 
 	switch env.V {
 	case 2:
+		env.legacy = true
 		env.V = 3
 		env.Kind = TaskTopology
 		env.Attempt++

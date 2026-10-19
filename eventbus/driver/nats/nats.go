@@ -35,12 +35,13 @@ func init() {
 type natsTransport struct {
 	js gonats.JetStreamContext
 
-	mu         sync.RWMutex
-	kvs        map[string]gonats.KeyValue
-	sweepers   map[string]context.CancelFunc
-	sweeperWG  sync.WaitGroup
-	instanceID string
-	now        func() time.Time
+	mu                sync.RWMutex
+	kvs               map[string]gonats.KeyValue
+	sweepers          map[string]context.CancelFunc
+	sweeperWG         sync.WaitGroup
+	schedulerStatuses map[string]transport.SchedulerStatus
+	instanceID        string
+	now               func() time.Time
 	// afterTransfer is a fault-injection seam used by embedded broker tests at
 	// the publish-before-source-settlement boundary.
 	afterTransfer func(transport.DecisionKind) error
@@ -51,25 +52,28 @@ const dedupeBucket = "eventbus_dedupe_v2"
 const messageIDHeader = "X-EventBus-Message-Id"
 
 var (
-	_ transport.Transport          = (*natsTransport)(nil)
-	_ transport.Deduper            = (*natsTransport)(nil)
-	_ transport.TopologyDeduper    = (*natsTransport)(nil)
-	_ transport.PublicationDeduper = (*natsTransport)(nil)
-	_ transport.DLQAdmin           = (*natsTransport)(nil)
-	_ transport.CursorDLQAdmin     = (*natsTransport)(nil)
-	_ transport.StatsReader        = (*natsTransport)(nil)
-	_ transport.TopologyValidator  = (*natsTransport)(nil)
-	_ transport.Delivery           = (*natsDelivery)(nil)
-	_ transport.LeaseDelivery      = (*natsDelivery)(nil)
+	_ transport.Transport               = (*natsTransport)(nil)
+	_ transport.Deduper                 = (*natsTransport)(nil)
+	_ transport.TopologyDeduper         = (*natsTransport)(nil)
+	_ transport.PublicationDeduper      = (*natsTransport)(nil)
+	_ transport.DLQAdmin                = (*natsTransport)(nil)
+	_ transport.CursorDLQAdmin          = (*natsTransport)(nil)
+	_ transport.StatsReader             = (*natsTransport)(nil)
+	_ transport.SubscriptionStatsReader = (*natsTransport)(nil)
+	_ transport.TopologyValidator       = (*natsTransport)(nil)
+	_ transport.SchedulerHealthReader   = (*natsTransport)(nil)
+	_ transport.Delivery                = (*natsDelivery)(nil)
+	_ transport.LeaseDelivery           = (*natsDelivery)(nil)
 )
 
 func New(js gonats.JetStreamContext) transport.Transport {
 	return &natsTransport{
-		js:         js,
-		kvs:        make(map[string]gonats.KeyValue),
-		sweepers:   make(map[string]context.CancelFunc),
-		instanceID: newSchedulerID(),
-		now:        time.Now,
+		js:                js,
+		kvs:               make(map[string]gonats.KeyValue),
+		sweepers:          make(map[string]context.CancelFunc),
+		schedulerStatuses: make(map[string]transport.SchedulerStatus),
+		instanceID:        newSchedulerID(),
+		now:               time.Now,
 	}
 }
 

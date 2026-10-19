@@ -38,12 +38,10 @@ func (d *natsDelivery) deadLetterRecord(msg transport.Message, decision transpor
 		failedAt = d.transport.now()
 	}
 	record := dlqRecord{
-		Version: natsDLQRecordVersion, Message: msg, Reason: decision.Reason,
+		Version: natsDLQRecordVersion, Message: msg,
 		Attempts: decision.Attempts, FailedAt: failedAt.UnixMilli(),
 	}
-	if decision.Cause != nil {
-		record.LastError = decision.Cause.Error()
-	}
+	record.Reason, record.LastError = transport.NormalizeDecisionMetadata(decision)
 	if metadata, err := d.nmsg.Metadata(); err == nil {
 		record.Source = metadata.Stream
 		record.SourceGroup = metadata.Consumer
@@ -52,6 +50,9 @@ func (d *natsDelivery) deadLetterRecord(msg transport.Message, decision transpor
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("nats: encode DLQ record: %w", err)
+	}
+	if len(encoded) > transport.MaxEncodedDLQRecordBytes {
+		return nil, fmt.Errorf("nats: encoded DLQ record exceeds %d bytes", transport.MaxEncodedDLQRecordBytes)
 	}
 	return encoded, nil
 }

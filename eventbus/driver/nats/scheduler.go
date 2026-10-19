@@ -203,22 +203,27 @@ func (t *natsTransport) delaySweeper(ctx context.Context, topo transport.Topolog
 // dispatchDue performs bounded publication work without retaining the delayed
 // backlog in process memory. KV watchers stream a fixed-size window internally.
 func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time) (int, error) {
+	t.recordSchedulerPoll(topo, now)
 	batch := delayBatchSize(topo)
 	if _, err := t.migrateLegacyDelayed(ctx, kv, now, batch); err != nil {
+		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
 	}
 	entry, err := kv.Get(delayCursorKey)
 	if err != nil {
+		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, fmt.Errorf("nats delay read cursor: %w", err)
 	}
 	cursor, err := strconv.ParseInt(string(entry.Value()), 10, 64)
 	if err != nil {
+		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, fmt.Errorf("nats delay parse cursor: %w", err)
 	}
 	current := delaySlot(now)
 	if current-cursor > defaultDelayCatchupSlots {
 		entry, cursor, err = recoverDelayCursor(ctx, kv, entry, cursor, current)
 		if err != nil {
+			t.recordSchedulerError(topo, "dispatch", err, now)
 			return 0, err
 		}
 	}
@@ -230,6 +235,7 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 		published, complete, err := t.dispatchDelaySlot(ctx, topo, kv, cursor, now, batch-total)
 		total += published
 		if err != nil {
+			t.recordSchedulerError(topo, natsSchedulerOperation(err), err, now)
 			return total, err
 		}
 		if !complete || cursor == current {
@@ -237,6 +243,7 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 		}
 		advanced, nextEntry, err := advanceDelayCursor(kv, entry, cursor+1)
 		if err != nil {
+			t.recordSchedulerError(topo, "commit", err, now)
 			return total, err
 		}
 		entry = nextEntry
@@ -246,9 +253,11 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 		}
 		cursor, err = strconv.ParseInt(string(entry.Value()), 10, 64)
 		if err != nil {
+			t.recordSchedulerError(topo, "commit", err, now)
 			return total, fmt.Errorf("nats delay parse concurrent cursor: %w", err)
 		}
 	}
+	t.recordSchedulerSuccess(topo, total, now)
 	return total, nil
 }
 
@@ -427,6 +436,81 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 		_ = kv.Delete("transfer." + record.TransferID)
 	}
 	return true, false, nil
+}
+
+func (t *natsTransport) recordSchedulerPoll(topo transport.Topology, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topo.Name()
+	status := t.schedulerStatuses[key]
+	status.Transport, status.Topology, status.Worker = "nats", key, "delayed"
+	status.LastPoll = now
+	status.Polls++
+	t.schedulerStatuses[key] = status
+}
+
+func (t *natsTransport) recordSchedulerSuccess(topo transport.Topology, published int, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topo.Name()
+	status := t.schedulerStatuses[key]
+	status.LastSuccess = now
+	status.Dispatches++
+	status.Transfers += uint64(published)
+	status.Commits += uint64(published)
+	status.ConsecutiveErrors = 0
+	status.Degraded = false
+	t.schedulerStatuses[key] = status
+}
+
+func (t *natsTransport) recordSchedulerError(topo transport.Topology, operation string, err error, now time.Time) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := topo.Name()
+	status := t.schedulerStatuses[key]
+	status.Transport, status.Topology, status.Worker = "nats", key, "delayed"
+	status.LastErrorAt = now
+	status.LastErrorOperation = operation
+	status.LastError = natsSchedulerError(err)
+	status.Retries++
+	status.ConsecutiveErrors++
+	status.Degraded = true
+	t.schedulerStatuses[key] = status
+}
+
+func (t *natsTransport) SchedulerHealth(topo transport.Topology) []transport.SchedulerStatus {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	status, ok := t.schedulerStatuses[topo.Name()]
+	if !ok {
+		return nil
+	}
+	return []transport.SchedulerStatus{status}
+}
+
+func natsSchedulerError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := fmt.Sprintf("%T", err)
+	if len(text) > transport.MaxSchedulerErrorBytes {
+		text = text[:transport.MaxSchedulerErrorBytes]
+	}
+	return text
+}
+
+func natsSchedulerOperation(err error) string {
+	text := err.Error()
+	if strings.Contains(text, " delay publish ") {
+		return "transfer"
+	}
+	if strings.Contains(text, " delay delete ") || strings.Contains(text, " delay advance cursor") {
+		return "commit"
+	}
+	return "dispatch"
 }
 
 // migrateLegacyDelayed transfers the P4.2 timestamp_ID records into v2 keys.

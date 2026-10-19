@@ -52,6 +52,7 @@ func TestPublicAPIsRejectInvalidNames(t *testing.T) {
 		{name: "enqueue empty task", call: func(b Bus) error { return b.Enqueue(context.Background(), "", nil) }},
 		{name: "publish blank event", call: func(b Bus) error { return b.Publish(context.Background(), " ", nil) }},
 		{name: "stats empty task", call: func(b Bus) error { _, err := b.Stats(context.Background(), ""); return err }},
+		{name: "stats empty event", call: func(b Bus) error { _, err := b.TopologyStats(context.Background(), EventRef("")); return err }},
 	}
 
 	for _, tt := range tests {

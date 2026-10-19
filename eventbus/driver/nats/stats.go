@@ -82,6 +82,23 @@ func (t *natsTransport) Stats(ctx context.Context, topology transport.Topology) 
 	return stats, nil
 }
 
+func (t *natsTransport) SubscriptionStats(ctx context.Context, sub transport.Subscription) (transport.TopologyStats, error) {
+	if sub.Topology.Kind != transport.EventTopology || sub.Group == "" {
+		return transport.TopologyStats{}, fmt.Errorf("nats: event subscriber required")
+	}
+	info, err := t.js.ConsumerInfo(t.streamName(sub.Topology), t.consumerName(sub), gonats.Context(ctx))
+	if err != nil {
+		return transport.TopologyStats{}, fmt.Errorf("nats: inspect subscriber: %w", err)
+	}
+	pending, err := checkedNATSCount("pending", info.NumPending)
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
+	inFlight := int64(info.NumAckPending)
+	lag := pending + inFlight
+	return transport.TopologyStats{Pending: pending, InFlight: inFlight, Lag: lag, LagKnown: true, OldestAgeKnown: lag == 0}, nil
+}
+
 func (t *natsTransport) delayedCount(ctx context.Context, topology transport.Topology) (int64, error) {
 	kv, err := t.getKV(t.kvBucketName(topology))
 	if err != nil {

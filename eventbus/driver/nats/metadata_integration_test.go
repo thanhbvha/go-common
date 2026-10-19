@@ -65,7 +65,7 @@ func TestEngineRetriesPreserveIDsAtSameDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id := range want {
-		data := []byte(fmt.Sprintf(`{"v":3,"id":%q,"kind":0,"type":%q,"payload":1,"attempt":1,"max_attempts":2,"headers":{"correlation-id":"synthetic"}}`, id, topo.JobType))
+		data := []byte(fmt.Sprintf(`{"v":3,"id":%q,"kind":0,"type":%q,"payload":1,"attempt":1,"max_attempts":2,"created_at":%d,"headers":{"correlation-id":"synthetic"}}`, id, topo.JobType, time.Now().UnixMilli()))
 		if err := backend.Publish(ctx, topo, transport.Message{ID: id, Payload: data}); err != nil {
 			t.Fatal(err)
 		}

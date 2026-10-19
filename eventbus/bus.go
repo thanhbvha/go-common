@@ -67,7 +67,14 @@ type Bus interface {
 	Subscribe(eventName, handlerName string, handler Handler, opts ...TopologyOption) error
 
 	// Stats returns the statistics for a job type.
+	// Deprecated: use TopologyStats with TaskRef or EventRef.
 	Stats(ctx context.Context, jobType string) (transport.TopologyStats, error)
+	TopologyStats(ctx context.Context, topology TopologyRef) (transport.TopologyStats, error)
+	SubscriberStats(ctx context.Context, event, subscriber string) (transport.TopologyStats, error)
+	ListDeadLetters(ctx context.Context, topology TopologyRef, cursor string, limit int) (transport.DLQPage, error)
+	CountDeadLetters(ctx context.Context, topology TopologyRef) (int64, error)
+	RequeueDeadLetters(ctx context.Context, topology TopologyRef, ids []string) error
+	PurgeDeadLetters(ctx context.Context, topology TopologyRef) error
 
 	// Ping checks the health of the underlying transport.
 	Ping(ctx context.Context) error
@@ -192,21 +199,7 @@ func (b *bus) Subscribe(eventName, handlerName string, handler Handler, opts ...
 }
 
 func (b *bus) Stats(ctx context.Context, jobType string) (transport.TopologyStats, error) {
-	if err := validateName("task name", jobType); err != nil {
-		return transport.TopologyStats{}, err
-	}
-	topo := Topology{Namespace: b.cfg.Namespace, JobType: jobType, Kind: TaskTopology}
-	reader, ok := b.transport.(transport.StatsReader)
-	if !ok {
-		return transport.TopologyStats{}, fmt.Errorf("eventbus: stats: %w", ErrNotSupported)
-	}
-	stats, err := reader.Stats(ctx, topo)
-	if err == nil {
-		if metrics, ok := b.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.ObserveStats(jobType, stats)
-		}
-	}
-	return stats, err
+	return b.TopologyStats(ctx, TaskRef(jobType))
 }
 
 func (b *bus) Ping(ctx context.Context) error {

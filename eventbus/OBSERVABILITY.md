@@ -43,6 +43,18 @@ There is no hidden background stats poller. An application can call
 `bus.Stats(ctx, "send_email")` at its preferred scrape interval. Unsupported
 drivers return `ErrNotSupported` and emit no fabricated stats sample.
 
+Durable delay drivers implement the optional
+`transport.SchedulerHealthReader`. Call `SchedulerHealth(topology)` on the
+configured transport to sample payload-free worker state. Redis and NATS return
+one delayed worker; Kafka returns one status for each `5s`, `1m`, and `5m` tier.
+Each snapshot includes last poll/success/error times, a bounded sanitized error type and
+operation (`poll`, `dispatch`, `transfer`, or `commit`), monotonic operation and
+retry counters, consecutive failures, and `Degraded`. Export only the fixed
+transport/topology/worker/operation fields as labels. Alert when `Degraded` is
+true, retries continue increasing, or delayed work exists while `LastSuccess`
+is stale. Oldest delayed age remains a useful secondary signal, not a substitute
+for direct scheduler health.
+
 Redis statistics are a near-point-in-time snapshot assembled from multiple
 commands. `Pending` means ready delivery obligations, `InFlight` means delivered
 but unsettled pending entries, and `Lag` is their sum; delayed and DLQ records
@@ -71,6 +83,14 @@ separate. Event aggregation requires permission to list consumer groups. See
 Names are registered topology names; subscriber processing retains the legacy
 `event_subscriber` metric name. Do not attach job IDs, payloads, arbitrary headers,
 or original error strings as metric labels. Runtime hooks carry fixed outcomes.
+
+Handler, retry-policy, lease, consume-session, heartbeat, and settlement logs do
+not render caller-provided errors. They use fixed error codes or Go error types;
+DLQ records use the bounded `Decision.ErrorCode`. Route validation failures emit
+only stable reasons such as `invalid_envelope_id`, `topology_kind_mismatch`,
+`topology_type_mismatch`, `invalid_attempts`, `invalid_timestamps`,
+`invalid_payload`, `invalid_dedupe`, `invalid_keys`, or `invalid_headers`.
+Payloads, raw handler text, credentials, and personal data are excluded.
 
 ## Tracing and propagation
 

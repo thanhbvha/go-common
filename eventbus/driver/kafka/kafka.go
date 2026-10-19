@@ -43,16 +43,19 @@ type kafkaTransport struct {
 	scanDLQ       dlqPartitionScanner
 	dlqAdminMu    sync.Mutex
 
-	mu       sync.Mutex
-	sweepers map[string]*delaySchedulerHandle
+	mu                sync.Mutex
+	sweepers          map[string]*delaySchedulerHandle
+	schedulerStatuses map[string]map[string]*transport.SchedulerStatus
 }
 
 var (
-	_ transport.Transport         = (*kafkaTransport)(nil)
-	_ transport.TopologyValidator = (*kafkaTransport)(nil)
-	_ transport.DLQAdmin          = (*kafkaTransport)(nil)
-	_ transport.StatsReader       = (*kafkaTransport)(nil)
-	_ transport.Delivery          = (*kafkaDelivery)(nil)
+	_ transport.Transport               = (*kafkaTransport)(nil)
+	_ transport.TopologyValidator       = (*kafkaTransport)(nil)
+	_ transport.DLQAdmin                = (*kafkaTransport)(nil)
+	_ transport.StatsReader             = (*kafkaTransport)(nil)
+	_ transport.SubscriptionStatsReader = (*kafkaTransport)(nil)
+	_ transport.SchedulerHealthReader   = (*kafkaTransport)(nil)
+	_ transport.Delivery                = (*kafkaDelivery)(nil)
 )
 
 // New creates a plaintext compatibility transport around base.
@@ -113,6 +116,7 @@ func newKafkaTransport(base *kgo.Client, factory *commonkafka.NativeClientFactor
 		cl: base, adm: kadm.NewClient(base), factory: factory,
 		producer: base, producerErr: validateSettlementProducer(base),
 		producerOwned: producerOwned, sweepers: make(map[string]*delaySchedulerHandle),
+		schedulerStatuses: make(map[string]map[string]*transport.SchedulerStatus),
 	}
 	t.scanDLQ = t.scanDLQPartition
 	return t
@@ -141,6 +145,10 @@ func (t *kafkaTransport) dlqTopic(topo transport.Topology) string {
 	return topo.Name() + ".dlq"
 }
 
+func (t *kafkaTransport) dlqAdminLockTopic(topo transport.Topology) string {
+	return topo.Name() + ".dlq-admin-lock"
+}
+
 func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topology) error {
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
@@ -151,6 +159,7 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	for _, tier := range delayTiers {
 		topics = append(topics, t.delayTopic(topo, tier))
 	}
+	lockTopic := t.dlqAdminLockTopic(topo)
 
 	partitions := int32(1)
 	if val, ok := topo.Options["kafka.partitions"].(int32); ok && val > 0 {
@@ -193,7 +202,25 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 			return fmt.Errorf("kafka EnsureTopology CreateTopic error for %q: %w", tr.Topic, tr.Err)
 		}
 	}
+	lockResp, err := t.adm.CreateTopics(ctx, 1, replFactor, kadmConfigs, lockTopic)
+	if err != nil {
+		return fmt.Errorf("kafka EnsureTopology DLQ admin lock: %w", err)
+	}
+	for _, tr := range lockResp {
+		if tr.Err != nil && !errors.Is(tr.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("kafka EnsureTopology CreateTopic error for %q: %w", tr.Topic, tr.Err)
+		}
+	}
 	if err := t.validateRelatedTopicPartitions(ctx, topics, partitions); err != nil {
+		return err
+	}
+	if err := t.reconcileRelatedTopicConfigs(ctx, topics, replFactor, configs); err != nil {
+		return err
+	}
+	if err := t.validateRelatedTopicPartitions(ctx, []string{lockTopic}, 1); err != nil {
+		return err
+	}
+	if err := t.reconcileRelatedTopicConfigs(ctx, []string{lockTopic}, replFactor, configs); err != nil {
 		return err
 	}
 
@@ -208,6 +235,68 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 		t.sweepers[topoName] = scheduler
 	}
 
+	return nil
+}
+
+func (t *kafkaTransport) reconcileRelatedTopicConfigs(ctx context.Context, topics []string, replicationFactor int16, desired map[string]string) error {
+	metadata, err := t.adm.Metadata(ctx, topics...)
+	if err != nil {
+		return fmt.Errorf("kafka: inspect related topic replication: %w", err)
+	}
+	for _, topic := range topics {
+		detail, ok := metadata.Topics[topic]
+		if !ok || detail.Err != nil {
+			return fmt.Errorf("kafka: inspect related topic %q: %w", topic, detail.Err)
+		}
+		for partition, partitionDetail := range detail.Partitions {
+			if partitionDetail.Err != nil {
+				return fmt.Errorf("kafka: inspect related topic %q partition %d: %w", topic, partition, partitionDetail.Err)
+			}
+			if got := int16(len(partitionDetail.Replicas)); got != replicationFactor {
+				return fmt.Errorf("kafka: related topic %q partition %d replication factor is %d, want %d", topic, partition, got, replicationFactor)
+			}
+		}
+	}
+	configs, err := t.adm.DescribeTopicConfigs(ctx, topics...)
+	if err != nil {
+		return fmt.Errorf("kafka: describe related topic configs: %w", err)
+	}
+	byTopic := make(map[string]map[string]string, len(configs))
+	for _, resource := range configs {
+		if resource.Err != nil {
+			return fmt.Errorf("kafka: describe topic %q configs: %w", resource.Name, resource.Err)
+		}
+		values := make(map[string]string, len(resource.Configs))
+		for _, config := range resource.Configs {
+			if config.Value != nil {
+				values[config.Key] = *config.Value
+			}
+		}
+		byTopic[resource.Name] = values
+	}
+	for _, topic := range topics {
+		current := byTopic[topic]
+		if policy := current["cleanup.policy"]; policy != "" && !cleanupPolicyDeleteOnly(policy) {
+			return fmt.Errorf("kafka: related topic %q has unsafe cleanup.policy %q", topic, policy)
+		}
+		changes := make([]kadm.AlterConfig, 0, len(desired))
+		for key, value := range desired {
+			if current[key] != value {
+				value := value
+				changes = append(changes, kadm.AlterConfig{Name: key, Value: &value})
+			}
+		}
+		if len(changes) == 0 {
+			continue
+		}
+		responses, err := t.adm.AlterTopicConfigs(ctx, changes, topic)
+		if err != nil {
+			return fmt.Errorf("kafka: alter topic %q configs: %w", topic, err)
+		}
+		if _, err := responses.On(topic, func(response *kadm.AlterConfigsResponse) error { return response.Err }); err != nil {
+			return fmt.Errorf("kafka: alter topic %q configs: %w", topic, err)
+		}
+	}
 	return nil
 }
 

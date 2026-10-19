@@ -74,7 +74,7 @@ func TestPanicRecoveryDefaultsAndAttemptBounds(t *testing.T) {
 						t.Fatal("final panic did not request DLQ")
 					}
 					record := d.deadLetters[0]
-					if record.Reason != "max_attempts_exceeded" || record.LastError != ErrHandlerPanic.Error() {
+					if record.Reason != "max_attempts_exceeded" || record.LastError != "handler_panic" {
 						t.Fatalf("DLQ reason/error = %q/%q", record.Reason, record.LastError)
 					}
 				}

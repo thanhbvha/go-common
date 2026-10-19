@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -14,21 +15,86 @@ import (
 )
 
 type fakeKafkaAdmin struct {
-	starts    map[string]map[int32]int64
-	ends      map[string]map[int32]int64
-	commits   map[string]map[string]map[int32]int64
-	groups    []string
-	commitErr error
+	starts             map[string]map[int32]int64
+	ends               map[string]map[int32]int64
+	commits            map[string]map[string]map[int32]int64
+	groups             []string
+	commitErr          error
+	metadata           kadm.Metadata
+	configs            kadm.ResourceConfigs
+	altered            map[string]map[string]string
+	partitionResponses kadm.CreatePartitionsResponses
+	partitionCalls     []string
+	partitionErrTopic  string
 }
 
 func (*fakeKafkaAdmin) CreateTopics(context.Context, int32, int16, map[string]*string, ...string) (kadm.CreateTopicResponses, error) {
 	return nil, nil
 }
+func (a *fakeKafkaAdmin) DescribeTopicConfigs(context.Context, ...string) (kadm.ResourceConfigs, error) {
+	return a.configs, nil
+}
+func (a *fakeKafkaAdmin) AlterTopicConfigs(_ context.Context, configs []kadm.AlterConfig, topics ...string) (kadm.AlterConfigsResponses, error) {
+	responses := make(kadm.AlterConfigsResponses, 0, len(topics))
+	for _, topic := range topics {
+		if a.altered == nil {
+			a.altered = make(map[string]map[string]string)
+		}
+		if a.altered[topic] == nil {
+			a.altered[topic] = make(map[string]string)
+		}
+		for _, config := range configs {
+			if config.Value != nil {
+				a.altered[topic][config.Name] = *config.Value
+			}
+		}
+		responses = append(responses, kadm.AlterConfigsResponse{Name: topic})
+	}
+	return responses, nil
+}
+func (a *fakeKafkaAdmin) CreatePartitions(_ context.Context, _ int, topics ...string) (kadm.CreatePartitionsResponses, error) {
+	responses := make(kadm.CreatePartitionsResponses, len(topics))
+	for _, topic := range topics {
+		a.partitionCalls = append(a.partitionCalls, topic)
+		response := kadm.CreatePartitionsResponse{Topic: topic}
+		if topic == a.partitionErrTopic {
+			response.Err = errors.New("synthetic partition failure")
+		}
+		responses[topic] = response
+	}
+	return responses, nil
+}
 func (*fakeKafkaAdmin) DeleteTopics(context.Context, ...string) (kadm.DeleteTopicResponses, error) {
 	return nil, nil
 }
-func (*fakeKafkaAdmin) Metadata(context.Context, ...string) (kadm.Metadata, error) {
-	return kadm.Metadata{}, nil
+
+func kafkaAdminMetadata(topics []string, partitions int, replicas int) kadm.Metadata {
+	metadata := kadm.Metadata{Topics: make(kadm.TopicDetails, len(topics))}
+	for _, topic := range topics {
+		detail := kadm.TopicDetail{Topic: topic, Partitions: make(kadm.PartitionDetails, partitions)}
+		for partition := range partitions {
+			replicaIDs := make([]int32, replicas)
+			detail.Partitions[int32(partition)] = kadm.PartitionDetail{Topic: topic, Partition: int32(partition), Replicas: replicaIDs}
+		}
+		metadata.Topics[topic] = detail
+	}
+	return metadata
+}
+
+func kafkaAdminConfigs(topics []string, values map[string]string) kadm.ResourceConfigs {
+	configs := make(kadm.ResourceConfigs, 0, len(topics))
+	for _, topic := range topics {
+		resource := kadm.ResourceConfig{Name: topic}
+		for key, value := range values {
+			value := value
+			resource.Configs = append(resource.Configs, kadm.Config{Key: key, Value: &value})
+		}
+		configs = append(configs, resource)
+	}
+	return configs
+}
+func (a *fakeKafkaAdmin) Metadata(context.Context, ...string) (kadm.Metadata, error) {
+	return a.metadata, nil
 }
 func (a *fakeKafkaAdmin) ListStartOffsets(_ context.Context, topics ...string) (kadm.ListedOffsets, error) {
 	return a.listed(a.starts, topics), nil
@@ -105,7 +171,7 @@ func TestKafkaDeadLetterRecordRetainsFailureAndSourceMetadata(t *testing.T) {
 		Headers: map[string]string{"correlation-id": "correlation-1"},
 	}
 	payload, err := delivery.deadLetterRecord(message, transport.Decision{
-		Reason: "permanent", Cause: errors.New("synthetic failure"), Attempts: 4, FailedAt: failedAt,
+		Reason: "permanent", Cause: errors.New("synthetic failure"), ErrorCode: "synthetic_failure", Attempts: 4, FailedAt: failedAt,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +181,7 @@ func TestKafkaDeadLetterRecordRetainsFailureAndSourceMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deadLetter.ID != "2:9" || !reflect.DeepEqual(deadLetter.Message, message) || deadLetter.Reason != "permanent" || deadLetter.LastError != "synthetic failure" || deadLetter.Attempts != 4 || !deadLetter.FailedAt.Equal(failedAt) || deadLetter.Source != "orders" || deadLetter.SourcePosition != "3:41" {
+	if deadLetter.ID != "2:9" || !reflect.DeepEqual(deadLetter.Message, message) || deadLetter.Reason != "permanent" || deadLetter.LastError != "synthetic_failure" || deadLetter.Attempts != 4 || !deadLetter.FailedAt.Equal(failedAt) || deadLetter.Source != "orders" || deadLetter.SourcePosition != "3:41" {
 		t.Fatalf("dead letter = %#v", deadLetter)
 	}
 	var encoded kafkaDLQRecord
@@ -126,6 +192,78 @@ func TestKafkaDeadLetterRecordRetainsFailureAndSourceMetadata(t *testing.T) {
 		t.Fatalf("source timestamp = %d", encoded.SourceTimestamp)
 	}
 }
+
+func TestKafkaReconcilesTopicConfigsAndRejectsUnsafeState(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "reconcile"}
+	backend := &kafkaTransport{}
+	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	admin := &fakeKafkaAdmin{
+		metadata: kafkaAdminMetadata(topics, 1, 2),
+		configs:  kafkaAdminConfigs(topics, map[string]string{"cleanup.policy": "delete", "retention.ms": "1000"}),
+	}
+	backend.adm = admin
+	if err := backend.reconcileRelatedTopicConfigs(context.Background(), topics, 2, map[string]string{"retention.ms": "2000"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range topics {
+		if admin.altered[topic]["retention.ms"] != "2000" {
+			t.Fatalf("topic %q was not reconciled: %#v", topic, admin.altered[topic])
+		}
+	}
+	admin.configs = kafkaAdminConfigs(topics, map[string]string{"cleanup.policy": "compact"})
+	if err := backend.reconcileRelatedTopicConfigs(context.Background(), topics, 2, nil); err == nil {
+		t.Fatal("unsafe compact policy was accepted")
+	}
+	admin.configs = kafkaAdminConfigs(topics, map[string]string{"cleanup.policy": "delete"})
+	if err := backend.reconcileRelatedTopicConfigs(context.Background(), topics, 3, nil); err == nil {
+		t.Fatal("replication mismatch was accepted")
+	}
+}
+
+func TestKafkaExpandPartitionsReportsPartialSuccess(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "expand"}
+	backend := &kafkaTransport{}
+	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	sortedTopics := append([]string(nil), topics...)
+	sort.Strings(sortedTopics)
+	admin := &fakeKafkaAdmin{metadata: kafkaAdminMetadata(topics, 2, 1), partitionErrTopic: sortedTopics[2]}
+	backend.adm = admin
+	result, err := backend.ExpandPartitions(context.Background(), topo, 4)
+	var partial *PartitionExpansionError
+	if !errors.As(err, &partial) || result.Previous != 2 || result.Target != 4 || partial.Topic != sortedTopics[2] {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if len(result.Topics) != 2 || !result.Topics[sortedTopics[0]] || !result.Topics[sortedTopics[1]] {
+		t.Fatalf("partial topics = %#v", result.Topics)
+	}
+	if _, err := backend.ExpandPartitions(context.Background(), topo, 1); err == nil {
+		t.Fatal("partition decrease was accepted")
+	}
+}
+
+func TestKafkaDeadLetterRecordSanitizesMetadataAndBoundsSize(t *testing.T) {
+	delivery := &kafkaDelivery{record: &kgo.Record{Topic: "orders", Partition: 0, Offset: 1, Timestamp: time.Now()}}
+	message := transport.Message{Payload: []byte(`{"v":3}`)}
+	payload, err := delivery.deadLetterRecord(message, transport.Decision{Reason: "contains secret", ErrorCode: "also secret", Cause: hostileKafkaError{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record kafkaDLQRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Reason != "delivery_failure" || record.LastError != "delivery_error" {
+		t.Fatalf("metadata = %q/%q", record.Reason, record.LastError)
+	}
+	message.Payload = make([]byte, transport.MaxEncodedDLQRecordBytes+1)
+	if _, err := delivery.deadLetterRecord(message, transport.Decision{Reason: "failure"}); err == nil {
+		t.Fatal("oversized DLQ record unexpectedly encoded")
+	}
+}
+
+type hostileKafkaError struct{}
+
+func (hostileKafkaError) Error() string { panic("must not render") }
 
 func TestKafkaDLQAdminUsesLogicalAppendOnlyCursor(t *testing.T) {
 	topo := transport.Topology{Namespace: "admin", JobType: "jobs"}

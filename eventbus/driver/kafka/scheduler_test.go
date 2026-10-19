@@ -78,7 +78,7 @@ func TestDelayDestinationUsesBoundedTiers(t *testing.T) {
 	}
 }
 
-func TestDelaySchedulerRewindsCurrentTierWithoutHoldingRecord(t *testing.T) {
+func TestDelaySchedulerRotatesCurrentTierWithoutHoldingRecord(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	topo := transport.Topology{Namespace: "test", JobType: "jobs"}
 	backend := &kafkaTransport{}
@@ -89,11 +89,42 @@ func TestDelaySchedulerRewindsCurrentTierWithoutHoldingRecord(t *testing.T) {
 	if err := backend.processDelayBatch(context.Background(), topo, 5*time.Minute, client, []*kgo.Record{record}, now); err != nil {
 		t.Fatal(err)
 	}
-	if produced != 0 || len(client.commits) != 0 {
-		t.Fatal("record still in its tier was transferred or committed")
+	if produced != 1 || len(client.commits) != 1 {
+		t.Fatal("record still in its tier was not durably rotated")
 	}
-	if got := client.rewinds[record.Topic][record.Partition]; got.Offset != record.Offset || got.Epoch != record.LeaderEpoch {
-		t.Fatalf("rewind = %#v", got)
+	if client.rewinds != nil {
+		t.Fatalf("unexpected rewind = %#v", client.rewinds)
+	}
+}
+
+func TestDelaySchedulerFarFutureHeadDoesNotBlockNearFutureDeadline(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "head-of-line"}
+	tier := 5 * time.Minute
+	backend := &kafkaTransport{}
+	var produced []*kgo.Record
+	backend.producer = settlementProducer(func(_ context.Context, record *kgo.Record) error {
+		produced = append(produced, record)
+		return nil
+	})
+	client := &fakeDelayConsumer{}
+	far := delayedRecord(backend.delayTopic(topo, tier), 0, 10, now.Add(time.Hour))
+	near := delayedRecord(backend.delayTopic(topo, tier), 0, 11, now.Add(4*time.Minute))
+
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, []*kgo.Record{far, near}, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(produced) != 2 || len(client.commits) != 2 {
+		t.Fatalf("produced=%d commits=%d, want 2/2", len(produced), len(client.commits))
+	}
+	if produced[0].Topic != backend.delayTopic(topo, tier) {
+		t.Fatalf("far destination = %q", produced[0].Topic)
+	}
+	if produced[1].Topic != backend.delayTopic(topo, time.Minute) {
+		t.Fatalf("near destination = %q", produced[1].Topic)
+	}
+	if client.rewinds != nil {
+		t.Fatalf("unexpected rewind = %#v", client.rewinds)
 	}
 }
 
@@ -216,6 +247,31 @@ func TestDelaySchedulerMalformedRecordRemainsUncommitted(t *testing.T) {
 	}
 	if len(client.commits) != 0 || client.rewinds[record.Topic][3].Offset != record.Offset {
 		t.Fatal("malformed source was not retained")
+	}
+}
+
+func TestKafkaSchedulerHealthRecordsAndClearsFailures(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "health"}
+	tier := 5 * time.Second
+	injected := errors.New("synthetic scheduler failure")
+	backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error { return injected })}
+	client := &fakeDelayConsumer{}
+	record := delayedRecord(backend.delayTopic(topo, tier), 0, 1, now)
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, []*kgo.Record{record}, now); !errors.Is(err, injected) {
+		t.Fatalf("error = %v", err)
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || !status[0].Degraded || status[0].Retries == 0 || status[0].LastErrorOperation == "" {
+		t.Fatalf("failure status = %#v", status)
+	}
+	backend.producer = settlementProducer(func(context.Context, *kgo.Record) error { return nil })
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, []*kgo.Record{record}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	status = backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Degraded || status[0].ConsecutiveErrors != 0 || status[0].LastSuccess.IsZero() {
+		t.Fatalf("recovered status = %#v", status)
 	}
 }
 

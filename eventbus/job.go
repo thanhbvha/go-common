@@ -32,6 +32,7 @@ type Envelope struct {
 	DedupeKey   string  `json:"dedupe_key,omitempty"`    // optional deduplication key
 	DedupeTTL   int64   `json:"dedupe_ttl_ns,omitempty"` // reservation lifetime in nanoseconds
 	Headers     Headers `json:"headers,omitempty"`       // optional headers (e.g. traceparent)
+	legacy      bool
 }
 
 // Job is the public interface for handlers to access job context and payload.

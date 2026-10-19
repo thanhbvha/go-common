@@ -223,6 +223,31 @@ func TestDelaySchedulerMigratesLegacyAndRecoversCursorAfterDowntime(t *testing.T
 	}
 }
 
+func TestNATSSchedulerHealthRecordsFailureAndRecovery(t *testing.T) {
+	_, backend, topo, kv, now := schedulerFixture(t, nil)
+	ctx := context.Background()
+	if _, err := kv.Put(delayCursorKey, []byte("invalid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.dispatchDue(ctx, topo, kv, now); err == nil {
+		t.Fatal("expected cursor failure")
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || !status[0].Degraded || status[0].Retries == 0 || status[0].LastErrorOperation != "poll" {
+		t.Fatalf("failure status = %#v", status)
+	}
+	if _, err := kv.Put(delayCursorKey, []byte(fmt.Sprint(delaySlot(now)))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.dispatchDue(ctx, topo, kv, now); err != nil {
+		t.Fatal(err)
+	}
+	status = backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Degraded || status[0].ConsecutiveErrors != 0 || status[0].LastSuccess.IsZero() {
+		t.Fatalf("recovered status = %#v", status)
+	}
+}
+
 func schedulerFixture(t *testing.T, options map[string]any) (gonats.JetStreamContext, *natsTransport, transport.Topology, gonats.KeyValue, time.Time) {
 	t.Helper()
 	s, js := provisioningJetStream(t)

@@ -99,6 +99,7 @@ func (t *kafkaContractTransport) cleanup(testingT *testing.T) {
 	for _, topo := range topologies {
 		topics = append(topics, t.mainTopic(topo), t.dlqTopic(topo))
 		topics = append(topics, t.delayTopics(topo)...)
+		topics = append(topics, t.dlqAdminLockTopic(topo))
 	}
 	if err := t.Close(context.Background()); err != nil {
 		testingT.Errorf("close Kafka contract transport: %v", err)

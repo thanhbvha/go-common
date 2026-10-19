@@ -44,9 +44,10 @@ Integration prerequisites:
   Default `TestKafkaSettlement*` and `TestKafkaFailedTransferBlocksHigherCommit`
   tests cover confirmation barriers, cancellation, failed transfer fencing,
   metadata/routing, single-use settlement, and unsafe producer rejection.
-  P5.6 default tests cover tier selection, bounded polling, shutdown joining,
-  offset rewind, publish/commit failures, malformed envelopes, and exact
-  ordering-key/header transfer. Tagged scheduler tests reject related-topic
+  Scheduler tests cover tier selection, bounded polling, shutdown joining,
+  publish/commit failures, malformed envelopes, exact ordering-key/header
+  transfer, payload-free health recovery, and a far-future record preceding a
+  near-future deadline in the same partition. Tagged scheduler tests reject related-topic
   partition mismatches and exercise a live five-record burst with a two-record
   sweep bound while verifying stable ordering-key partitioning.
   P5.7 default tests cover versioned failure/source metadata, append-only logical
@@ -61,9 +62,12 @@ Integration prerequisites:
 - NATS driver and spike tests start an in-process JetStream server and do not
   require a separately installed NATS server. The suite includes the shared
   transport contract plus restart/reconnect, `AckWait`, heartbeat,
-  `MaxAckPending`, duplicate-publish, and multi-instance scheduler coverage.
+  `MaxAckPending`, duplicate-publish, multi-instance scheduler, and scheduler
+  health failure/recovery coverage.
 - Redis driver unit/contract/fault tests use `miniredis` and remain part of the
-  hermetic default suite. Live single-node and Redis Cluster contracts are
+  hermetic default suite. Deterministic tests also prove scheduler health
+  failure/recovery and that `Close` waits for owned delayed sweepers or returns
+  the caller deadline. Live single-node and Redis Cluster contracts are
   integration-tagged and require explicit addresses. A local Redis 7 fixture is
   provided in `driver/redis/testdata/compose.yaml`:
 
@@ -80,6 +84,21 @@ The tests use unique namespaces and delete only their own keys. They never call
 
 The shared scenario-to-test mapping and Redis fault-window coverage are recorded
 in [CONTRACT_TESTS.md](CONTRACT_TESTS.md).
+
+P6.7.4 core tests inject wrong topology kind/name, empty or oversized IDs,
+invalid timestamps, dedupe fields, keys, payloads, and headers before handler
+invocation. Hostile errors whose `Error`/`Unwrap` methods panic, panicking retry
+policies, and negative/oversized retry delays must remain non-panicking and
+produce fixed classifications. Memory, Redis, NATS, and Kafka DLQ tests verify
+metadata sanitization and the final encoded-record size bound; NATS coverage is
+integration-tagged because it reuses the embedded JetStream delivery fixture.
+
+P6.7.5 core tests exercise kind-explicit task/event and subscriber statistics
+plus Bus-level DLQ administration without concrete transport assertions. Kafka
+unit tests cover unsafe compaction rejection, replication/config reconciliation,
+partition decreases, and deterministic partial expansion reporting. The live
+Kafka topology-admin test verifies retention reconciliation, expansion of main/
+DLQ/all delay topics, and cross-process exclusion by the DLQ operator lease.
 
 When running in the restricted Windows workspace, use a workspace-local build
 cache:

@@ -32,12 +32,9 @@ func (d *attemptDelivery) Settle(_ context.Context, decision transport.Decision)
 		case transport.DecisionRetry:
 			d.retries = append(d.retries, decision.Next)
 		case transport.DecisionDeadLetter:
-			lastError := ""
-			if decision.Cause != nil {
-				lastError = decision.Cause.Error()
-			}
+			reason, lastError := transport.NormalizeDecisionMetadata(decision)
 			d.deadLetters = append(d.deadLetters, transport.DeadLetter{
-				Message: d.message, Reason: decision.Reason, LastError: lastError,
+				Message: d.message, Reason: reason, LastError: lastError,
 				Attempts: decision.Attempts, FailedAt: decision.FailedAt,
 			})
 		}
@@ -79,6 +76,7 @@ func TestProcessDeliveryAttemptBounds(t *testing.T) {
 				Payload:     json.RawMessage(`{"value":1}`),
 				Attempt:     tt.envelopeAttempt,
 				MaxAttempts: tt.maxAttempts,
+				CreatedAt:   time.Now().UnixMilli(),
 			})
 			if err != nil {
 				t.Fatalf("marshal envelope: %v", err)

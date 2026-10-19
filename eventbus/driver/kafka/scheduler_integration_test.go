@@ -26,6 +26,7 @@ func TestKafkaDelaySchedulerRejectsRelatedPartitionMismatch(t *testing.T) {
 	backend := New(producer, nil).(*kafkaTransport)
 	topo := transport.Topology{Namespace: "p56", JobType: fmt.Sprintf("partition-mismatch-%d", time.Now().UnixNano())}
 	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	topics = append(topics, backend.dlqAdminLockTopic(topo))
 	created, err := backend.adm.CreateTopics(ctx, 2, 1, nil, backend.mainTopic(topo))
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +72,7 @@ func TestKafkaDelaySchedulerBoundedBurstAndOrderingKey(t *testing.T) {
 	t.Cleanup(func() {
 		_ = backend.Close(context.Background())
 		topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+		topics = append(topics, backend.dlqAdminLockTopic(topo))
 		_, _ = backend.adm.DeleteTopics(context.Background(), topics...)
 	})
 	runAt := time.Now().Add(1500 * time.Millisecond)

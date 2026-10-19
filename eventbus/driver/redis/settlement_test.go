@@ -29,7 +29,7 @@ func pendingDelivery(t *testing.T, backend *redisTransport, rc *goredis.Client, 
 }
 
 func transferDecision(kind transport.DecisionKind) transport.Decision {
-	return transport.Decision{Kind: kind, Next: transport.Message{Payload: []byte(`{"id":"retry","attempt":2}`)}, Source: &transport.Message{Payload: []byte(`{"id":"source","headers":{"correlation-id":"synthetic"}}`)}, RetryAt: time.Unix(1700000000, 0), Reason: "synthetic", Cause: errors.New("synthetic error"), Attempts: 2, FailedAt: time.Unix(1699999999, 0)}
+	return transport.Decision{Kind: kind, Next: transport.Message{Payload: []byte(`{"id":"retry","attempt":2}`)}, Source: &transport.Message{Payload: []byte(`{"id":"source","headers":{"correlation-id":"synthetic"}}`)}, RetryAt: time.Unix(1700000000, 0), Reason: "synthetic", Cause: errors.New("synthetic error"), ErrorCode: "synthetic_error", Attempts: 2, FailedAt: time.Unix(1699999999, 0)}
 }
 
 func TestTransferCapacityFailurePreservesPendingSource(t *testing.T) {
@@ -42,14 +42,22 @@ func TestTransferCapacityFailurePreservesPendingSource(t *testing.T) {
 			}}
 			delivery := pendingDelivery(t, backend, rc, topo)
 			if kind == transport.DecisionRetry {
-				if err := rc.ZAdd(ctx, backend.delayedKey(topo), goredis.Z{Score: 1, Member: "existing"}).Err(); err != nil { t.Fatal(err) }
+				if err := rc.ZAdd(ctx, backend.delayedKey(topo), goredis.Z{Score: 1, Member: "existing"}).Err(); err != nil {
+					t.Fatal(err)
+				}
 			} else {
-				if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.dlqKey(topo), Values: map[string]any{"payload": "existing"}}).Err(); err != nil { t.Fatal(err) }
+				if err := rc.XAdd(ctx, &goredis.XAddArgs{Stream: backend.dlqKey(topo), Values: map[string]any{"payload": "existing"}}).Err(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			err := delivery.Settle(ctx, transferDecision(kind))
-			if !errors.Is(err, transport.ErrCapacityExceeded) { t.Fatalf("settle error=%v", err) }
+			if !errors.Is(err, transport.ErrCapacityExceeded) {
+				t.Fatalf("settle error=%v", err)
+			}
 			pending, pendingErr := rc.XPending(ctx, delivery.stream, delivery.group).Result()
-			if pendingErr != nil || pending.Count != 1 { t.Fatalf("pending=%+v err=%v", pending, pendingErr) }
+			if pendingErr != nil || pending.Count != 1 {
+				t.Fatalf("pending=%+v err=%v", pending, pendingErr)
+			}
 		})
 	}
 }
@@ -104,7 +112,7 @@ func TestAtomicTransferFailureAndRetry(t *testing.T) {
 					t.Fatal("DLQ transfer trimmed existing record")
 				}
 				v := values[1].Values
-				if v["payload"] != string(decision.Source.Payload) || v["source_id"] != d.xmsgID || v["source_stream"] != d.stream || v["source_group"] != d.group || v["reason"] != "synthetic" || v["error"] != "synthetic error" || v["attempts"] != "2" || v["failed_at"] != "1699999999000" {
+				if v["payload"] != string(decision.Source.Payload) || v["source_id"] != d.xmsgID || v["source_stream"] != d.stream || v["source_group"] != d.group || v["reason"] != "synthetic" || v["error"] != "synthetic_error" || v["attempts"] != "2" || v["failed_at"] != "1699999999000" {
 					t.Fatalf("DLQ metadata incorrect: %v", v)
 				}
 			}
@@ -116,6 +124,38 @@ func TestAtomicTransferFailureAndRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestRedisDLQSanitizesMetadataAndBoundsSize(t *testing.T) {
+	backend, rc := delayedBackend(t)
+	topo := transport.Topology{Namespace: "test", JobType: "dlq-safety"}
+	delivery := pendingDelivery(t, backend, rc, topo)
+	decision := transferDecision(transport.DecisionDeadLetter)
+	decision.Reason = "contains secret"
+	decision.ErrorCode = "also secret"
+	decision.Cause = hostileRedisError{}
+	if err := delivery.Settle(context.Background(), decision); err != nil {
+		t.Fatal(err)
+	}
+	records, err := rc.XRange(context.Background(), backend.dlqKey(topo), "-", "+").Result()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %d, %v", len(records), err)
+	}
+	if records[0].Values["reason"] != "delivery_failure" || records[0].Values["error"] != "delivery_error" {
+		t.Fatalf("metadata = %#v", records[0].Values)
+	}
+
+	topo.JobType = "dlq-safety-2"
+	delivery = pendingDelivery(t, backend, rc, topo)
+	decision = transferDecision(transport.DecisionDeadLetter)
+	decision.Source = &transport.Message{Payload: make([]byte, transport.MaxEncodedDLQRecordBytes+1)}
+	if err := delivery.Settle(context.Background(), decision); err == nil {
+		t.Fatal("oversized DLQ record unexpectedly settled")
+	}
+}
+
+type hostileRedisError struct{}
+
+func (hostileRedisError) Error() string { panic("must not render") }
 
 func TestAtomicTransferMissingGroupWritesNothing(t *testing.T) {
 	for _, kind := range []transport.DecisionKind{transport.DecisionRetry, transport.DecisionDeadLetter} {

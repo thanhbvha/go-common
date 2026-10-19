@@ -7,7 +7,7 @@ do not create an atomic snapshot across topics, partitions, or consumer groups.
 ## DLQ record format
 
 New DLQ entries are versioned JSON wrappers around the original normalized
-`transport.Message`. The wrapper records the failure reason, error text,
+`transport.Message`. The wrapper records the fixed failure reason/error code,
 attempt count, failure time, and the source Kafka topic, partition, offset, and
 record timestamp. `DeadLetter.ID` is the stable DLQ coordinate
 `<partition>:<offset>`; it is not the logical message ID.
@@ -36,10 +36,27 @@ cursor:
   offset holes and makes offset-based counts an upper bound; do not configure a
   compacted cleanup policy for EventBus DLQ topics.
 
-Requeue and purge are serialized within one transport instance. Kafka group
-offset commits do not offer compare-and-swap, so operators must serialize these
-operations across processes. Concurrent administrators can cause duplicate
-requeues or cursor races; they cannot make the driver claim an atomic transfer.
+Requeue and purge are serialized within one transport instance and acquire a
+broker-backed consumer-group lease on the topology's one-partition
+`.dlq-admin-lock` topic. A competing process receives a busy error instead of
+running concurrently. This does not make requeue atomic: publish-before-cursor-
+commit ambiguity can still duplicate records.
+
+## Topology reconciliation and expansion
+
+Startup reconciles every main, DLQ, delay, and admin-lock topic. It validates
+the configured replication factor on every partition, rejects any cleanup
+policy containing `compact`, and explicitly alters caller-owned topic configs
+such as `retention.ms` when they differ. Immutable/unauthorized mismatches fail
+startup. Ordinary startup validates partition equality but never changes the
+partition count.
+
+`ExpandPartitions` is an explicit driver administration operation for main,
+DLQ, and all delay topics. It rejects decreases, updates topics in stable order,
+and returns `PartitionExpansionResult`; `PartitionExpansionError` includes the
+successful prefix if Kafka reports partial success. Expansion changes the
+ordering-key hash-to-partition mapping. Drain producers/consumers or accept an
+ordering transition before invoking it.
 
 ## Statistics
 
@@ -47,7 +64,8 @@ Main and delay lag are calculated from Kafka end offsets and committed consumer
 group offsets, clamped to the current log start after retention. An absent
 commit starts at the log start. Task stats use the default task group; event
 stats aggregate all discovered subscriber groups for the topology. This event
-discovery requires cluster group-list permission.
+discovery requires cluster group-list permission. `SubscriptionStats` reads one
+explicit event subscriber group without aggregating its peers.
 
 Kafka group offsets do not distinguish fetched-but-uncommitted records from
 records that have not been fetched. Consequently `Pending` contains all main

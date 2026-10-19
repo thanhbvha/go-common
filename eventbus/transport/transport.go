@@ -315,6 +315,12 @@ type StatsReader interface {
 	Stats(ctx context.Context, topology Topology) (TopologyStats, error)
 }
 
+// SubscriptionStatsReader returns one event subscriber group's obligations.
+// It is separate from topology-wide event statistics, which aggregate groups.
+type SubscriptionStatsReader interface {
+	SubscriptionStats(ctx context.Context, subscription Subscription) (TopologyStats, error)
+}
+
 // Pauser is implemented by transports that support topology-level intake
 // pause and resume operations.
 type Pauser interface {
@@ -358,14 +364,18 @@ type Decision struct {
 	// Source carries envelope-normalized source metadata when decoding succeeded.
 	// Drivers use it for DLQ records instead of their raw broker message. Nil
 	// preserves raw metadata (for example, after a decode failure).
-	Source   *Message
-	Kind     DecisionKind
-	Next     Message
-	RetryAt  time.Time
-	Reason   string
-	Cause    error
-	Attempts int
-	FailedAt time.Time
+	Source  *Message
+	Kind    DecisionKind
+	Next    Message
+	RetryAt time.Time
+	Reason  string
+	Cause   error
+	// ErrorCode is a fixed, sanitized classification stored in logs and DLQ
+	// metadata instead of rendering Cause. Empty values normalize to
+	// "delivery_error" for direct transport callers.
+	ErrorCode string
+	Attempts  int
+	FailedAt  time.Time
 }
 
 // SettlementGuard provides the shared single-use state machine for drivers.

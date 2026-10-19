@@ -80,9 +80,13 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 	if failedAt.IsZero() {
 		failedAt = time.Now()
 	}
+	reason, errorCode := transport.NormalizeDecisionMetadata(decision)
+	if decision.Kind == transport.DecisionDeadLetter && len(msg.Payload)+len(reason)+len(errorCode) > transport.MaxEncodedDLQRecordBytes {
+		return fmt.Errorf("redis: encoded DLQ record exceeds %d bytes", transport.MaxEncodedDLQRecordBytes)
+	}
 	result, err := transferScript.Run(ctx, d.transport.rc, []string{d.stream, target},
 		d.group, d.xmsgID, decision.Kind.String(), msg.Payload,
-		decision.RetryAt.UnixMilli(), decision.Reason, decisionError(decision),
+		decision.RetryAt.UnixMilli(), reason, errorCode,
 		decision.Attempts, failedAt.UnixMilli(), d.consumer, capacity).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: atomic %s settlement: %w", decision.Kind, err)

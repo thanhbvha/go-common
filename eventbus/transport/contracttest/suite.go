@@ -92,7 +92,7 @@ func Run(t *testing.T, h Harness) {
 		active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
 		delivery := active.Delivery
 		if err := delivery.Settle(ctx, transport.Decision{
-			Kind: transport.DecisionDeadLetter, Reason: "contract", Cause: errors.New("synthetic"), Attempts: 1,
+			Kind: transport.DecisionDeadLetter, Reason: "contract", Cause: errors.New("synthetic"), ErrorCode: "synthetic", Attempts: 1,
 		}); err != nil {
 			t.Fatal(err)
 		}

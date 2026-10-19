@@ -54,9 +54,12 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 			if !ok || configs == nil {
 				return fmt.Errorf("kafka: %s must be a non-nil map[string]string", key)
 			}
-			for configKey := range configs {
+			for configKey, configValue := range configs {
 				if strings.TrimSpace(configKey) == "" || configKey != strings.TrimSpace(configKey) {
 					return fmt.Errorf("kafka: %s contains an invalid key", key)
+				}
+				if configKey == "cleanup.policy" && !cleanupPolicyDeleteOnly(configValue) {
+					return fmt.Errorf("kafka: cleanup.policy must be delete-only for EventBus topics")
 				}
 			}
 		default:
@@ -66,4 +69,9 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 		}
 	}
 	return nil
+}
+
+func cleanupPolicyDeleteOnly(value string) bool {
+	parts := strings.Split(value, ",")
+	return len(parts) == 1 && strings.TrimSpace(parts[0]) == "delete"
 }

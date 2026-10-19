@@ -20,6 +20,7 @@ Legend:
 | Event fan-out groups | Test only | Yes | Yes | Partial |
 | Delayed delivery | Test only, bounded process-local scheduler | Partial, ZSET sweeper | Partial, KV sweeper | Partial, durable bounded tier sweeps (P5.6) |
 | Reported delay precision | 1 ms | 1 s | 1 s | 5 s |
+| Scheduler health | Process-local snapshot | Yes | Yes | Yes, per tier |
 | Ordering | No | No | No | Yes, within a source partition |
 | Dedupe | Test only | Yes, confirmed publication state | Yes, confirmed publication state | No |
 | Heartbeat/lease extension | No, returns only context cancellation | Yes, ownership-checked idle renewal (P3.5) | Yes (`InProgress`) | Not applicable in the same model |
@@ -43,8 +44,9 @@ Required broker operations are exposed by `transport.Transport`. Optional
 operations are advertised only by implementing `transport.Deduper`,
 `transport.PublicationDeduper`,
 `transport.DLQAdmin`, `transport.CursorDLQAdmin`, `transport.StatsReader`, or
-`transport.Pauser`; unsupported drivers no longer provide success-returning
-methods.
+`transport.Pauser`. Redis, NATS, and Kafka additionally implement
+`transport.SchedulerHealthReader`; unsupported drivers no longer provide
+success-returning methods.
 
 | Driver | Deduper | DLQAdmin | StatsReader | Pauser |
 |---|---:|---:|---:|---:|
@@ -121,6 +123,15 @@ Consumers check raw wire length before JSON decoding; oversized records are
 settled to DLQ with reason `payload_too_large`. The core limit is independent of
 and may need to be lower than a broker's own record-size limit.
 
+P6.7.4 validates every decoded v3 envelope against the active task/event route
+before invoking a handler. Built-in transports receive fixed, bounded DLQ
+reason/error codes rather than raw caller error text, and independently enforce
+a 2 MiB final encoded DLQ-record limit so hostile metadata cannot create an
+unsettleable poison loop. Error rendering/wrapper traversal and custom retry
+policies are panic-isolated; retry delays are normalized to zero through 30
+days. These rules apply equally to direct transport settlement, preventing a
+caller from bypassing core metadata safety.
+
 The compact `transport.Capabilities` descriptor still exposes delay precision
 and ordering for fast publish-path checks:
 
@@ -168,14 +179,25 @@ Failed/ambiguous commits and process crashes can duplicate the destination.
 `acks=0` and externally transactional producers are rejected. Transactions are
 not implemented or advertised; see [SETTLEMENT.md](driver/kafka/SETTLEMENT.md)
 for the fallback choice, crash windows, and broker durability prerequisites.
-The P5.6 scheduler uses three durable delay topics and exactly one periodic
-worker per tier/topology. Each sweep polls at most `kafka.delay_batch_size`
-(default 100, range 1–1000); records that still belong in their current tier are
-rewound instead of retained by process-local timers. Lower-tier/main publication
-is broker-confirmed before a synchronous source commit. Publish/commit ambiguity
-can duplicate but cannot intentionally lose work. Ordering keys and headers are
-preserved, and startup rejects unequal partition counts across main, DLQ, and
-delay topics. See [SCHEDULER.md](driver/kafka/SCHEDULER.md).
+The Kafka scheduler uses three durable delay topics and one worker per
+tier/topology. Every worker polls on the five-second precision cadence and each
+sweep reads at most `kafka.delay_batch_size` records (default 100, range
+1–1000). A far-future partition head is broker-confirmed to the tail of the same
+tier before its source commit, so a later near deadline is not indefinitely
+blocked by append order. Lower-tier/main publication follows the same
+publish-before-commit rule. Ambiguous commits can duplicate but cannot
+intentionally lose work. The five-second precision assumes healthy scheduler
+workers and at most one bounded poll ahead of the record; larger backlogs add
+bounded sweep intervals and synchronous transfer time. Ordering keys and
+headers are preserved, and startup rejects unequal partition counts across
+main, DLQ, and delay topics. See [SCHEDULER.md](driver/kafka/SCHEDULER.md).
+
+Redis, NATS, and Kafka expose payload-free scheduler status through
+`transport.SchedulerHealthReader`. Snapshots include worker identity, poll and
+success times, bounded last error and operation, monotonic poll/dispatch/
+transfer/commit/retry counters, consecutive failures, and degraded state.
+Redis `Close` now joins every topology delay sweeper and its retention worker
+within the caller deadline; NATS and Kafka retain the same joined lifecycle.
 
 Kafka P5.7 stores versioned DLQ wrappers with failure time/reason/error and
 source topic/partition/offset/timestamp. `DLQAdmin` uses a dedicated consumer
@@ -190,6 +212,15 @@ is reported as `Pending` and `InFlight` remains zero. See
 [ADMIN.md](driver/kafka/ADMIN.md). P5.8 runs Kafka through the complete shared
 contract; the dedupe scenario is capability-gated because Kafka does not
 implement `TopologyDeduper`.
+
+P6.7.5 exposes task/event topology stats, per-event-subscriber stats, and DLQ
+list/count/requeue/purge through `Bus`, preserving optional-interface
+`ErrNotSupported` without requiring concrete transport access. Kafka validates
+replication and reconciles explicitly requested configs for all related topics,
+rejects compacted queue logs, keeps ordinary startup partition-stable, and
+provides explicit partition expansion with partial-result reporting. Kafka DLQ
+mutations are fenced across processes through a one-partition consumer-group
+operator lease.
 
 All delivery implementations expose one terminal `Settle(Decision)` operation
 guarded by the shared single-use state machine. A failed settlement reopens the
