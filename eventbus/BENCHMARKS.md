@@ -177,23 +177,31 @@ Artifacts are under the ignored local path
 `/tmp/thothan/p676-production-evidence/20261020T043520168Z-redis-immediate-100000-phase-volume-rerun-07cfaf87/`.
 This remains one harness cell, not the required matrix or soak evidence.
 
-The Redis 1,000,000-message immediate/preload cell was accepted on 2026-10-20
-with 1 KiB payloads and concurrency 100:
+The final Redis 1,000,000-message immediate/preload allocated-volume rerun was
+accepted on 2026-10-20 with 1 KiB payloads and concurrency 100:
 
 - 1,000,000 unique completions, zero observed duplicates, and all final topology
   counters zero.
-- Measurement-only drain throughput 4,451.03 messages/second over 224.67 seconds.
-- 29 preload samples, 45 measurement samples, and 61 broker samples. Every
-  broker sample had a valid phase and numeric named-volume measurement.
-- Maximum pending/lag was the intended 1,000,000-message backlog. The recorded
-  443,364,033-byte maximum and 324,948,455-byte last Redis values predate
-  allocated-block sampling and remain apparent-size historical values.
-- Peak measurement-phase Go heap was 4,665,016 bytes and peak goroutines were
-  107.
+- Measurement-only drain throughput was 4,712.62 messages/second over 212.20
+  seconds.
+- 26 preload samples, 43 measurement samples, and 57 broker samples had valid
+  phases and numeric allocated-volume measurements.
+- Maximum pending/lag was the intended 1,000,000-message backlog. Allocated
+  Redis data measured by `du_allocated_1k_blocks` peaked at 559,230,976 bytes;
+  preload ended at 424,026,112 bytes and the last measurement was 415,813,632
+  bytes.
+- Measurement sampled heap averaged 9,140,063 bytes, peaked at 11,941,968 bytes,
+  and ended at 9,435,104 bytes. High-frequency peak heap was 12,391,568 bytes
+  and peak goroutines were 107.
+- p50/p95/p99 was 180.30/219.67/219.67 seconds because preload latency includes
+  time spent waiting in the staged backlog; it is backlog age, not live-flow
+  handler latency.
 - Execution and acceptance passed, and project-scoped cleanup was verified.
 
 Artifacts are under the ignored local path
-`/tmp/thothan/p676-production-evidence/20261020T045307169Z-redis-immediate-1000000-redis-1m-final-ee39105d/`.
+`/tmp/thothan/p676-production-evidence/20261020T105513919Z-redis-immediate-1000000-redis-1m-immediate-preload-allocated-2ce085c7/`.
+The earlier accepted artifact remains historical performance evidence but its
+apparent-size volume values are superseded by this allocated-block rerun.
 This closes only the Redis immediate/preload 1m cell. Other Redis workloads,
 NATS/Kafka cells, fault runs, and sustained soak remain open.
 

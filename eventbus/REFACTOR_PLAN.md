@@ -979,17 +979,17 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     83,082,531-byte volume maximum predates allocated-block sampling and is
     historical apparent size. This closes phase-correct evidence collection, not
     the remaining matrix or soak gates.
-    Redis 1m immediate/preload evidence then completed on the disposable 7.4.1
-    fixture with 1 KiB payloads and concurrency 100: 1,000,000 unique messages,
-    zero duplicates and final obligations, 4,451.03 msg/s over 224.67 measurement
-    seconds, max pending/lag 1,000,000, peak measurement heap 4,665,016 bytes,
-    peak goroutines 107, and verified
-    cleanup. The first run exposed an unlabeled broker sample before benchmark
-    JSONL existed; broker sampling now defaults to the requested initial phase
-    and acceptance rejects every invalid phase or nonnumeric volume sample. The
-    clean rerun had 29 preload, 45 measurement, and 61 fully valid broker samples.
-    Its 443,364,033-byte maximum predates allocated-block sampling and is
-    historical apparent size.
+    Redis 1m immediate/preload allocated-volume evidence then completed on the
+    disposable 7.4.1 fixture with 1 KiB payloads and concurrency 100: 1,000,000
+    unique messages, zero duplicates/final obligations, 4,712.62 msg/s over
+    212.20 measurement seconds, max pending/lag 1,000,000, 26 preload plus 43
+    measurement samples, and verified cleanup. All 57 broker samples used
+    `du_allocated_1k_blocks`; allocated Redis data peaked at 559,230,976 bytes and
+    ended at 415,813,632 bytes. Measurement sampled heap averaged 9.14 MB, peaked
+    at 11.94 MB, and ended at 9.44 MB; high-frequency peak was 12.39 MB and peak
+    goroutines were 107. Preload p50/p95/p99 reflects staged backlog age rather
+    than live-flow latency. This supersedes the old apparent-size volume claim;
+    the prior run remains historical performance evidence.
     The Redis immediate/preload 1m cell is closed; other workloads and drivers
     remain open.
     NATS 100k delayed/preload evidence then completed with 1 KiB payloads,
