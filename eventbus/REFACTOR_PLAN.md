@@ -870,8 +870,224 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     6.18 MB peak Go heap, about 74.8 MB peak process RSS, 108 peak goroutines,
     and project-scoped container/network/volume cleanup. The 1m matrix, other
     driver/workload cells, restart/reconnect/rebalance/ambiguity faults, sustained
-    soak, and remaining shared Bus-level/fault scenarios are still open, so this
-    task remains `[~]` and no Phase 6.7 exit criterion is claimed.
+    soak, and at that checkpoint the remaining shared Bus-level/fault scenarios
+    were still open, so no Phase 6.7 exit criterion was claimed.
+    Follow-up review on 2026-10-20 added the reusable public-Bus contract suite
+    to all four driver registrations, including exact attempts, retry-after,
+    permanent/panic/timeout outcomes, malformed/wrong-route envelopes, graceful
+    drain, and subscriber-targeted retry/DLQ-requeue isolation. Redis, NATS, and
+    Kafka pass its forced-redelivery case; Memory is explicitly durability-
+    inapplicable. The embedded NATS case passed ten consecutive runs. Contract
+    buses now register bounded failure-safe
+    cleanup immediately after opening. Production tooling now requires topology
+    drain plus zero final pending/delayed/in-flight/DLQ/lag state, proves requested
+    second-worker/restart actions occurred during active work, terminates the
+    benchmark child before broker teardown on failure, separates execution from
+    acceptance status, and validates documented comma-delimited matrix CLI input.
+    Kafka benchmark topologies now provision and report one partition per
+    requested concurrency slot instead of inheriting the three-partition demo
+    default.
+    Added native Ubuntu Bash production, matrix, and validation scripts with
+    argument-safe paths, child-before-broker cleanup, final-state/fault checks,
+    and named-volume data sampling; the Bash validation suite passed on
+    2026-10-20. Added shared retry/DLQ settlement-failure scenarios that cancel
+    before destination confirmation, verify the source remains outstanding,
+    then prove redelivery and successful settlement. Memory and Redis passed ten
+    focused runs, embedded NATS passed five, and live Kafka passed both focused
+    cases. Shared pre-confirmation settlement/source-preservation gates are now
+    closed; at that checkpoint shared post-commit ambiguity remained open while
+    driver-specific fault tests continued to cover it.
+    Follow-up Kafka administration verification on 2026-10-20 ran
+    `TestKafkaDLQRequeueOwnershipLossDoesNotCommitAfterSuccessor` and
+    `TestKafkaDLQPurgeOwnershipLossDoesNotCommitAfterSuccessor` ten consecutive
+    times plus once under the race detector; all passed. Subscriber registry
+    private-topic filtering no longer aliases its discovery slice, partition
+    expansion now reports missing broker metadata explicitly instead of wrapping
+    a nil error, and the Memory/Redis contract redelivery hooks use explicit
+    signatures. Added a regression for missing Kafka topic metadata. Full
+    repository tests and vet passed after these fixes.
+    Gate 1 follow-up added shared capability-gated post-commit ambiguity cases
+    for retry and DLQ settlement. Redis injects response loss after the exact
+    atomic transfer Lua script and proves one destination with the source already
+    ACKed. NATS injects after durable transfer and proves stable transfer IDs
+    keep one destination while settlement retry terminates the source. Kafka
+    injects after broker-confirmed produce and proves the documented duplicate
+    append window remains loss-safe before source commit. Memory is explicitly
+    inapplicable because it has no broker response boundary. Redis passed ten
+    focused/shared runs, embedded NATS passed ten focused and five full-suite
+    runs, live Kafka passed three focused and one full-suite run; all three
+    focused scenarios passed under the race detector. The shared post-commit
+    ambiguity gate is closed.
+    The next contract gate adds
+    `repeated_reconnect_joins_sessions_without_goroutine_growth` to the public
+    Bus suite. It forces five consecutive consume-session cancellations through
+    each real durable driver, proves active session count never exceeds one,
+    samples goroutines only after `Consume` returns and joins owned work, bounds
+    first-to-last growth, then handles, ACKs, and drains a job after recovery.
+    Redis and embedded NATS passed ten focused runs each, live Kafka passed three;
+    all three passed race-enabled focused runs and their complete Bus contract
+    suites. Memory is durability-inapplicable. The shared reconnect/session-leak
+    gate is closed; repeated broker-process restart remains production fault/soak
+    evidence.
+    The scheduler ownership gate adds
+    `multi_instance_scheduler_owner_failure_recovers` to the shared transport
+    suite. Redis proves a failed owner leaves the delayed source intact for a
+    successor atomic move. NATS proves a successor respects a live KV lease and
+    reclaims exactly once after expiry. Kafka proves an owner can fetch then exit
+    without commit and a successor group member receives, transfers, and commits
+    the same durable source. The suite ACKs every allowed ready copy and requires
+    final stats to return to zero. Redis passed twenty focused runs, embedded
+    NATS ten, live Kafka five; all passed race-enabled focused runs. The shared
+    multi-instance scheduler ownership/recovery gate is closed; production-scale
+    ownership changes remain fault/soak evidence.
+    The ordering gate adds `advertised_ordering_serializes_same_key` to the
+    shared transport suite. It publishes eight records with one ordering key,
+    consumes with concurrency and prefetch greater than one, proves no later
+    same-key record is admitted before the current record settles, verifies
+    payload/key FIFO, and requires final stats to return to zero. Live Kafka
+    passed ten focused runs, one race-enabled run, and its complete transport
+    contract suite. Memory, Redis, and NATS capability-skip because they do not
+    advertise ordering. The contract remains explicitly scoped to one physical
+    Kafka topic-partition; main, delay, and subscriber-private topics are
+    independent logs. The shared capability-gated ordering gate is closed;
+    production rebalance and scale behavior remain fault/soak evidence.
+    The final shared contract gate strengthens
+    `unsettled_session_cancellation_redelivers` and runs it on every driver.
+    The scenario loses a consumer session with one unsettled source, verifies
+    the replacement delivery preserves all identity fields exposed by the first
+    delivery, ACKs it, and requires final topology stats to return to zero.
+    Memory restores session-owned in-flight state, Redis reclaims a stale pending
+    entry, NATS expires a short AckWait, and Kafka replays the uncommitted group
+    offset. Kafka may retain envelope attempt `1`, so the shared assertion allows
+    that documented behavior while still proving redelivery. Memory and Redis
+    passed twenty focused runs, embedded NATS ten, and live Kafka five; all four
+    passed race-enabled focused runs and their complete transport contract
+    suites. Universal shared duplicate/redelivery coverage is closed. Handlers
+    remain responsible for idempotency under the at-least-once contract.
+    Production evidence tooling now emits explicit preload/measurement phases in
+    benchmark and broker JSONL. Preload stops its sampler and resets Go heap,
+    CPU, elapsed-time, and peak baselines immediately before resume. Bash and
+    PowerShell runners measure the broker named-volume data directory with `du`,
+    require measurement and numeric volume samples, require preload samples when
+    requested, and record phase/volume counts plus maximum volume bytes in the
+    summary. A disposable Redis run exposed and fixed a Bash `0.0` versus `0`
+    comparison that mislabeled finite runs and incorrectly applied Kafka second-
+    worker acceptance. The corrected Redis 100k immediate/preload, 1 KiB,
+    concurrency-100 cell completed 100,000 unique messages with zero duplicates
+    and final state, 4,354.52 msg/s measurement throughput, 14 preload samples,
+    23 measurement samples, 18 numeric volume samples, and verified cleanup. Its
+    83,082,531-byte volume maximum predates allocated-block sampling and is
+    historical apparent size. This closes phase-correct evidence collection, not
+    the remaining matrix or soak gates.
+    Redis 1m immediate/preload evidence then completed on the disposable 7.4.1
+    fixture with 1 KiB payloads and concurrency 100: 1,000,000 unique messages,
+    zero duplicates and final obligations, 4,451.03 msg/s over 224.67 measurement
+    seconds, max pending/lag 1,000,000, peak measurement heap 4,665,016 bytes,
+    peak goroutines 107, and verified
+    cleanup. The first run exposed an unlabeled broker sample before benchmark
+    JSONL existed; broker sampling now defaults to the requested initial phase
+    and acceptance rejects every invalid phase or nonnumeric volume sample. The
+    clean rerun had 29 preload, 45 measurement, and 61 fully valid broker samples.
+    Its 443,364,033-byte maximum predates allocated-block sampling and is
+    historical apparent size.
+    The Redis immediate/preload 1m cell is closed; other workloads and drivers
+    remain open.
+    NATS 100k delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, requested 5-second delay, and an explicitly recorded
+    `nats_delay_batch_size=1000`, the validated driver maximum. It completed
+    100,000 unique messages with zero duplicates/final obligations at 1,127.80
+    msg/s over 88.67 measurement seconds. The first measurement sample showed
+    14,000 completed and 86,000 delayed; sampled maxima were 88,000 delayed and
+    12,000 pending. Peak high-frequency heap was 97,473,328 bytes, peak
+    goroutines 117, and verified cleanup. Its 396,737,438-byte JetStream value
+    predates allocated-block sampling and is historical apparent size. An initial
+    diagnostic run inherited demo batch 100 and
+    took 987.67 seconds (~101.25 msg/s), exposing a benchmark configuration
+    ceiling. The benchmark override is now recorded and validated in result and
+    manifest while library/demo defaults remain unchanged. The NATS delayed 100k
+    cell is closed.
+    Kafka 100k retry50 evidence completed with 1 KiB payloads, concurrency and
+    partitions 100, and a second worker joining after five seconds. It completed
+    100,000 unique messages with zero duplicates/final obligations and exactly
+    150,000 handler invocations. Primary and second workers handled 82,968 and
+    67,032 respectively; the second joined at 11,542 produced/10,643 completed,
+    proving active group participation. Throughput was 4,131.56 unique msg/s over
+    24.20 seconds, peak heap 7,829,568 bytes, peak goroutines 302, max pending/lag
+    898, and allocated Kafka data peaked at 104,665,088 bytes across 11 samples.
+    The Kafka healthcheck now uses local TCP readiness instead of following the
+    host-advertised listener from inside the container; startup failures retain
+    broker logs. Rebalance acceptance requires nonzero second-worker handling.
+    Sparse Kafka segments also caused apparent `du -sb` usage of 11.68 GB; all
+    runners now record allocated `du -sk` blocks under explicit schema fields.
+    Earlier Redis/NATS volume values therefore require reruns before allocated-
+    disk claims. The selected Kafka cell is closed.
+    Redis 100k retry50 broker-restart evidence then completed with 1 KiB payloads,
+    concurrency 100, a restart after five seconds, and explicitly recorded
+    `redis_delay_batch_size=1000`. The restart occurred during active work at
+    10,799 produced/9,899 completed with lag 900. The run completed 100,000
+    unique messages and exactly 150,000 handler invocations with zero duplicates
+    and final obligations at 1,722.95 unique msg/s over 58.04 seconds. Peak heap
+    was 4,088,872 bytes, peak goroutines were 107, and allocated Redis data peaked
+    at 74,121,216 bytes across 19 samples; cleanup was verified. An earlier
+    correctness-pass run inherited demo batch 100 and took 501.07 seconds. The
+    benchmark-only Redis override is now recorded and validated in result and
+    manifest while library/demo defaults remain unchanged. This closes one Redis
+    broker-restart fault cell, not the remaining fault matrix or sustained soak.
+    NATS 100k retry50 broker-restart evidence then completed with 1 KiB payloads,
+    concurrency 100, a restart after five seconds, and
+    `nats_delay_batch_size=1000`. The restart occurred during active work at
+    10,799 produced/9,899 completed with lag 2. The run completed 100,000 unique
+    messages, all 50,000 expected synthetic retry failures, and exactly 150,000
+    handler invocations with zero duplicates/final obligations at 1,733.06 unique
+    msg/s over 57.70 seconds. Peak heap was 38,894,840 bytes, peak goroutines were
+    124, and allocated JetStream data peaked at 431,722,496 bytes across 19
+    samples; cleanup was verified. The first restart run exposed a JetStream
+    publish request retaining the whole run deadline. Benchmark enqueue attempts
+    are now bounded to five seconds under the parent context. A diagnostic also
+    demonstrated that restart redelivery can make a retry candidate first appear
+    at broker attempt two, so result and runner acceptance now partition expected
+    retries between executed synthetic failures and first-seen-after-attempt-one
+    candidates and require exact total handler accounting. This closes one NATS
+    broker-restart fault cell, not the Kafka fault cell or sustained soak.
+    Kafka 100k retry50 broker-restart evidence then completed with 1 KiB payloads,
+    concurrency and partitions 100. The active-only restart occurred at 1,573
+    produced/682 completed with lag 902. The run completed 100,000 unique
+    messages; all 50,000 unique retry candidates first failed at attempt one,
+    while restart replay produced 50,010 synthetic failure invocations. Four
+    duplicate completions occurred inside the documented at-least-once ambiguity
+    window, and total handler accounting was exact at 150,014 invocations. Final
+    pending, delayed, in-flight, DLQ, and lag were zero. Throughput was 2,140.44
+    unique msg/s over 46.72 seconds, peak heap 8,809,672 bytes, peak goroutines
+    154, max pending/lag 906, and allocated Kafka data peaked at 112,594,944 bytes
+    across 17 samples; cleanup was verified. An initial run restarted during
+    topology provisioning before any message existed. Timed restart is now an
+    earliest eligible action and waits for `produced > 0` plus active production
+    or backlog. Retry accounting now separates unique retry candidates from
+    repeated failure invocations. This closes the selected Kafka restart cell,
+    not the remaining matrix or sustained soak.
+    A qualifying two-hour Kafka sustained soak then completed with retry10,
+    1 KiB payloads, target 100 msg/s, concurrency/partitions 100, a second worker
+    joining after 15 minutes, and broker restarts after 30/60/90 minutes. It
+    produced and uniquely completed 711,450 messages, executed all 71,145 expected
+    retry failures, observed zero duplicates, and drained every final obligation.
+    Primary/second workers handled 440,636/341,959 invocations. Throughput was
+    98.81 unique msg/s over 7,200.02 seconds with p50/p95/p99 latency
+    1.29/2.83/4.21 ms. Thirty-minute average heap remained 9.52-10.16 MB, window
+    maxima 12.74-13.12 MB, and post-drain heap 8.73 MB. Goroutine averages stayed
+    near 282-289 after rebalance, with 69 after drain; launcher RSS averages rose
+    only from 31.3 to 35.8 MB. Kafka page cache reset across restarts and plateaued
+    around 1 GiB. Allocated disk peaked/finalized at 355,037,184 bytes, max lag was
+    900, and cleanup was verified. The runner now supports fail-closed repeated
+    restart cadence and records `broker_restart_count`. Duration pacing does not
+    catch up slots missed during outage, so actual produced versus unique completed
+    is the loss invariant. This closes the sustained soak evidence cell, not the
+    remaining 100k/1m matrix dimensions.
+    Go-focused verification passed on Linux; PowerShell execution remains to be
+    rerun on Windows because this environment has no PowerShell executable. The
+    remaining 1m matrix cells, durable workload cells, production ordering/rebalance
+    and scheduler ownership changes, repeated broker-process restart evidence,
+    full matrix volume/resource review, and sustained soak remain open, so the
+    task stays `[~]`.
 
 - [ ] **P6.7.7 Finalize the API and scalability model before adapters**
   - Make all public operations return deterministic lifecycle errors while
@@ -970,29 +1186,29 @@ Dependencies: Phase 6.7 complete.
 
 Every durable driver must pass the same behavioral tests where its capability matrix says supported:
 
-- [ ] enqueue, handle, and ACK
-- [ ] handler failure and exact attempt bound
-- [ ] explicit retry-after
-- [ ] permanent error to DLQ
-- [ ] decode error to DLQ
-- [ ] panic recovery
-- [ ] handler timeout
-- [ ] settlement timeout/failure
-- [ ] retry publish failure does not lose source
-- [ ] DLQ publish failure does not lose source
-- [ ] duplicate delivery
-- [ ] delayed execution precision
-- [ ] multi-instance delay scheduler
-- [ ] dedupe duplicate, expiry, namespace, and topology isolation
-- [ ] graceful drain with in-flight work
-- [ ] forced shutdown and later redelivery
-- [ ] consumer reconnect without goroutine leak
-- [ ] task/event routing isolation
-- [ ] subscriber retry isolation
-- [ ] ordering guarantee when advertised
-- [ ] stats accuracy
-- [ ] DLQ list/requeue/purge/count
-- [ ] malformed transport message handling
+- [x] enqueue, handle, and ACK
+- [x] handler failure and exact attempt bound
+- [x] explicit retry-after
+- [x] permanent error to DLQ
+- [x] decode error to DLQ
+- [x] panic recovery
+- [x] handler timeout
+- [x] settlement timeout/failure
+- [x] retry publish failure does not lose source
+- [x] DLQ publish failure does not lose source
+- [x] duplicate delivery
+- [x] delayed execution precision
+- [x] multi-instance delay scheduler
+- [x] dedupe duplicate, expiry, namespace, and topology isolation
+- [x] graceful drain with in-flight work
+- [x] forced shutdown and later redelivery
+- [x] consumer reconnect without goroutine leak
+- [x] task/event routing isolation
+- [x] subscriber retry isolation
+- [x] ordering guarantee when advertised
+- [x] stats accuracy
+- [x] DLQ list/requeue/purge/count
+- [x] malformed transport message handling
 
 Use channels, fake clocks, and observable hooks instead of fixed sleeps wherever possible.
 

@@ -21,11 +21,29 @@ type Harness struct {
 	Topology                   func(testName string, kind transport.TopologyKind) transport.Topology
 	DispatchDue                func(context.Context, transport.Transport, transport.Topology, time.Time) (int64, error)
 	ExpireDedupe               func(*testing.T, time.Duration)
-	PrepareUnsettledRedelivery func(*testing.T, transport.Topology)
+	PrepareUnsettledRedelivery func(*testing.T, transport.Transport, transport.Topology)
+	PostCommitAmbiguity        func(*testing.T, transport.Transport, transport.Topology, transport.DecisionKind, AmbiguityPhase) AmbiguityState
+	SchedulerOwnershipRecovery func(*testing.T, transport.Transport, transport.Transport, transport.Topology, time.Time) int
 	SubscriberRetryIsolation   bool
 	SubscriberDLQIsolation     bool
 	PendingIncludesInFlight    bool
+	RedeliveryMayKeepAttempt   bool
 	ReceiveWithin              time.Duration
+}
+
+type AmbiguityPhase uint8
+
+const (
+	AmbiguityArm AmbiguityPhase = iota + 1
+	AmbiguityObserve
+	AmbiguityFinal
+)
+
+type AmbiguityState struct {
+	SourceOutstanding         bool
+	RetrySameDelivery         bool
+	DestinationCount          int64
+	ExpectedFinalDestinations int64
 }
 
 // Run executes the durable transport contract that is independent of core
@@ -83,21 +101,37 @@ func Run(t *testing.T, h Harness) {
 		topo := h.Topology(t.Name(), transport.TaskTopology)
 		ctx := context.Background()
 		mustEnsure(t, ctx, tr, topo)
-		mustPublish(t, ctx, tr, topo, "unsettled")
+		source := transport.Message{
+			ID: "unsettled-id", Type: topo.JobType, Payload: []byte("unsettled"),
+			OrderingKey: "unsettled-order", Headers: map[string]string{"correlation-id": "unsettled-correlation"},
+		}
+		if err := tr.Publish(ctx, topo, source); err != nil {
+			t.Fatal(err)
+		}
 		first := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+		firstMessage := first.Delivery.Message()
+		if string(firstMessage.Payload) != string(source.Payload) {
+			t.Fatalf("first payload = %q, want %q", firstMessage.Payload, source.Payload)
+		}
 		if first.Delivery.DeliveryAttempt() < 1 {
 			t.Fatalf("first attempt = %d", first.Delivery.DeliveryAttempt())
 		}
 		first.Close()
-		h.PrepareUnsettledRedelivery(t, topo)
+		h.PrepareUnsettledRedelivery(t, tr, topo)
 		second := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
-		if string(second.Delivery.Message().Payload) != "unsettled" || second.Delivery.DeliveryAttempt() < 2 {
+		minimumAttempt := 2
+		if h.RedeliveryMayKeepAttempt {
+			minimumAttempt = 1
+		}
+		assertSameLogicalMessage(t, second.Delivery.Message(), firstMessage)
+		if second.Delivery.DeliveryAttempt() < minimumAttempt {
 			t.Fatalf("redelivery = %#v, attempt %d", second.Delivery.Message(), second.Delivery.DeliveryAttempt())
 		}
 		if err := second.Delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			t.Fatal(err)
 		}
 		second.Close()
+		assertStats(t, ctx, tr, topo, 0, 0, 0, 0)
 	})
 
 	t.Run("stats_transitions", func(t *testing.T) {
@@ -150,6 +184,110 @@ func Run(t *testing.T, h Harness) {
 		}
 		active.Close()
 	})
+
+	for _, kind := range []transport.DecisionKind{transport.DecisionRetry, transport.DecisionDeadLetter} {
+		t.Run("failed_"+kind.String()+"_settlement_preserves_source", func(t *testing.T) {
+			if h.PrepareUnsettledRedelivery == nil {
+				t.Skip("harness has no deterministic unsettled-redelivery control")
+			}
+			tr := h.New(t)
+			topo := h.Topology(t.Name(), transport.TaskTopology)
+			ctx := context.Background()
+			mustEnsure(t, ctx, tr, topo)
+			mustPublish(t, ctx, tr, topo, "source")
+			active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+			decision := transport.Decision{
+				Kind: kind, Next: transport.Message{ID: "retry", Type: topo.JobType, Payload: []byte("retry")},
+				RetryAt: time.Now().Add(time.Minute), Reason: "contract", ErrorCode: "contract", Attempts: 1,
+			}
+			failedCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			if err := active.Delivery.Settle(failedCtx, decision); !errors.Is(err, context.Canceled) {
+				t.Fatalf("failed settlement = %v, want context canceled", err)
+			}
+			if h.PendingIncludesInFlight {
+				assertStats(t, ctx, tr, topo, 1, 0, 0, 0)
+			} else {
+				assertStats(t, ctx, tr, topo, 0, 0, 1, 0)
+			}
+			active.Close()
+			h.PrepareUnsettledRedelivery(t, tr, topo)
+			redelivered := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+			minimumAttempt := 2
+			if h.RedeliveryMayKeepAttempt {
+				minimumAttempt = 1
+			}
+			if string(redelivered.Delivery.Message().Payload) != "source" || redelivered.Delivery.DeliveryAttempt() < minimumAttempt {
+				t.Fatalf("redelivery after settlement failure = %#v, attempt %d", redelivered.Delivery.Message(), redelivered.Delivery.DeliveryAttempt())
+			}
+			if err := redelivered.Delivery.Settle(ctx, decision); err != nil {
+				t.Fatalf("redelivered settlement: %v", err)
+			}
+			redelivered.Close()
+			if kind == transport.DecisionRetry {
+				assertStats(t, ctx, tr, topo, 0, 1, 0, 0)
+			} else {
+				assertStats(t, ctx, tr, topo, 0, 0, 0, 1)
+			}
+		})
+	}
+
+	for _, kind := range []transport.DecisionKind{transport.DecisionRetry, transport.DecisionDeadLetter} {
+		t.Run("post_commit_ambiguous_"+kind.String()+"_is_loss_safe", func(t *testing.T) {
+			if h.PostCommitAmbiguity == nil {
+				t.Skip("harness has no post-commit ambiguity boundary")
+			}
+			tr := h.New(t)
+			topo := h.Topology(t.Name(), transport.TaskTopology)
+			ctx := context.Background()
+			mustEnsure(t, ctx, tr, topo)
+			mustPublish(t, ctx, tr, topo, "source")
+			active := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+			decision := transport.Decision{
+				Kind: kind, Next: transport.Message{ID: "retry", Type: topo.JobType, Payload: []byte("retry")},
+				RetryAt: time.Now().Add(time.Minute), Reason: "contract", ErrorCode: "contract", Attempts: 1,
+			}
+			h.PostCommitAmbiguity(t, tr, topo, kind, AmbiguityArm)
+			if err := active.Delivery.Settle(ctx, decision); err == nil {
+				t.Fatal("post-commit response loss reported settlement success")
+			}
+			active.AllowConsumeError()
+			observed := h.PostCommitAmbiguity(t, tr, topo, kind, AmbiguityObserve)
+			if observed.DestinationCount != 1 {
+				t.Fatalf("durable destinations after ambiguous response = %d, want 1", observed.DestinationCount)
+			}
+			if observed.SourceOutstanding {
+				if observed.RetrySameDelivery {
+					if err := active.Delivery.Settle(ctx, decision); err != nil {
+						t.Fatalf("retry ambiguous delivery settlement: %v", err)
+					}
+					active.Close()
+				} else {
+					active.Close()
+					if h.PrepareUnsettledRedelivery != nil {
+						h.PrepareUnsettledRedelivery(t, tr, topo)
+					}
+					redelivered := receive(t, tr, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+					if err := redelivered.Delivery.Settle(ctx, decision); err != nil {
+						t.Fatalf("settle redelivered ambiguous source: %v", err)
+					}
+					redelivered.Close()
+				}
+			} else {
+				if err := active.Delivery.Settle(ctx, decision); !errors.Is(err, transport.ErrDeliverySettled) && !errors.Is(err, transport.ErrLeaseLost) {
+					t.Fatalf("retry committed ambiguous settlement = %v", err)
+				}
+				active.Close()
+			}
+			final := h.PostCommitAmbiguity(t, tr, topo, kind, AmbiguityFinal)
+			if final.SourceOutstanding {
+				t.Fatal("source remains outstanding after ambiguity recovery")
+			}
+			if final.DestinationCount != observed.ExpectedFinalDestinations {
+				t.Fatalf("final durable destinations = %d, want %d", final.DestinationCount, observed.ExpectedFinalDestinations)
+			}
+		})
+	}
 
 	t.Run("dead_letter_admin", func(t *testing.T) {
 		tr := h.New(t)
@@ -229,6 +367,107 @@ func Run(t *testing.T, h Harness) {
 			t.Fatal(err)
 		}
 		active.Close()
+	})
+
+	t.Run("multi_instance_scheduler_owner_failure_recovers", func(t *testing.T) {
+		if h.SchedulerOwnershipRecovery == nil {
+			t.Skip("harness has no deterministic scheduler ownership recovery control")
+		}
+		first, second := h.New(t), h.New(t)
+		topo := h.Topology(t.Name(), transport.TaskTopology)
+		ctx := context.Background()
+		mustEnsure(t, ctx, first, topo)
+		mustEnsure(t, ctx, second, topo)
+		runAt := time.Now().Add(time.Minute)
+		if err := first.PublishAt(ctx, topo, transport.Message{ID: "ownership", Type: topo.JobType, Payload: []byte("ownership")}, runAt); err != nil {
+			t.Fatal(err)
+		}
+		expectedReady := h.SchedulerOwnershipRecovery(t, first, second, topo, runAt.Add(delayPrecision(first)))
+		if expectedReady < 1 {
+			t.Fatalf("scheduler recovery expected ready copies = %d, want at least 1", expectedReady)
+		}
+		for range expectedReady {
+			active := receive(t, second, transport.Subscription{Topology: topo}, h.ReceiveWithin)
+			if string(active.Delivery.Message().Payload) != "ownership" {
+				t.Fatalf("recovered payload = %q", active.Delivery.Message().Payload)
+			}
+			if err := active.Delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+				t.Fatal(err)
+			}
+			active.Close()
+		}
+		assertStats(t, ctx, second, topo, 0, 0, 0, 0)
+	})
+
+	t.Run("advertised_ordering_serializes_same_key", func(t *testing.T) {
+		tr := h.New(t)
+		if !tr.Capabilities().Ordering {
+			t.Skip("transport does not advertise ordering")
+		}
+		topo := h.Topology(t.Name(), transport.TaskTopology)
+		ctx := context.Background()
+		mustEnsure(t, ctx, tr, topo)
+		const count = 8
+		for i := range count {
+			payload := fmt.Sprintf("ordered-%02d", i)
+			if err := tr.Publish(ctx, topo, transport.Message{
+				ID: payload, Type: topo.JobType, Payload: []byte(payload), OrderingKey: "account-7",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		consumeCtx, cancel := context.WithCancel(ctx)
+		deliveries := make(chan transport.Delivery, count)
+		done := make(chan error, 1)
+		go func() {
+			done <- tr.Consume(consumeCtx, transport.Subscription{
+				Topology: topo, Concurrency: 4, Prefetch: 4,
+			}, func(delivery transport.Delivery) { deliveries <- delivery })
+		}()
+		closed := false
+		closeConsumer := func() {
+			if closed {
+				return
+			}
+			closed = true
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("ordered consume shutdown: %v", err)
+				}
+			case <-time.After(h.ReceiveWithin):
+				t.Error("ordered consume did not stop after cancellation")
+			}
+		}
+		t.Cleanup(closeConsumer)
+
+		for i := range count {
+			var delivery transport.Delivery
+			select {
+			case delivery = <-deliveries:
+			case err := <-done:
+				t.Fatalf("ordered consume ended before delivery %d: %v", i, err)
+			case <-time.After(h.ReceiveWithin):
+				t.Fatalf("timed out waiting for ordered delivery %d", i)
+			}
+			message := delivery.Message()
+			want := fmt.Sprintf("ordered-%02d", i)
+			if string(message.Payload) != want || message.OrderingKey != "account-7" {
+				t.Fatalf("ordered delivery %d = payload %q key %q, want %q/account-7", i, message.Payload, message.OrderingKey, want)
+			}
+			select {
+			case next := <-deliveries:
+				t.Fatalf("same-key delivery %q arrived before %q settled", next.Message().Payload, message.Payload)
+			default:
+			}
+			if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		closeConsumer()
+		assertStats(t, ctx, tr, topo, 0, 0, 0, 0)
 	})
 
 	t.Run("event_fanout_groups", func(t *testing.T) {
@@ -583,12 +822,23 @@ func mustPublish(t *testing.T, ctx context.Context, tr transport.Transport, topo
 	}
 }
 
+func assertSameLogicalMessage(t *testing.T, got, want transport.Message) {
+	t.Helper()
+	if got.ID != want.ID || got.Type != want.Type || string(got.Payload) != string(want.Payload) ||
+		got.OrderingKey != want.OrderingKey || got.Headers["correlation-id"] != want.Headers["correlation-id"] {
+		t.Fatalf("logical message = %#v, want %#v", got, want)
+	}
+}
+
 type activeDelivery struct {
 	transport.Delivery
-	close func()
+	close             func()
+	allowConsumeError bool
 }
 
 func (d *activeDelivery) Close() { d.close() }
+
+func (d *activeDelivery) AllowConsumeError() { d.allowConsumeError = true }
 
 func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, timeout time.Duration) *activeDelivery {
 	t.Helper()
@@ -620,7 +870,7 @@ func receive(t *testing.T, tr transport.Transport, sub transport.Subscription, t
 			cancel()
 			select {
 			case err := <-done:
-				if err != nil && !errors.Is(err, context.Canceled) {
+				if err != nil && !errors.Is(err, context.Canceled) && !active.allowConsumeError {
 					t.Errorf("consume shutdown: %v", err)
 				}
 			case <-time.After(timeout):

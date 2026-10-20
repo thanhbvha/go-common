@@ -62,7 +62,10 @@ func (t *kafkaTransport) ExpandPartitions(ctx context.Context, topology transpor
 	}
 	for _, topic := range topics {
 		detail, ok := metadata.Topics[topic]
-		if !ok || detail.Err != nil {
+		if !ok {
+			return result, fmt.Errorf("kafka: inspect related topic %q: missing broker metadata", topic)
+		}
+		if detail.Err != nil {
 			return result, fmt.Errorf("kafka: inspect related topic %q: %w", topic, detail.Err)
 		}
 		count := int32(len(detail.Partitions))

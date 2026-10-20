@@ -120,7 +120,7 @@ func (t *kafkaTransport) registeredPrivateTopics(ctx context.Context, topology t
 	if err != nil {
 		return nil, err
 	}
-	private := all[:0]
+	private := make([]string, 0, len(all)/2)
 	for _, topic := range all {
 		if !strings.HasSuffix(topic, subscriberMarkerSuffix) {
 			private = append(private, topic)
@@ -144,15 +144,15 @@ func (t *kafkaTransport) registeredSubscriberTopics(ctx context.Context, topolog
 			continue
 		}
 		privateTopic := strings.TrimSuffix(topic, subscriberMarkerSuffix)
-		encodedGroup := strings.TrimSuffix(strings.TrimPrefix(privateTopic, prefix), ".retry-ready")
-		if encodedGroup == "" {
+		registryKey := strings.TrimSuffix(strings.TrimPrefix(privateTopic, prefix), ".retry-ready")
+		if registryKey == "" {
 			continue
 		}
 		partitions := int32(1)
 		if value, ok := topology.Options["kafka.partitions"].(int32); ok {
 			partitions = value
 		}
-		if err := t.validateSubscriberTopics(ctx, encodedGroup, privateTopic, topic, partitions); err != nil {
+		if err := t.validateSubscriberTopics(ctx, registryKey, privateTopic, topic, partitions); err != nil {
 			return nil, err
 		}
 		topics = append(topics, privateTopic, topic)

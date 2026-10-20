@@ -87,6 +87,22 @@ func runLiveRedisContract(t *testing.T, rc goredis.UniversalClient, mode string)
 			t.Helper()
 			time.Sleep(ttl + 50*time.Millisecond)
 		},
+		PrepareUnsettledRedelivery: func(t *testing.T, tr transport.Transport, topo transport.Topology) {
+			t.Helper()
+			backend := tr.(*redisTransport)
+			pending, err := rc.XPendingExt(context.Background(), &goredis.XPendingExtArgs{
+				Stream: backend.streamKey(topo), Group: backend.groupName(transport.Subscription{Topology: topo}),
+				Start: "-", End: "+", Count: 10,
+			}).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range pending {
+				if err := rc.Do(context.Background(), "XCLAIM", backend.streamKey(topo), backend.groupName(transport.Subscription{Topology: topo}), "contract-stale", 0, entry.ID, "IDLE", (2 * time.Minute).Milliseconds()).Err(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
 		SubscriberRetryIsolation: true,
 		SubscriberDLQIsolation:   true,
 		ReceiveWithin:            10 * time.Second,

@@ -20,6 +20,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+var errKafkaContractResponseLoss = errors.New("synthetic response loss after durable Kafka produce")
+
 func TestKafkaTransportContract(t *testing.T) {
 	cfg := commonkafka.DefaultConfig()
 	probe, err := NewWithConfig(cfg)
@@ -63,11 +65,123 @@ func TestKafkaTransportContract(t *testing.T) {
 		DispatchDue: func(ctx context.Context, tr transport.Transport, topo transport.Topology, now time.Time) (int64, error) {
 			return dispatchKafkaContractDue(ctx, tr.(*kafkaContractTransport).kafkaTransport, topo, now)
 		},
+		PrepareUnsettledRedelivery: func(*testing.T, transport.Transport, transport.Topology) {},
+		PostCommitAmbiguity: func(t *testing.T, tr transport.Transport, topo transport.Topology, kind transport.DecisionKind, phase transportcontract.AmbiguityPhase) transportcontract.AmbiguityState {
+			backend := tr.(*kafkaContractTransport).kafkaTransport
+			switch phase {
+			case transportcontract.AmbiguityArm:
+				original := backend.producer
+				var once sync.Once
+				backend.producer = settlementProducer(func(ctx context.Context, record *kgo.Record) error {
+					if err := original.ProduceSync(ctx, record).FirstErr(); err != nil {
+						return err
+					}
+					injected := false
+					once.Do(func() { injected = true })
+					if injected {
+						return errKafkaContractResponseLoss
+					}
+					return nil
+				})
+				return transportcontract.AmbiguityState{}
+			case transportcontract.AmbiguityObserve:
+				backend.producer = backend.cl
+				return kafkaAmbiguityState(t, backend, topo, kind, 2)
+			case transportcontract.AmbiguityFinal:
+				return kafkaAmbiguityState(t, backend, topo, kind, 0)
+			default:
+				t.Fatalf("unknown ambiguity phase %d", phase)
+				return transportcontract.AmbiguityState{}
+			}
+		},
+		SchedulerOwnershipRecovery: func(t *testing.T, first, second transport.Transport, topo transport.Topology, now time.Time) int {
+			firstBackend := first.(*kafkaContractTransport).kafkaTransport
+			secondBackend := second.(*kafkaContractTransport).kafkaTransport
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			var tier time.Duration
+			var topic, group string
+			for _, candidate := range delayTiers {
+				candidateTopic := firstBackend.delayTopic(topo, candidate)
+				candidateGroup := fmt.Sprintf("%s-delay-%s-group", topo.Name(), candidate)
+				lag, err := firstBackend.groupLag(ctx, candidateTopic, candidateGroup)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lag > 0 {
+					tier, topic, group = candidate, candidateTopic, candidateGroup
+					break
+				}
+			}
+			if topic == "" {
+				t.Fatal("Kafka delayed source was not found in any tier")
+			}
+			owner, err := firstBackend.newManualConsumer(
+				kgo.ConsumerGroup(group), kgo.ConsumeTopics(topic), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fetched := owner.PollRecords(ctx, 1)
+			if err := fetched.Err(); err != nil || len(fetched.Records()) != 1 {
+				owner.CloseAllowingRebalance()
+				t.Fatalf("Kafka owner poll = %d, %v", len(fetched.Records()), err)
+			}
+			// Owner exits without transfer or commit. The group successor must
+			// receive the durable source from the same committed offset.
+			owner.CloseAllowingRebalance()
+			successor, err := secondBackend.newManualConsumer(
+				kgo.ConsumerGroup(group), kgo.ConsumeTopics(topic), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer successor.CloseAllowingRebalance()
+			fetched = successor.PollRecords(ctx, 1)
+			if err := fetched.Err(); err != nil || len(fetched.Records()) != 1 {
+				t.Fatalf("Kafka successor poll = %d, %v", len(fetched.Records()), err)
+			}
+			if err := secondBackend.processDelayBatch(ctx, topo, tier, successor, fetched.Records(), now); err != nil {
+				t.Fatal(err)
+			}
+			return 1
+		},
 		PendingIncludesInFlight:  true,
+		RedeliveryMayKeepAttempt: true,
 		SubscriberRetryIsolation: true,
 		SubscriberDLQIsolation:   true,
 		ReceiveWithin:            10 * time.Second,
 	})
+}
+
+func kafkaAmbiguityState(t *testing.T, backend *kafkaTransport, topo transport.Topology, kind transport.DecisionKind, expected int64) transportcontract.AmbiguityState {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stats, err := backend.Stats(ctx, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := backend.dlqTopic(topo)
+	if kind == transport.DecisionRetry {
+		destination = backend.delayDestination(topo, time.Now().Add(time.Minute), time.Now())
+	}
+	ends, err := backend.adm.ListEndOffsets(ctx, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	for _, partition := range ends[destination] {
+		if partition.Err != nil {
+			t.Fatal(partition.Err)
+		}
+		count += partition.Offset
+	}
+	state := transportcontract.AmbiguityState{SourceOutstanding: stats.Pending > 0 || stats.InFlight > 0, DestinationCount: count}
+	if expected > 0 {
+		state.ExpectedFinalDestinations = expected
+	}
+	return state
 }
 
 func TestKafkaBusContract(t *testing.T) {
@@ -106,7 +220,9 @@ func TestKafkaBusContract(t *testing.T) {
 		},
 		PrepareUnsettledRedelivery: func(*testing.T, transport.Topology) {},
 		DurableRedelivery:          true,
-		ReceiveWithin:              10 * time.Second,
+		RepeatedReconnect:          true,
+		ReconnectSessionLifetime:   250 * time.Millisecond,
+		ReceiveWithin:              15 * time.Second,
 	})
 }
 

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
 )
 
@@ -38,6 +40,18 @@ func TestRetryMix(t *testing.T) {
 	}
 	if retry10 != 10 || retry50 != 50 {
 		t.Fatalf("retry counts = %d/%d, want 10/50", retry10, retry50)
+	}
+}
+
+func TestExpectedRetries(t *testing.T) {
+	if got := expectedRetries("immediate", 100); got != 0 {
+		t.Fatalf("immediate retries = %d, want 0", got)
+	}
+	if got := expectedRetries("retry10", 100); got != 10 {
+		t.Fatalf("retry10 retries = %d, want 10", got)
+	}
+	if got := expectedRetries("retry50", 101); got != 51 {
+		t.Fatalf("retry50 retries = %d, want 51", got)
 	}
 }
 
@@ -139,12 +153,32 @@ func TestValidateDurationMode(t *testing.T) {
 		"non-kafka worker":   func(cfg *config) { cfg.SecondWorkerAfter = time.Second },
 		"preloaded worker":   func(cfg *config) { cfg.Driver = "kafka"; cfg.Preload = true; cfg.SecondWorkerAfter = time.Second },
 		"unbounded tracking": func(cfg *config) { cfg.Duration = 2 * time.Hour; cfg.Rate = 1_000_000; cfg.Timeout = 3 * time.Hour },
+		"late second worker": func(cfg *config) { cfg.Driver = "kafka"; cfg.SecondWorkerAfter = cfg.Duration },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := valid
 			mutate(&cfg)
 			if err := validate(cfg); err == nil {
 				t.Fatalf("invalid duration config accepted: %#v", cfg)
+			}
+		})
+	}
+}
+
+func TestValidateFinalStats(t *testing.T) {
+	if err := validateFinalStats(transport.TopologyStats{}); err != nil {
+		t.Fatalf("settled stats: %v", err)
+	}
+	for name, stats := range map[string]transport.TopologyStats{
+		"pending":   {Pending: 1},
+		"delayed":   {Delayed: 1},
+		"in flight": {InFlight: 1},
+		"dlq":       {DLQ: 1},
+		"lag":       {Lag: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateFinalStats(stats); err == nil {
+				t.Fatalf("unsettled stats accepted: %+v", stats)
 			}
 		})
 	}
@@ -159,5 +193,57 @@ func TestValidateKafkaSecondWorker(t *testing.T) {
 	cfg.Driver = "kafka"
 	if err := validate(cfg); err != nil {
 		t.Fatalf("valid Kafka second worker: %v", err)
+	}
+}
+
+func TestKafkaPartitionsMatchRequestedConcurrency(t *testing.T) {
+	cfg := config{Concurrency: 100}
+	if got := kafkaPartitions(cfg); got != 0 {
+		t.Fatalf("non-Kafka partitions = %d, want 0", got)
+	}
+	cfg.Driver = "kafka"
+	if got := kafkaPartitions(cfg); got != 100 {
+		t.Fatalf("Kafka partitions = %d, want 100", got)
+	}
+}
+
+func TestNATSDelayBatchUsesValidatedMaximum(t *testing.T) {
+	cfg := config{}
+	if got := natsDelayBatchSize(cfg); got != 0 {
+		t.Fatalf("non-NATS delay batch = %d, want 0", got)
+	}
+	cfg.Driver = "nats"
+	if got := natsDelayBatchSize(cfg); got != 1000 {
+		t.Fatalf("NATS delay batch = %d, want 1000", got)
+	}
+}
+
+func TestRedisDelayBatchUsesValidatedMaximum(t *testing.T) {
+	cfg := config{}
+	if got := redisDelayBatchSize(cfg); got != 0 {
+		t.Fatalf("non-Redis delay batch = %d, want 0", got)
+	}
+	cfg.Driver = "redis"
+	if got := redisDelayBatchSize(cfg); got != 1000 {
+		t.Fatalf("Redis delay batch = %d, want 1000", got)
+	}
+}
+
+func TestRetryEnqueueBoundsEachAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var attempts int
+	err := retryEnqueue(ctx, func(attemptCtx context.Context) error {
+		attempts++
+		if _, ok := attemptCtx.Deadline(); !ok {
+			t.Fatal("enqueue attempt has no deadline")
+		}
+		return errors.New("temporary publish failure")
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("retryEnqueue error = %v, want deadline exceeded", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("enqueue attempts = %d, want at least 2", attempts)
 	}
 }

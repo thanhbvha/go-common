@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +263,18 @@ func TestKafkaExpandPartitionsReportsPartialSuccess(t *testing.T) {
 	}
 	if _, err := backend.ExpandPartitions(context.Background(), topo, 1); err == nil {
 		t.Fatal("partition decrease was accepted")
+	}
+}
+
+func TestKafkaExpandPartitionsRejectsMissingTopicMetadata(t *testing.T) {
+	topo := transport.Topology{Namespace: "admin", JobType: "missing-metadata"}
+	backend := &kafkaTransport{}
+	topics := append([]string{backend.mainTopic(topo), backend.dlqTopic(topo)}, backend.delayTopics(topo)...)
+	admin := &fakeKafkaAdmin{metadata: kafkaAdminMetadata(topics[1:], 2, 1)}
+	backend.adm = admin
+	_, err := backend.ExpandPartitions(context.Background(), topo, 4)
+	if err == nil || !strings.Contains(err.Error(), "missing broker metadata") {
+		t.Fatalf("missing metadata error = %v", err)
 	}
 }
 

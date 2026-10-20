@@ -16,6 +16,10 @@ import (
 	"time"
 
 	"github.com/thanhbvha/go-common/eventbus"
+	kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
+	natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
+	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
 )
 
@@ -43,37 +47,58 @@ type payload struct {
 }
 
 type result struct {
-	Driver               string  `json:"driver"`
-	Namespace            string  `json:"namespace"`
-	PayloadKB            int     `json:"payload_kb"`
-	Concurrency          int     `json:"concurrency"`
-	Workload             string  `json:"workload"`
-	Messages             int     `json:"messages"`
-	Mode                 string  `json:"mode"`
-	RequestedMessages    int     `json:"requested_messages,omitempty"`
-	DurationSeconds      float64 `json:"duration_seconds,omitempty"`
-	TargetRatePerSecond  int     `json:"target_rate_per_second,omitempty"`
-	Preloaded            bool    `json:"preloaded_backlog"`
-	SecondWorker         bool    `json:"second_worker"`
-	ElapsedSeconds       float64 `json:"elapsed_seconds"`
-	ThroughputPerSecond  float64 `json:"throughput_per_second"`
-	P50Milliseconds      float64 `json:"p50_milliseconds"`
-	P95Milliseconds      float64 `json:"p95_milliseconds"`
-	P99Milliseconds      float64 `json:"p99_milliseconds"`
-	AllocBytesPerMessage float64 `json:"alloc_bytes_per_message"`
-	AllocsPerMessage     float64 `json:"allocs_per_message"`
-	PeakHeapBytes        uint64  `json:"peak_heap_bytes"`
-	CPUSeconds           float64 `json:"cpu_seconds"`
-	GCCycles             uint32  `json:"gc_cycles"`
-	Duplicates           int64   `json:"duplicates"`
-	PeakGoroutines       int     `json:"peak_goroutines"`
+	Driver                     string  `json:"driver"`
+	Namespace                  string  `json:"namespace"`
+	PayloadKB                  int     `json:"payload_kb"`
+	Concurrency                int     `json:"concurrency"`
+	KafkaPartitions            int     `json:"kafka_partitions,omitempty"`
+	NATSDelayBatchSize         int     `json:"nats_delay_batch_size,omitempty"`
+	RedisDelayBatchSize        int     `json:"redis_delay_batch_size,omitempty"`
+	Workload                   string  `json:"workload"`
+	Messages                   int     `json:"messages"`
+	Mode                       string  `json:"mode"`
+	RequestedMessages          int     `json:"requested_messages,omitempty"`
+	DurationSeconds            float64 `json:"duration_seconds,omitempty"`
+	TargetRatePerSecond        int     `json:"target_rate_per_second,omitempty"`
+	Preloaded                  bool    `json:"preloaded_backlog"`
+	SecondWorker               bool    `json:"second_worker"`
+	SecondWorkerStarted        bool    `json:"second_worker_started"`
+	SecondWorkerProduced       int64   `json:"second_worker_produced,omitempty"`
+	SecondWorkerCompleted      int64   `json:"second_worker_completed,omitempty"`
+	SecondWorkerActive         bool    `json:"second_worker_active_work"`
+	PrimaryWorkerHandled       int64   `json:"primary_worker_handled"`
+	SecondWorkerHandled        int64   `json:"second_worker_handled"`
+	ExpectedRetries            int64   `json:"expected_retries"`
+	SyntheticRetryFailures     int64   `json:"synthetic_retry_failures"`
+	RetryCandidatesFailedAtOne int64   `json:"retry_candidates_failed_at_attempt_one"`
+	RetryFirstSeenAfterOne     int64   `json:"retry_first_seen_after_attempt_one"`
+	ElapsedSeconds             float64 `json:"elapsed_seconds"`
+	ThroughputPerSecond        float64 `json:"throughput_per_second"`
+	P50Milliseconds            float64 `json:"p50_milliseconds"`
+	P95Milliseconds            float64 `json:"p95_milliseconds"`
+	P99Milliseconds            float64 `json:"p99_milliseconds"`
+	AllocBytesPerMessage       float64 `json:"alloc_bytes_per_message"`
+	AllocsPerMessage           float64 `json:"allocs_per_message"`
+	PeakHeapBytes              uint64  `json:"peak_heap_bytes"`
+	CPUSeconds                 float64 `json:"cpu_seconds"`
+	GCCycles                   uint32  `json:"gc_cycles"`
+	Duplicates                 int64   `json:"duplicates"`
+	PeakGoroutines             int     `json:"peak_goroutines"`
+	FinalStatsAvailable        bool    `json:"final_stats_available"`
+	FinalPending               int64   `json:"final_pending"`
+	FinalDelayed               int64   `json:"final_delayed"`
+	FinalInFlight              int64   `json:"final_in_flight"`
+	FinalDLQ                   int64   `json:"final_dlq"`
+	FinalLag                   int64   `json:"final_lag"`
 }
 
 type periodicSample struct {
 	Type                   string  `json:"type"`
+	Phase                  string  `json:"phase"`
 	Timestamp              string  `json:"timestamp"`
 	ElapsedSeconds         float64 `json:"elapsed_seconds"`
 	Completed              int64   `json:"completed"`
+	Produced               int64   `json:"produced"`
 	ThroughputPerSecond    float64 `json:"throughput_per_second"`
 	HeapAllocBytes         uint64  `json:"heap_alloc_bytes"`
 	Goroutines             int     `json:"goroutines"`
@@ -255,9 +280,11 @@ func run(args []string) (returnErr error) {
 	var bus, secondBus eventbus.Bus
 	var secondRuntime *demo.Runtime
 	type workerStart struct {
-		bus     eventbus.Bus
-		runtime *demo.Runtime
-		err     error
+		bus       eventbus.Bus
+		runtime   *demo.Runtime
+		produced  int64
+		completed int64
+		err       error
 	}
 	var secondWorkerResult chan workerStart
 	var secondWorkerCancel context.CancelFunc
@@ -283,33 +310,32 @@ func run(args []string) (returnErr error) {
 		eventbus.WithMaxAttempts(2),
 		eventbus.WithMaxPayloadBytes(128*1024),
 	)
+	if cfg.Driver == "kafka" {
+		topologyOptions = append(topologyOptions, kafkadriver.WithPartitions(int32(cfg.Concurrency)))
+	}
+	if cfg.Driver == "nats" {
+		topologyOptions = append(topologyOptions, natsdriver.WithDelayBatchSize(natsDelayBatchSize(cfg)))
+	}
+	if cfg.Driver == "redis" {
+		topologyOptions = append(topologyOptions, redisdriver.WithDelayBatchSize(redisDelayBatchSize(cfg)))
+	}
 	var latencies latencyHistogram
 	sequenceLimit, err := plannedMessages(cfg)
 	if err != nil {
 		return err
 	}
 	completed := newCompletionTracker(sequenceLimit)
+	var producedCount atomic.Int64
+	var primaryWorkerHandled atomic.Int64
+	var secondWorkerHandled atomic.Int64
+	firstHandlerAttempt := make([]atomic.Uint32, sequenceLimit)
+	var syntheticRetryFailures atomic.Int64
+	var retryCandidatesFailedAtOne atomic.Int64
+	var retryFirstSeenAfterOne atomic.Int64
 	windowSize := min(sequenceLimit, 900)
 	window := make(chan struct{}, windowSize)
-	handler := eventbus.Handle(func(_ context.Context, job eventbus.Job, item payload) error {
-		if item.Sequence < 0 || item.Sequence >= sequenceLimit || item.EnqueuedUnixNS <= 0 {
-			return eventbus.MarkPermanent(fmt.Errorf("sequence outside benchmark range"))
-		}
-		if item.Retry && job.Attempt() == 1 {
-			return errors.New("synthetic benchmark retry")
-		}
-		if !completed.Mark(item.Sequence) {
-			return nil
-		}
-		latencies.Observe(time.Since(time.Unix(0, item.EnqueuedUnixNS)))
-		if !cfg.Preload {
-			<-window
-		}
-		completed.counter.Add()
-		return nil
-	})
 	const topology = "phase6_benchmark"
-	openBus := func(runtime *demo.Runtime) (eventbus.Bus, error) {
+	openBus := func(runtime *demo.Runtime, handled *atomic.Int64) (eventbus.Bus, error) {
 		busCfg := eventbus.DefaultConfig()
 		busCfg.Namespace = cfg.Namespace
 		busCfg.Concurrency = cfg.Concurrency
@@ -328,12 +354,38 @@ func run(args []string) (returnErr error) {
 		if openErr = worker.DeclareTask(topology, topologyOptions...); openErr != nil {
 			return nil, errors.Join(openErr, worker.Close(context.Background()))
 		}
+		handler := eventbus.Handle(func(_ context.Context, job eventbus.Job, item payload) error {
+			handled.Add(1)
+			if item.Sequence < 0 || item.Sequence >= sequenceLimit || item.EnqueuedUnixNS <= 0 {
+				return eventbus.MarkPermanent(fmt.Errorf("sequence outside benchmark range"))
+			}
+			firstAttempt := firstHandlerAttempt[item.Sequence].CompareAndSwap(0, 1)
+			if item.Retry && job.Attempt() == 1 {
+				syntheticRetryFailures.Add(1)
+				if firstAttempt {
+					retryCandidatesFailedAtOne.Add(1)
+				}
+				return errors.New("synthetic benchmark retry")
+			}
+			if item.Retry && firstAttempt && job.Attempt() > 1 {
+				retryFirstSeenAfterOne.Add(1)
+			}
+			if !completed.Mark(item.Sequence) {
+				return nil
+			}
+			latencies.Observe(time.Since(time.Unix(0, item.EnqueuedUnixNS)))
+			if !cfg.Preload {
+				<-window
+			}
+			completed.counter.Add()
+			return nil
+		})
 		if openErr = worker.HandleTask(topology, handler); openErr != nil {
 			return nil, errors.Join(openErr, worker.Close(context.Background()))
 		}
 		return worker, nil
 	}
-	bus, err = openBus(rt)
+	bus, err = openBus(rt, &primaryWorkerHandled)
 	if err != nil {
 		return err
 	}
@@ -346,10 +398,6 @@ func run(args []string) (returnErr error) {
 		}
 	}
 
-	var before runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	cpuBefore := cpuSeconds()
 	var sampleFile *os.File
 	if cfg.SamplesJSONL != "" {
 		sampleFile, err = os.OpenFile(cfg.SamplesJSONL, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -358,15 +406,33 @@ func run(args []string) (returnErr error) {
 		}
 		defer func() { returnErr = errors.Join(returnErr, sampleFile.Close()) }()
 	}
-	resourceDone := make(chan resourcePeaks, 1)
-	stopResources := make(chan struct{})
 	benchmarkStart := time.Now()
-	go sampleResources(ctx, stopResources, bus, topology, benchmarkStart, cfg.SampleEvery, before.HeapAlloc, completed.counter, sampleFile, resourceDone)
+	var before runtime.MemStats
+	var cpuBefore float64
+	var resourceDone chan resourcePeaks
+	var stopResources chan struct{}
+	startResources := func(phase string) {
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		cpuBefore = cpuSeconds()
+		benchmarkStart = time.Now()
+		resourceDone = make(chan resourcePeaks, 1)
+		stopResources = make(chan struct{})
+		go sampleResources(ctx, stopResources, bus, topology, phase, benchmarkStart, cfg.SampleEvery, before.HeapAlloc, &producedCount, completed.counter, sampleFile, resourceDone)
+	}
+	stopResourceSampler := func() resourcePeaks {
+		close(stopResources)
+		return <-resourceDone
+	}
+	phase := "measurement"
+	if cfg.Preload {
+		phase = "preload"
+	}
+	startResources(phase)
 	resourcesStopped := false
 	defer func() {
 		if !resourcesStopped {
-			close(stopResources)
-			<-resourceDone
+			stopResourceSampler()
 		}
 	}()
 
@@ -387,12 +453,15 @@ func run(args []string) (returnErr error) {
 			workerRuntime, workerErr := demo.OpenRuntime(workerCtx, cfg.Config, logger)
 			var workerBus eventbus.Bus
 			if workerErr == nil {
-				workerBus, workerErr = openBus(workerRuntime)
+				workerBus, workerErr = openBus(workerRuntime, &secondWorkerHandled)
 			}
 			if workerErr == nil {
 				workerErr = demo.Start(workerCtx, workerBus)
 			}
-			secondWorkerResult <- workerStart{bus: workerBus, runtime: workerRuntime, err: workerErr}
+			secondWorkerResult <- workerStart{
+				bus: workerBus, runtime: workerRuntime, produced: producedCount.Load(),
+				completed: completed.counter.count.Load(), err: workerErr,
+			}
 		}()
 	}
 
@@ -429,6 +498,7 @@ func run(args []string) (returnErr error) {
 			return fmt.Errorf("enqueue message %d: %w", produced, err)
 		}
 		produced++
+		producedCount.Store(int64(produced))
 		if cfg.Duration > 0 {
 			nextEnqueue = nextEnqueue.Add(time.Second / time.Duration(cfg.Rate))
 			if now := time.Now(); nextEnqueue.Before(now) {
@@ -436,11 +506,13 @@ func run(args []string) (returnErr error) {
 			}
 		}
 	}
+	var secondWorkerProduced, secondWorkerCompleted int64
 	if cfg.SecondWorkerAfter > 0 {
 		worker := <-secondWorkerResult
 		secondWorkerPending = false
 		secondWorkerCancel()
 		secondBus, secondRuntime = worker.bus, worker.runtime
+		secondWorkerProduced, secondWorkerCompleted = worker.produced, worker.completed
 		if worker.err != nil {
 			return fmt.Errorf("start second worker: %w", worker.err)
 		}
@@ -449,7 +521,8 @@ func run(args []string) (returnErr error) {
 		if err := bus.DrainTopology(ctx, topology); err != nil {
 			return fmt.Errorf("drain preloaded topology: %w", err)
 		}
-		benchmarkStart = time.Now()
+		stopResourceSampler()
+		startResources("measurement")
 		if err := bus.Resume(ctx, topology); err != nil {
 			return fmt.Errorf("resume preloaded topology: %w", err)
 		}
@@ -457,12 +530,23 @@ func run(args []string) (returnErr error) {
 	if err := completed.counter.Wait(ctx, int64(produced)); err != nil {
 		return err
 	}
-	elapsed := time.Since(benchmarkStart)
-	if err := bus.Drain(ctx); err != nil {
+	if secondBus != nil {
+		if err := secondBus.DrainTopology(ctx, topology); err != nil {
+			return fmt.Errorf("drain second worker topology: %w", err)
+		}
+	}
+	if err := bus.DrainTopology(ctx, topology); err != nil {
+		return fmt.Errorf("drain benchmark topology: %w", err)
+	}
+	finalStats, err := bus.TopologyStats(ctx, eventbus.TaskRef(topology))
+	if err != nil {
+		return fmt.Errorf("read final topology stats: %w", err)
+	}
+	if err := validateFinalStats(finalStats); err != nil {
 		return err
 	}
-	close(stopResources)
-	peaks := <-resourceDone
+	elapsed := time.Since(benchmarkStart)
+	peaks := stopResourceSampler()
 	resourcesStopped = true
 	cpuUsed := cpuSeconds() - cpuBefore
 	var after runtime.MemStats
@@ -470,15 +554,21 @@ func run(args []string) (returnErr error) {
 
 	report := result{
 		Driver: cfg.Driver, Namespace: cfg.Namespace, PayloadKB: cfg.PayloadKB,
-		Concurrency: cfg.Concurrency, Workload: cfg.Workload, Messages: produced, Preloaded: cfg.Preload,
+		Concurrency: cfg.Concurrency, KafkaPartitions: kafkaPartitions(cfg), NATSDelayBatchSize: natsDelayBatchSize(cfg), RedisDelayBatchSize: redisDelayBatchSize(cfg), Workload: cfg.Workload, Messages: produced, Preloaded: cfg.Preload,
 		Mode: benchmarkMode(cfg), RequestedMessages: requestedMessages(cfg), DurationSeconds: cfg.Duration.Seconds(), TargetRatePerSecond: cfg.Rate,
-		SecondWorker:   cfg.SecondWorkerAfter > 0,
+		SecondWorker: cfg.SecondWorkerAfter > 0, SecondWorkerStarted: secondBus != nil,
+		SecondWorkerProduced: secondWorkerProduced, SecondWorkerCompleted: secondWorkerCompleted,
+		SecondWorkerActive:   secondBus != nil && (secondWorkerProduced < int64(sequenceLimit) || secondWorkerCompleted < secondWorkerProduced),
+		PrimaryWorkerHandled: primaryWorkerHandled.Load(), SecondWorkerHandled: secondWorkerHandled.Load(),
+		ExpectedRetries: expectedRetries(cfg.Workload, produced), SyntheticRetryFailures: syntheticRetryFailures.Load(), RetryCandidatesFailedAtOne: retryCandidatesFailedAtOne.Load(), RetryFirstSeenAfterOne: retryFirstSeenAfterOne.Load(),
 		ElapsedSeconds: elapsed.Seconds(), ThroughputPerSecond: float64(produced) / elapsed.Seconds(),
 		P50Milliseconds: latencies.Percentile(0.50), P95Milliseconds: latencies.Percentile(0.95), P99Milliseconds: latencies.Percentile(0.99),
 		AllocBytesPerMessage: float64(after.TotalAlloc-before.TotalAlloc) / float64(produced),
 		AllocsPerMessage:     float64(after.Mallocs-before.Mallocs) / float64(produced),
 		PeakHeapBytes:        peaks.heap, CPUSeconds: max(0, cpuUsed), GCCycles: after.NumGC - before.NumGC,
 		Duplicates: completed.duplicates.Load(), PeakGoroutines: peaks.goroutines,
+		FinalStatsAvailable: true, FinalPending: finalStats.Pending, FinalDelayed: finalStats.Delayed,
+		FinalInFlight: finalStats.InFlight, FinalDLQ: finalStats.DLQ, FinalLag: finalStats.Lag,
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -536,6 +626,9 @@ func validate(cfg config) error {
 	if cfg.SecondWorkerAfter >= cfg.Timeout {
 		return fmt.Errorf("second-worker-after must be less than timeout")
 	}
+	if cfg.Duration > 0 && cfg.SecondWorkerAfter >= cfg.Duration {
+		return fmt.Errorf("second-worker-after must be less than duration")
+	}
 	if cfg.Delay <= 0 {
 		return fmt.Errorf("delay must be positive")
 	}
@@ -546,6 +639,34 @@ func validate(cfg config) error {
 		return err
 	}
 	return nil
+}
+
+func validateFinalStats(stats transport.TopologyStats) error {
+	if stats.Pending != 0 || stats.Delayed != 0 || stats.InFlight != 0 || stats.DLQ != 0 || stats.Lag != 0 {
+		return fmt.Errorf("benchmark topology is not settled: pending=%d delayed=%d in_flight=%d dlq=%d lag=%d", stats.Pending, stats.Delayed, stats.InFlight, stats.DLQ, stats.Lag)
+	}
+	return nil
+}
+
+func kafkaPartitions(cfg config) int {
+	if cfg.Driver == "kafka" {
+		return cfg.Concurrency
+	}
+	return 0
+}
+
+func natsDelayBatchSize(cfg config) int {
+	if cfg.Driver == "nats" {
+		return 1000
+	}
+	return 0
+}
+
+func redisDelayBatchSize(cfg config) int {
+	if cfg.Driver == "redis" {
+		return 1000
+	}
+	return 0
 }
 
 func benchmarkMode(cfg config) string {
@@ -601,10 +722,29 @@ func shouldRetry(workload string, sequence int) bool {
 	}
 }
 
+func expectedRetries(workload string, messages int) int64 {
+	var retries int64
+	for sequence := 0; sequence < messages; sequence++ {
+		if shouldRetry(workload, sequence) {
+			retries++
+		}
+	}
+	return retries
+}
+
 func enqueueWithRetry(ctx context.Context, bus eventbus.Bus, topology string, item payload, opts ...eventbus.JobOption) error {
+	return retryEnqueue(ctx, func(attemptCtx context.Context) error {
+		return bus.Enqueue(attemptCtx, topology, item, opts...)
+	})
+}
+
+func retryEnqueue(ctx context.Context, enqueue func(context.Context) error) error {
+	const attemptTimeout = 5 * time.Second
 	backoff := 25 * time.Millisecond
 	for {
-		err := bus.Enqueue(ctx, topology, item, opts...)
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err := enqueue(attemptCtx)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -630,7 +770,7 @@ type resourcePeaks struct {
 	goroutines int
 }
 
-func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus, topology string, started time.Time, interval time.Duration, initialHeap uint64, completed *completionCounter, output io.Writer, result chan<- resourcePeaks) {
+func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus, topology, phase string, started time.Time, interval time.Duration, initialHeap uint64, produced *atomic.Int64, completed *completionCounter, output io.Writer, result chan<- resourcePeaks) {
 	peaks := resourcePeaks{heap: initialHeap, goroutines: runtime.NumGoroutine()}
 	peakTicker := time.NewTicker(min(100*time.Millisecond, interval))
 	defer peakTicker.Stop()
@@ -651,8 +791,8 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 		}
 		elapsed := time.Since(started)
 		record := periodicSample{
-			Type: "sample", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), ElapsedSeconds: elapsed.Seconds(),
-			Completed: completed.count.Load(), HeapAllocBytes: stats.HeapAlloc, Goroutines: goroutines,
+			Type: "sample", Phase: phase, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), ElapsedSeconds: elapsed.Seconds(),
+			Produced: produced.Load(), Completed: completed.count.Load(), HeapAllocBytes: stats.HeapAlloc, Goroutines: goroutines,
 		}
 		if elapsed > 0 {
 			record.ThroughputPerSecond = float64(record.Completed) / elapsed.Seconds()

@@ -17,8 +17,9 @@ var errSyntheticResponseLoss = errors.New("synthetic response loss after Redis s
 // command but before the caller receives the response. It never prevents the
 // command from reaching Redis.
 type postSuccessErrorHook struct {
-	commands map[string]bool
-	fired    atomic.Bool
+	commands     map[string]bool
+	scriptHashes map[string]bool
+	fired        atomic.Bool
 }
 
 func (h *postSuccessErrorHook) DialHook(next goredis.DialHook) goredis.DialHook {
@@ -28,7 +29,13 @@ func (h *postSuccessErrorHook) DialHook(next goredis.DialHook) goredis.DialHook 
 func (h *postSuccessErrorHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
 	return func(ctx context.Context, cmd goredis.Cmder) error {
 		err := next(ctx, cmd)
-		if err == nil && h.commands[strings.ToLower(cmd.Name())] && h.fired.CompareAndSwap(false, true) {
+		matches := h.commands[strings.ToLower(cmd.Name())]
+		if matches && len(h.scriptHashes) > 0 {
+			args := cmd.Args()
+			hash, ok := args[1].(string)
+			matches = ok && h.scriptHashes[hash]
+		}
+		if err == nil && matches && h.fired.CompareAndSwap(false, true) {
 			return errSyntheticResponseLoss
 		}
 		return err

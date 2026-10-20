@@ -103,17 +103,79 @@ partition decreases, and deterministic partial expansion reporting. The live
 Kafka topology-admin test verifies retention reconciliation, expansion of main/
 DLQ/all delay topics, and cross-process exclusion by the DLQ operator lease.
 
-P6.7.6 expands `transport/contracttest` with single-use settlement, stats state
-transitions, same-logical-name task/event isolation, complete DLQ purge/requeue,
-dedupe namespace/kind/publication-state checks, and scheduler-health checks.
-Memory and Redis run this suite by default; embedded NATS and live Kafka run it
-under `integration`. Subscriber retry isolation currently runs only for Memory;
-the durable drivers capability-skip that scenario and it remains an explicit
-release gate in `CONTRACT_TESTS.md`.
+P6.7.6 uses two reusable suites. `transport/contracttest` covers driver-boundary
+settlement, retry/DLQ transfer and administration, delay, fan-out/isolation,
+dedupe, stats, scheduler health, and malformed payloads. `eventbus/contracttest`
+covers exact retry bounds, retry-after, permanent failure, panic, timeout,
+malformed/wrong-route envelopes, graceful drain, and capability-gated forced
+redelivery through the public Bus. Memory and Redis/miniredis run by default;
+embedded NATS, live Redis, and live Kafka registrations are integration-tagged.
+Subscriber retry and DLQ-requeue isolation pass Memory, Redis, NATS, and Kafka.
+Redis, NATS, and Kafka pass the shared forced-redelivery case; Memory is
+durability-inapplicable. The embedded NATS harness uses a short broker AckWait
+and waits beyond it before starting the replacement consumer; that focused Bus
+suite passed ten consecutive runs on 2026-10-20.
+
+The transport suite also cancels retry and DLQ settlement before destination
+confirmation, verifies no destination state was accepted, closes the failed
+session, and proves the source redelivers and can settle successfully. This
+shared case passes Memory, Redis, NATS, and Kafka. Post-commit response-loss
+ambiguity is exercised through one capability-gated shared scenario with
+driver adapters for each broker boundary. Redis proves its atomic transfer
+committed one destination and removed the pending source before response loss.
+NATS proves stable transfer identity keeps one destination while the same source
+delivery remains pending until settlement retry. Kafka proves an ambiguous
+append followed by source redelivery can create the documented duplicate
+destination, then commits the source without loss. Memory is inapplicable
+because it has no broker response boundary.
+
+The transport suite forces one unsettled delivery to lose its consumer session,
+then receives the same logical message again and ACKs it. It compares the second
+delivery with the first delivery's exposed ID, type, payload, ordering key, and
+correlation header, requires a valid broker attempt, and requires final topology
+stats to return to zero. Memory restores session-owned in-flight state, Redis
+reclaims a stale pending entry, NATS waits beyond the configured AckWait, and
+Kafka replays the uncommitted group offset. Kafka may retain attempt `1` because
+the envelope itself was not retried; this does not weaken the at-least-once
+redelivery guarantee. All four drivers pass. Handlers must remain idempotent.
+
+The public Bus suite also forces five consecutive real-driver consume sessions
+to end and reconnect under supervisor control. It asserts that no two sessions
+overlap, samples goroutines only after each driver's `Consume` has returned and
+joined session-owned work, bounds first-to-last goroutine growth, then publishes,
+handles, settles, and drains normally through the recovered session. Redis,
+NATS, and Kafka pass this shared case; Memory is durability-inapplicable. Broker
+process restart loops remain production fault/soak evidence rather than part of
+this deterministic contract scenario.
+
+The transport suite runs one shared multi-instance delayed-scheduler ownership
+scenario. Redis forces the first instance's destination write to fail, verifies
+the delayed source remains durable, and lets the second instance atomically move
+it. NATS writes a live KV lease owned by the first instance, proves the successor
+cannot dispatch it before expiry, then reclaims and dispatches exactly once.
+Kafka lets the first scheduler group member fetch and exit without transfer or
+commit, then verifies a successor member receives the same source offset,
+transfers it, and commits. The suite consumes and ACKs every allowed ready copy
+and requires final stats to be zero. Redis, NATS, and Kafka pass; Memory is
+distributed-ownership-inapplicable.
+
+The capability-gated ordering scenario publishes eight messages with one
+ordering key, consumes with concurrency and prefetch greater than one, and
+requires each payload and key to arrive in publication order with no later
+same-key delivery admitted before the current delivery settles. Kafka passes
+this scenario; Memory, Redis, and NATS skip it because they do not advertise
+ordering. Kafka's guarantee remains scoped to one physical topic-partition:
+main, delay-tier, and subscriber-private topics are independent logs.
 
 Production-scale backlog and soak runs are not Go tests. Use the disposable
 fixture and guarded orchestrator documented in `PRODUCTION_SCALE.md`; never run
 the destructive scale matrix against shared developer brokers.
+
+On Ubuntu, validate the native Bash tooling without starting Docker workloads:
+
+```bash
+./eventbus/testdata/benchmark/test-scripts.sh
+```
 
 When running in the restricted Windows workspace, use a workspace-local build
 cache:

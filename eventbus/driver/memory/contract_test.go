@@ -24,12 +24,14 @@ func TestMemoryTransportContract(t *testing.T) {
 			return tr.(*memoryTransport).dispatchDue(ctx, now)
 		},
 		ExpireDedupe:               func(_ *testing.T, duration time.Duration) { time.Sleep(duration) },
-		PrepareUnsettledRedelivery: func(*testing.T, transport.Topology) {},
+		PrepareUnsettledRedelivery: memoryRedeliveryReady,
 		SubscriberRetryIsolation:   true,
 		SubscriberDLQIsolation:     true,
 		ReceiveWithin:              time.Second,
 	})
 }
+
+func memoryRedeliveryReady(*testing.T, transport.Transport, transport.Topology) {}
 
 func TestMemoryBusContract(t *testing.T) {
 	buscontract.Run(t, buscontract.Harness{

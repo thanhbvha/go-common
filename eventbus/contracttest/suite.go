@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +24,8 @@ type Harness struct {
 	DispatchDue                func(context.Context, transport.Transport, transport.Topology, time.Time) (int64, error)
 	PrepareUnsettledRedelivery func(*testing.T, transport.Topology)
 	DurableRedelivery          bool
+	RepeatedReconnect          bool
+	ReconnectSessionLifetime   time.Duration
 	ReceiveWithin              time.Duration
 }
 
@@ -242,6 +246,7 @@ func Run(t *testing.T, h Harness) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		registerCleanup(t, next, h.ReceiveWithin)
 		start(t, next)
 		if got := receive(t, attempts, h.ReceiveWithin); got < 1 {
 			t.Fatalf("redelivered handler attempt = %d, want a valid attempt", got)
@@ -249,6 +254,93 @@ func Run(t *testing.T, h Harness) {
 		waitStats(t, next, topo, h.ReceiveWithin, settled)
 		drain(t, next, h.ReceiveWithin)
 	})
+
+	t.Run("repeated_reconnect_joins_sessions_without_goroutine_growth", func(t *testing.T) {
+		if !h.RepeatedReconnect {
+			t.Skip("harness has no reconnect-capable durable session")
+		}
+		const reconnects = 5
+		lifetime := h.ReconnectSessionLifetime
+		if lifetime <= 0 {
+			lifetime = 25 * time.Millisecond
+		}
+		backend := &reconnectTransport{
+			Transport: h.New(t), forced: reconnects, lifetime: lifetime,
+			completed: make(chan int, reconnects),
+		}
+		topo := h.Topology(t.Name(), transport.TaskTopology)
+		handled := make(chan struct{}, 1)
+		bus, err := openTaskBus(backend, topo, eventbus.DefaultConfig(), nil, func(context.Context, eventbus.Job) error {
+			handled <- struct{}{}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		registerCleanup(t, bus, h.ReceiveWithin)
+		start(t, bus)
+		for want := 1; want <= reconnects; want++ {
+			if got := receive(t, backend.completed, h.ReceiveWithin); got != want {
+				t.Fatalf("completed reconnect sessions = %d, want %d", got, want)
+			}
+		}
+		if backend.maxActive.Load() != 1 {
+			t.Fatalf("overlapping consume sessions = %d, want 1", backend.maxActive.Load())
+		}
+		if growth := backend.goroutineGrowth(); growth > 8 {
+			t.Fatalf("goroutines grew by %d across repeated reconnects", growth)
+		}
+		mustEnqueue(t, bus, topo.JobType)
+		receive(t, handled, h.ReceiveWithin)
+		drain(t, bus, h.ReceiveWithin)
+	})
+}
+
+type reconnectTransport struct {
+	transport.Transport
+	forced   int32
+	lifetime time.Duration
+
+	calls     atomic.Int32
+	active    atomic.Int32
+	maxActive atomic.Int32
+	completed chan int
+
+	mu               sync.Mutex
+	goroutineSamples []int
+}
+
+func (t *reconnectTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
+	call := t.calls.Add(1)
+	if call > t.forced {
+		return t.Transport.Consume(ctx, sub, deliver)
+	}
+	active := t.active.Add(1)
+	for current := t.maxActive.Load(); active > current && !t.maxActive.CompareAndSwap(current, active); current = t.maxActive.Load() {
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(t.lifetime, cancel)
+	err := t.Transport.Consume(sessionCtx, sub, deliver)
+	timer.Stop()
+	cancel()
+	t.active.Add(-1)
+	t.mu.Lock()
+	t.goroutineSamples = append(t.goroutineSamples, runtime.NumGoroutine())
+	t.mu.Unlock()
+	t.completed <- int(call)
+	if err == nil || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("contract reconnect session %d ended", call)
+	}
+	return err
+}
+
+func (t *reconnectTransport) goroutineGrowth() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.goroutineSamples) < 2 {
+		return 0
+	}
+	return t.goroutineSamples[len(t.goroutineSamples)-1] - t.goroutineSamples[0]
 }
 
 func newTaskBus(t *testing.T, h Harness, cfg eventbus.Config, option eventbus.TopologyOption, handler eventbus.Handler) (transport.Transport, eventbus.Bus, transport.Topology) {
@@ -259,7 +351,20 @@ func newTaskBus(t *testing.T, h Harness, cfg eventbus.Config, option eventbus.To
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerCleanup(t, bus, h.ReceiveWithin)
 	return tr, bus, topo
+}
+
+func registerCleanup(t *testing.T, bus eventbus.Bus, within time.Duration) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), within)
+		defer cancel()
+		err := bus.Close(ctx)
+		if err != nil && !errors.Is(err, eventbus.ErrBusClosed) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("contract Bus cleanup: %v", err)
+		}
+	})
 }
 
 func openTaskBus(tr transport.Transport, topo transport.Topology, cfg eventbus.Config, option eventbus.TopologyOption, handler eventbus.Handler) (eventbus.Bus, error) {
