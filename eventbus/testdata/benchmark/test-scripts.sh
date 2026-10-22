@@ -17,6 +17,8 @@ if $runner --driver kafka --duration 2h --rate 1000000 --validate-only >/dev/nul
 if $runner --driver kafka --duration 1m --rate 100 --kafka-second-worker-after 1m --validate-only >/dev/null 2>&1; then echo "fault at duration boundary accepted" >&2; exit 1; fi
 if $runner --driver kafka --duration 1m --rate 100 --broker-restart-every 10s --validate-only >/dev/null 2>&1; then echo "restart cadence without initial restart accepted" >&2; exit 1; fi
 $runner --driver kafka --duration 2h --rate 100 --broker-restart-after 30m --broker-restart-every 30m --kafka-second-worker-after 15m --validate-only >/dev/null
+$runner --driver nats --sample-topology false --validate-only >/dev/null
+if $runner --driver nats --sample-topology maybe --validate-only >/dev/null 2>&1; then echo "invalid topology sampling flag accepted" >&2; exit 1; fi
 
 matrix_result=$($matrix --drivers redis,nats --workloads immediate,retry10 --payload-kb 1,10 --concurrency 10,100 --messages 100000,1000000 --validate-only)
 jq -e '.drivers|length==2' <<<"$matrix_result" >/dev/null

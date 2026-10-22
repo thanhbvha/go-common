@@ -15,6 +15,7 @@ rate=0
 delay="5s"
 timeout_duration="6h"
 sample_every="5s"
+sample_topology=true
 broker_restart_after="0s"
 broker_restart_every="0s"
 kafka_second_worker_after="0s"
@@ -34,6 +35,7 @@ Usage: run-production-scale.sh --driver redis|nats|kafka [options]
   --preload
   --duration 2h --rate 5000
   --delay 5s --timeout 6h --sample-every 5s
+  --sample-topology true|false
   --broker-restart-after 30m
   --broker-restart-every 30m
   --kafka-second-worker-after 10m
@@ -55,6 +57,7 @@ while (($#)); do
     --delay) delay=${2:?}; shift 2 ;;
     --timeout) timeout_duration=${2:?}; shift 2 ;;
     --sample-every) sample_every=${2:?}; shift 2 ;;
+    --sample-topology) sample_topology=${2:?}; shift 2 ;;
     --broker-restart-after) broker_restart_after=${2:?}; shift 2 ;;
     --broker-restart-every) broker_restart_every=${2:?}; shift 2 ;;
     --kafka-second-worker-after) kafka_second_worker_after=${2:?}; shift 2 ;;
@@ -104,6 +107,7 @@ restart_requested=$(python3 -c "print('true' if float('$restart_s') > 0 else 'fa
 second_worker_requested=$(python3 -c "print('true' if float('$second_worker_s') > 0 else 'false')")
 
 [[ $cleanup_self_test == true || $evidence_self_test == true ]] || in_values "$driver" redis nats kafka || { echo "driver must be redis, nats, or kafka" >&2; exit 2; }
+in_values "$sample_topology" true false || { echo "sample-topology must be true or false" >&2; exit 2; }
 in_values "$workload" immediate delayed retry10 retry50 || { echo "unsupported workload: $workload" >&2; exit 2; }
 in_values "$messages" 100000 1000000 || { echo "messages must be 100000 or 1000000" >&2; exit 2; }
 in_values "$concurrency" 1 10 100 || { echo "concurrency must be 1, 10, or 100" >&2; exit 2; }
@@ -138,13 +142,14 @@ fi
 
 validate_evidence() {
   local benchmark_samples=$1 broker_samples=$2 require_preload=$3
-  jq -e -s 'any(.[]; .type=="sample" and .phase=="measurement")' "$benchmark_samples" >/dev/null
+  [[ -s $benchmark_samples && -s $broker_samples ]] || return 1
+  jq -e -s 'any(.[]; .type=="sample" and .phase=="measurement")' "$benchmark_samples" >/dev/null || return 1
   if [[ $require_preload == true ]]; then
-    jq -e -s 'any(.[]; .type=="sample" and .phase=="preload")' "$benchmark_samples" >/dev/null
+    jq -e -s 'any(.[]; .type=="sample" and .phase=="preload")' "$benchmark_samples" >/dev/null || return 1
   fi
-  jq -e -s 'length>0 and all(.[]; (.phase=="preload" or .phase=="measurement") and (.named_volume_allocated_bytes|type)=="number" and .named_volume_allocated_bytes>=0) and any(.[]; .phase=="measurement")' "$broker_samples" >/dev/null
+  jq -e -s 'length>0 and all(.[]; (.phase=="preload" or .phase=="measurement") and (.named_volume_allocated_bytes|type)=="number" and .named_volume_allocated_bytes>=0) and any(.[]; .phase=="measurement")' "$broker_samples" >/dev/null || return 1
   if [[ $require_preload == true ]]; then
-    jq -e -s 'any(.[]; .phase=="preload")' "$broker_samples" >/dev/null
+    jq -e -s 'any(.[]; .phase=="preload")' "$broker_samples" >/dev/null || return 1
   fi
 }
 
@@ -163,6 +168,11 @@ if [[ $evidence_self_test == true ]]; then
   printf '%s\n' '{"phase":"","named_volume_allocated_bytes":123}' >"$evidence_dir/invalid-phase.jsonl"
   if validate_evidence "$evidence_dir/benchmark.jsonl" "$evidence_dir/invalid-phase.jsonl" true 2>/dev/null; then
     echo "invalid broker phase accepted" >&2
+    exit 1
+  fi
+  printf '%s\n' '{"phase":"preload","named_volume_allocated_bytes":123}' >"$evidence_dir/no-measurement-broker.jsonl"
+  if validate_evidence "$evidence_dir/benchmark.jsonl" "$evidence_dir/no-measurement-broker.jsonl" true 2>/dev/null; then
+    echo "missing measurement broker evidence accepted" >&2
     exit 1
   fi
   echo "production evidence validation self-test passed"
@@ -195,6 +205,8 @@ broker_samples_path="$artifact_dir/broker-samples.jsonl"
 faults_path="$artifact_dir/fault-actions.jsonl"
 stdout_path="$artifact_dir/result.json"
 stderr_path="$artifact_dir/benchmark.stderr.log"
+heap_profile_path="$artifact_dir/heap.pprof"
+goroutine_profile_path="$artifact_dir/goroutines.txt"
 broker_inspect_path="$artifact_dir/broker-inspect.json"
 broker_logs_path="$artifact_dir/broker.log"
 summary_path="$artifact_dir/summary.json"
@@ -218,7 +230,7 @@ case "$driver" in
   nats) driver_args=(--nats-urls "nats://127.0.0.1:$nats_port") ;;
   kafka) driver_args=(--kafka-brokers "127.0.0.1:$kafka_port"); data_path="/var/lib/kafka/data" ;;
 esac
-benchmark_args=(--driver "$driver" --namespace "$namespace" --payload-kb "$payload_kb" --concurrency "$concurrency" --workload "$workload" --messages "$messages" --delay "$(duration_arg "$delay")" --timeout "$(duration_arg "$timeout_duration")" --sample-every "$(duration_arg "$sample_every")" --samples-jsonl "$samples_path" "${driver_args[@]}")
+benchmark_args=(--driver "$driver" --namespace "$namespace" --payload-kb "$payload_kb" --concurrency "$concurrency" --workload "$workload" --messages "$messages" --delay "$(duration_arg "$delay")" --timeout "$(duration_arg "$timeout_duration")" --sample-every "$(duration_arg "$sample_every")" "--sample-topology=$sample_topology" --samples-jsonl "$samples_path" --heap-profile "$heap_profile_path" --goroutine-profile "$goroutine_profile_path" "${driver_args[@]}")
 [[ $preload == true ]] && benchmark_args+=(--preload)
 [[ $duration_mode == true ]] && benchmark_args+=(--duration "$(duration_arg "$duration")" --rate "$rate")
 [[ $second_worker_requested == true ]] && benchmark_args+=(--second-worker-after "$(duration_arg "$kafka_second_worker_after")")
@@ -226,10 +238,11 @@ benchmark_args=(--driver "$driver" --namespace "$namespace" --payload-kb "$paylo
 jq -n --arg run_id "$run_id" --arg project "$project" --arg compose "$compose_file" --arg driver "$driver" --arg workload "$workload" --arg namespace "$namespace" \
   --argjson messages "$messages" --argjson concurrency "$concurrency" --argjson payload_kb "$payload_kb" --argjson preload "$preload" --argjson rate "$rate" --arg duration "$duration" \
   --argjson kafka_partitions "$([[ $driver == kafka ]] && echo "$concurrency" || echo 0)" \
+  --argjson kafka_delay_batch_size "$([[ $driver == kafka ]] && echo 1000 || echo 0)" \
   --argjson nats_delay_batch_size "$([[ $driver == nats ]] && echo 1000 || echo 0)" \
   --argjson redis_delay_batch_size "$([[ $driver == redis ]] && echo 1000 || echo 0)" \
-  --arg broker_restart_after "$broker_restart_after" --arg broker_restart_every "$broker_restart_every" \
-  '{schema_version:2,run_id:$run_id,compose_project:$project,compose_file:$compose,driver:$driver,workload:$workload,messages:$messages,concurrency:$concurrency,payload_kb:$payload_kb,preload:$preload,rate:$rate,duration:$duration,namespace:$namespace,kafka_partitions:$kafka_partitions,nats_delay_batch_size:$nats_delay_batch_size,redis_delay_batch_size:$redis_delay_batch_size,broker_restart_after:$broker_restart_after,broker_restart_every:$broker_restart_every,synthetic_data:true,shared_broker_allowed:false}' >"$manifest_path"
+  --arg broker_restart_after "$broker_restart_after" --arg broker_restart_every "$broker_restart_every" --argjson sample_topology "$sample_topology" \
+  '{schema_version:2,run_id:$run_id,compose_project:$project,compose_file:$compose,driver:$driver,workload:$workload,messages:$messages,concurrency:$concurrency,payload_kb:$payload_kb,preload:$preload,rate:$rate,duration:$duration,namespace:$namespace,kafka_partitions:$kafka_partitions,kafka_delay_batch_size:$kafka_delay_batch_size,nats_delay_batch_size:$nats_delay_batch_size,redis_delay_batch_size:$redis_delay_batch_size,broker_restart_after:$broker_restart_after,broker_restart_every:$broker_restart_every,topology_sampling:$sample_topology,synthetic_data:true,shared_broker_allowed:false}' >"$manifest_path"
 
 process_pid=""; container_id=""; restart_issued=false; restart_count=0; next_restart_s=$restart_s; process_forced_stop=false; cleanup_verified=false; run_error=""
 cleanup() {
@@ -320,13 +333,18 @@ done
 wait "$process_pid" || { code=$?; process_pid=""; run_error="benchmark exited with code $code; see $stderr_path"; exit 1; }
 process_pid=""
 jq -e . "$stdout_path" >/dev/null
+[[ -s $heap_profile_path ]] || { run_error="post-drain heap profile is missing"; exit 1; }
+[[ -s $goroutine_profile_path ]] || { run_error="post-drain goroutine profile is missing"; exit 1; }
 validate_evidence "$samples_path" "$broker_samples_path" "$preload" || { run_error="measurement phase or named-volume evidence validation failed"; exit 1; }
-jq -e --arg driver "$driver" --arg namespace "$namespace" '
-  .driver==$driver and .namespace==$namespace and .final_stats_available==true and
+jq -e --arg driver "$driver" --arg namespace "$namespace" --argjson sample_topology "$sample_topology" '
+  .driver==$driver and .namespace==$namespace and .topology_sampling==$sample_topology and .final_stats_available==true and
+  (.post_drain_heap_bytes|type)=="number" and .post_drain_heap_bytes>=0 and
+  (.post_drain_goroutines|type)=="number" and .post_drain_goroutines>0 and
   (.expected_retries == (.retry_candidates_failed_at_attempt_one + .retry_first_seen_after_attempt_one)) and
   ((.primary_worker_handled + .second_worker_handled) == (.messages + .synthetic_retry_failures + .duplicates)) and
   .final_pending==0 and .final_delayed==0 and .final_in_flight==0 and .final_dlq==0 and .final_lag==0
 ' "$stdout_path" >/dev/null || { run_error="result identity, retry accounting, handler accounting, or final settled-state validation failed"; exit 1; }
+if [[ $driver == kafka ]]; then jq -e '.kafka_delay_batch_size==1000' "$stdout_path" >/dev/null || { run_error="Kafka benchmark delay batch size was not recorded as 1000"; exit 1; }; fi
 if [[ $driver == nats ]]; then jq -e '.nats_delay_batch_size==1000' "$stdout_path" >/dev/null || { run_error="NATS benchmark delay batch size was not recorded as 1000"; exit 1; }; fi
 if [[ $driver == redis ]]; then jq -e '.redis_delay_batch_size==1000' "$stdout_path" >/dev/null || { run_error="Redis benchmark delay batch size was not recorded as 1000"; exit 1; }; fi
 if [[ $second_worker_requested == true ]]; then jq -e '.second_worker_started==true and .second_worker_active_work==true and .second_worker_handled>0' "$stdout_path" >/dev/null || { run_error="Kafka second worker did not process work after joining the active group"; exit 1; }; fi

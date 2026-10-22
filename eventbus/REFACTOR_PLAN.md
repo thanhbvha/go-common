@@ -977,8 +977,129 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     and final state, 4,354.52 msg/s measurement throughput, 14 preload samples,
     23 measurement samples, 18 numeric volume samples, and verified cleanup. Its
     83,082,531-byte volume maximum predates allocated-block sampling and is
-    historical apparent size. This closes phase-correct evidence collection, not
-    the remaining matrix or soak gates.
+    historical apparent size. A final Redis 100k immediate/preload allocated-
+    volume rerun then completed with the same 1 KiB/concurrency-100 dimensions
+    and `redis_delay_batch_size=1000`. It completed 100,000 unique messages and
+    exactly 100,000 handler invocations with zero duplicates/final obligations at
+    4,569.01 msg/s over 21.89 seconds. Preload reached exactly 100,000 pending/lag.
+    Peak heap was 4,722,304 bytes, post-drain heap was 2,785,328 bytes, peak
+    goroutines were 107, and five expected lifecycle goroutines remained after
+    drain. Six `du_allocated_1k_blocks` samples peaked at 56,315,904 bytes and
+    cleanup was verified. Post-drain profiles showed no retained backlog owner or
+    blocked goroutine. This supersedes the historical apparent-size disk claim
+    and closes the Redis immediate/preload 100k cell. The canonical matrix is now
+    17/24 complete. Seven 100k cells remain open: Redis delayed/retry10, NATS
+    immediate/retry10, and Kafka immediate/delayed/retry10, before
+    payload/concurrency expansion.
+    Redis 100k delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, five-second delay, and `redis_delay_batch_size=1000`. It
+    completed 100,000 unique messages and exactly 100,000 handler invocations
+    with zero duplicates/final obligations at 1,075.03 msg/s over 93.02 seconds.
+    Preload ended at 92,000 delayed plus 8,000 pending/lag; measurement samples
+    showed delayed work falling from 87,000 to 2,000 as completions rose from
+    13,000 to 98,000, proving scheduler transfer. Peak heap was 4,786,624 bytes,
+    post-drain heap was 2,833,200 bytes, peak goroutines were 107, and five
+    expected lifecycle goroutines remained. Eighteen allocated-volume samples
+    peaked at 85,630,976 bytes and cleanup was verified. Post-drain profiles had
+    no retained delayed backlog owner or blocked stack. The canonical matrix is
+    now 18/24 complete. Six 100k cells remain: Redis retry10, NATS
+    immediate/retry10, and Kafka immediate/delayed/retry10.
+    Redis 100k retry10 evidence then completed with 1 KiB payloads, concurrency
+    100, and `redis_delay_batch_size=1000`. It completed 100,000 unique messages,
+    all 10,000 expected retry candidates failed exactly once at attempt one, and
+    total handler accounting was exactly 110,000 invocations. There were zero
+    duplicates/final obligations and throughput was 4,315.18 msg/s over 23.17
+    seconds; sampled pending/lag stayed below 629. Peak heap was 4,508,648 bytes,
+    post-drain heap was 2,635,776 bytes, peak goroutines were 107, and five
+    expected lifecycle goroutines remained. Four allocated-volume samples peaked
+    at 59,424,768 bytes and cleanup was verified. Profiles showed no retained
+    retry backlog owner or blocked stack. Redis now has all four canonical
+    workloads closed at both 100k and 1m. The canonical matrix is 19/24 complete;
+    five NATS/Kafka 100k cells remain open.
+    NATS 100k immediate/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, and `nats_delay_batch_size=1000`. It completed 100,000
+    unique messages and exactly 100,000 handler invocations with zero
+    duplicates/final obligations at 25,427.32 msg/s over 3.93 seconds. Preload
+    reached exactly 100,000 pending/lag. Peak heap was 5,804,128 bytes,
+    post-drain heap was 3,123,424 bytes, peak goroutines were 115, and eight
+    expected NATS lifecycle goroutines remained. Eight allocated-volume samples,
+    including two measurement samples, peaked at 152,023,040 bytes and cleanup
+    was verified. No blocked KV watcher appeared in the goroutine profile. An
+    earlier correctness-pass run drained before its five-second broker sampler
+    captured measurement volume and exposed a Bash evidence-validator bug: a
+    later successful preload assertion overwrote the failed measurement-volume
+    assertion. Each assertion now returns fail-closed, and Bash/PowerShell
+    self-tests reject missing measurement broker evidence. The canonical matrix
+    is 20/24 complete; NATS retry10 and Kafka immediate/delayed/retry10 remain.
+    NATS 100k retry10 evidence then completed with 1 KiB payloads, concurrency
+    100, and `nats_delay_batch_size=1000`. It completed 100,000 unique messages,
+    all 10,000 expected retry candidates failed exactly once at attempt one, and
+    total handler accounting was exactly 110,000 invocations. There were zero
+    duplicates/final obligations and throughput was 6,571.82 msg/s over 15.22
+    seconds. Periodic delayed obligations stayed between 673 and 731 while
+    sampled lag stayed at or below five. Peak heap was 10,395,232 bytes,
+    post-drain heap was 2,994,912 bytes, peak goroutines were 113, and eight
+    expected NATS lifecycle goroutines remained. Eight measurement-phase
+    allocated-volume samples peaked at 207,540,224 bytes and cleanup was
+    verified. Profiles showed no retained retry backlog owner or blocked KV
+    watcher. NATS now has all four canonical workloads closed at both 100k and
+    1m. The canonical matrix is 21/24 complete; Kafka immediate/delayed/retry10
+    at 100k remain.
+    Kafka 100k immediate/preload evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, and `kafka_delay_batch_size=1000`. It completed
+    100,000 unique messages and exactly 100,000 handler invocations with zero
+    duplicates/final obligations at 4,848.85 msg/s over 20.62 measurement
+    seconds. All 46 topology samples were available, split between 25 preload
+    and 21 measurement samples. Peak heap was 286,731,512 bytes and returned to
+    3,417,848 bytes after drain; peak goroutines were 148 and 36 expected Kafka
+    lifecycle goroutines remained before transport close. Profiles showed no
+    blocked application channel or unbounded worker set. All 26 broker samples
+    used `du_allocated_1k_blocks`, allocated Kafka data peaked at 77,778,944
+    bytes, and cleanup was verified. An initial cold-fixture attempt failed
+    before workload execution because provisioning the main, DLQ, and three
+    delay topics with 100 partitions exceeded the fixed 20-second startup
+    deadline. The benchmark runner now allows Kafka two minutes for topology
+    provisioning while other drivers retain 20 seconds; reusable library/demo
+    defaults are unchanged. The canonical matrix is 22/24 complete; Kafka
+    delayed and retry10 at 100k remain.
+    Kafka 100k delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, a five-second delay, and
+    `kafka_delay_batch_size=1000`. It completed 100,000 unique messages and
+    exactly 100,000 handler invocations with zero duplicates/final obligations
+    at 204.75 msg/s over 488.41 measurement seconds. Preload ended at 97,182
+    delayed plus 2,818 pending/lag; the first measurement sample completed the
+    ready 2,818 while 97,182 remained delayed, and all 511 topology samples were
+    available. Measurement heap averaged 126.48 MB, peaked at 180.76 MB, ended
+    at 7.50 MB, and returned to 3.54 MB after post-drain GC. Quarter averages
+    were 113.63/118.44/136.93/136.84 MB while average delayed work fell from
+    85,084 to 12,533. Peak goroutines were 153 and 35 expected Kafka lifecycle
+    goroutines remained before transport close. Profiles showed no retained
+    backlog owner, blocked application channel, or unbounded worker set. All 241
+    broker samples used `du_allocated_1k_blocks`; allocated Kafka data
+    peaked/finalized at 156,930,048 bytes, broker logs were clean, and cleanup
+    was verified. Throughput closely matches the accepted Kafka 1m delayed rate
+    of 206.98 msg/s, confirming a stable scheduler ceiling that remains a
+    production tuning concern. The canonical matrix is 23/24 complete; only
+    Kafka retry10 at 100k remains.
+    Kafka 100k retry10 evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, and `kafka_delay_batch_size=1000`. It completed
+    100,000 unique messages with all 10,000 expected retry candidates failing
+    exactly once at attempt one, no candidate first seen after attempt one,
+    exactly 110,000 handler invocations, and zero duplicates/final obligations
+    at 5,157.48 msg/s over 19.39 seconds. All 20 topology samples were available
+    and max sampled pending/lag was 898. Sampled heap averaged 5.02 MB, peaked at
+    7.61 MB, ended at 4.46 MB, and returned to 3.42 MB after post-drain GC; four
+    equal-window averages were 5.85/4.58/5.07/4.56 MB. Peak goroutines were 155
+    and 33 expected Kafka lifecycle goroutines remained before transport close.
+    Profiles showed no retained retry owner, blocked application channel, or
+    unbounded worker set. All 14 broker samples used
+    `du_allocated_1k_blocks`; allocated Kafka data peaked/finalized at 82,849,792
+    bytes, broker logs were clean, and cleanup was verified. This closes the
+    final canonical cell: the 24-cell Redis/NATS/Kafka x
+    immediate/delayed/retry10/retry50 x 100k/1m matrix is complete at the
+    1 KiB/concurrency-100 dimension. P6.7.6 remains `[~]` pending full evidence
+    review, PowerShell/Windows runtime verification, immutable Compose image
+    digest pinning, and any explicitly required payload/concurrency expansion.
     Redis 1m immediate/preload allocated-volume evidence then completed on the
     disposable 7.4.1 fixture with 1 KiB payloads and concurrency 100: 1,000,000
     unique messages, zero duplicates/final obligations, 4,712.62 msg/s over
@@ -992,20 +1113,118 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     the prior run remains historical performance evidence.
     The Redis immediate/preload 1m cell is closed; other workloads and drivers
     remain open.
-    NATS 100k delayed/preload evidence then completed with 1 KiB payloads,
-    concurrency 100, requested 5-second delay, and an explicitly recorded
-    `nats_delay_batch_size=1000`, the validated driver maximum. It completed
-    100,000 unique messages with zero duplicates/final obligations at 1,127.80
-    msg/s over 88.67 measurement seconds. The first measurement sample showed
-    14,000 completed and 86,000 delayed; sampled maxima were 88,000 delayed and
-    12,000 pending. Peak high-frequency heap was 97,473,328 bytes, peak
-    goroutines 117, and verified cleanup. Its 396,737,438-byte JetStream value
-    predates allocated-block sampling and is historical apparent size. An initial
+    Redis 1m delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, requested five-second delay, and
+    `redis_delay_batch_size=1000`. It completed 1,000,000 unique messages with
+    zero duplicates/final obligations at 1,100.91 msg/s over 908.34 seconds.
+    All 202 periodic topology samples were available; sampled maxima were 908,000
+    delayed and 92,000 pending/lag. Measurement sampled heap averaged 9.22 MB,
+    peaked at 12.08 MB, and ended at 10.80 MB; high-frequency peak was 12.43 MB,
+    peak goroutines were 107, and final sampled goroutines were six. Allocated
+    Redis data peaked at 884,355,072 bytes and ended at 230,834,176 bytes across
+    164 samples; cleanup was verified. Staged latency includes scheduler and
+    backlog wait. The Redis delayed/preload 1m cell is closed; Redis retry and
+    remaining driver/workload dimensions remain open.
+    Redis 1m retry50 evidence then completed with 1 KiB payloads, concurrency
+    100, and `redis_delay_batch_size=1000`. It completed 1,000,000 unique messages,
+    all 500,000 expected retry failures, and exactly 1,500,000 handler invocations
+    with zero duplicates/final obligations at 657.87 msg/s over 1,520.07 seconds.
+    All 305 periodic topology samples were available; sampled maxima were 899
+    pending, 900 delayed, three in-flight, and 901 lag. Sampled heap averaged
+    9.57 MB, peaked at 12.60 MB, and ended at 10.74 MB; high-frequency peak was
+    12.64 MB, peak goroutines were 107, and final sampled goroutines were six.
+    Allocated Redis data peaked at 549,867,520 bytes and ended at 359,661,568
+    bytes across 248 samples; cleanup was verified. The Redis retry50 1m cell is
+    closed; Redis retry10 and remaining driver/workload dimensions remain open.
+    Redis 1m retry10 evidence then completed with 1 KiB payloads, concurrency
+    100, and `redis_delay_batch_size=1000`. It completed 1,000,000 unique messages,
+    all 100,000 expected retry failures, and exactly 1,100,000 handler invocations
+    with zero duplicates/final obligations at 3,256.32 msg/s over 307.09 seconds.
+    All 62 periodic topology samples were available; sampled maxima were 898
+    pending, 217 delayed, three in-flight, and 900 lag. Sampled heap averaged
+    8.99 MB, peaked at 11.42 MB, and ended at 6.89 MB; high-frequency peak was
+    12.23 MB, quarter-window averages declined from 9.30/9.39 MB to 8.72/8.55 MB,
+    peak goroutines were 107, and final sampled goroutines were six. Allocated
+    Redis data peaked/finalized at 470,380,544 bytes across 51 samples; cleanup
+    was verified. This closes all four Redis 1m workloads only at the canonical
+    1 KiB/concurrency-100 dimension; Redis 100k and payload/concurrency expansion
+    remain open.
+    The final NATS 100k delayed/preload allocated-volume rerun completed with
+    1 KiB payloads, concurrency 100, requested 5-second delay, and explicitly
+    recorded `nats_delay_batch_size=1000`. It completed 100,000 unique messages
+    with zero duplicates/final obligations at 1,144.94 msg/s over 87.34 seconds.
+    The first measurement sample showed 15,000 completed and 85,000 delayed;
+    sampled maxima were 87,708 delayed during preload, 85,000 during measurement,
+    and 12,357 pending during preload. All 34 broker samples used allocated blocks;
+    JetStream peaked/finalized at 391,983,104 bytes. Measurement sampled heap
+    averaged 35.54 MB, peaked at 62.49 MB, and ended at 34.33 MB; high-frequency
+    peak was 118.49 MB and peak goroutines were 121. Staged latency includes
+    scheduler and backlog wait. An initial
     diagnostic run inherited demo batch 100 and
     took 987.67 seconds (~101.25 msg/s), exposing a benchmark configuration
     ceiling. The benchmark override is now recorded and validated in result and
-    manifest while library/demo defaults remain unchanged. The NATS delayed 100k
-    cell is closed.
+    manifest while library/demo defaults remain unchanged. The earlier artifact
+    remains historical performance evidence, while its apparent-size volume claim
+    is superseded. The NATS delayed 100k cell is closed.
+    NATS 1m delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, requested five-second delay, and `nats_delay_batch_size=1000`.
+    It completed 1,000,000 unique messages with zero duplicates/final obligations
+    at 341.84 msg/s over 2,925.38 seconds. Periodic topology sampling was
+    explicitly disabled because exact NATS delayed stats enumerate live KV keys;
+    repeated 1m-key scans in two diagnostics distorted scheduler throughput and
+    resource measurements. Resource/broker sampling continued and final exact
+    stats remained mandatory. Measurement sampled heap averaged 155.82 MB,
+    peaked at 307.33 MB, and ended at 186.94 MB; high-frequency peak was 386.82
+    MB, peak goroutines 163, and final sampled goroutines 61. Allocated JetStream
+    data peaked at 2,641,719,296 bytes and ended at 2,192,113,664 bytes across
+    105 samples; cleanup was verified. The observed 1m throughput records
+    nonlinear scheduler/storage cost and remains a production tuning concern.
+    The NATS delayed/preload 1m cell is closed.
+    NATS 1m immediate/preload evidence then completed with 1 KiB payloads,
+    concurrency 100, and `nats_delay_batch_size=1000` recorded for harness
+    identity. It completed 1,000,000 unique messages with zero duplicates/final
+    obligations at 32,322.30 msg/s over 30.94 measurement seconds. All 32 topology
+    samples were available. Preload ended at 1,000,000 pending/lag; the first
+    measurement sample had 159,894 completed, 840,028 pending, 31 in-flight, and
+    840,059 lag. Measurement heap averaged 11.36 MB, peaked at 13.53 MB, and ended
+    at 9.40 MB; quarter-window averages were 9.92/11.38/12.52/10.90 MB. Peak
+    goroutines were 120 and final sampled goroutines were nine. Allocated
+    JetStream data peaked/finalized at 1,520,283,648 bytes across 26 samples,
+    final container memory was about 404.7 MiB, and cleanup was verified. The fast
+    drain yielded seven measurement resource and four measurement broker samples;
+    all evidence checks passed. The NATS immediate/preload 1m cell is closed;
+    retry10/retry50 and remaining dimensions remain open.
+    NATS 1m retry10 evidence then completed with 1 KiB payloads, concurrency 100,
+    and `nats_delay_batch_size=1000`. It completed 1,000,000 unique messages, all
+    100,000 expected retry failures, and exactly 1,100,000 handler invocations
+    with zero duplicates/final obligations at 6,717.80 msg/s over 148.86 seconds.
+    Twenty-nine of 30 topology samples were available; one transient read at 45
+    seconds was unavailable, while subsequent and final exact stats passed.
+    Sampled maxima were one pending, 742 delayed, five in-flight, and five lag.
+    Sampled heap averaged 33.80 MB, peaked at 71.70 MB, and ended at 49.54 MB;
+    high-frequency peak was 76.08 MB. Five equal time-window averages rose from
+    10.45 to 55.33 MB during the continuous high-allocation finite run, so this
+    cell proves a bounded peak rather than a standalone long-soak plateau. Peak
+    goroutines were 128 and final sampled goroutines were 24. Allocated JetStream
+    data peaked/finalized at 1,844,441,088 bytes across 25 samples, final container
+    memory was about 1.21 GiB, and cleanup was verified. The NATS retry10 1m cell
+    is closed with its resource caveat recorded.
+    NATS 1m retry50 evidence then completed with 1 KiB payloads, concurrency 100,
+    and `nats_delay_batch_size=1000`. It completed 1,000,000 unique messages, all
+    500,000 expected retry failures, and exactly 1,500,000 handler invocations
+    with zero duplicates/final obligations at 1,732.52 msg/s over 577.19 seconds.
+    All 58 topology samples were available. Peak heap was 23,705,176 bytes and
+    peak goroutines were 113; post-drain heap was 6,852,560 bytes and post-drain
+    goroutines were eight. Allocated JetStream data peaked at 3,065,737,216 bytes
+    across 53 samples and cleanup was verified. Earlier retry50 diagnostics
+    retained roughly 263-293 MB and 102-120 goroutines after drain. Heap and
+    goroutine profiles traced the retention to NATS KV watcher callbacks blocked
+    at `kv.go:1082`. Scheduler cursor recovery, slot dispatch, legacy migration,
+    topology delayed counts, and subscriber retry-lane inspection now use bounded
+    ephemeral pull snapshots instead of callback watchers. The accepted 1m
+    goroutine profile has no blocked watcher stack. All four NATS 1m workloads are
+    closed only at the canonical 1 KiB/concurrency-100 dimension; remaining 100k
+    and payload/concurrency dimensions remain open.
     Kafka 100k retry50 evidence completed with 1 KiB payloads, concurrency and
     partitions 100, and a second worker joining after five seconds. It completed
     100,000 unique messages with zero duplicates/final obligations and exactly
@@ -1021,6 +1240,61 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     runners now record allocated `du -sk` blocks under explicit schema fields.
     Earlier Redis/NATS volume values therefore require reruns before allocated-
     disk claims. The selected Kafka cell is closed.
+    Kafka 1m retry10 evidence then completed with 1 KiB payloads and
+    concurrency/partitions 100. It completed 1,000,000 unique messages, exactly
+    100,000 synthetic retry failures and 1,100,000 handler invocations, zero
+    duplicates/final obligations, and 4,772.28 unique msg/s over 209.54 seconds.
+    All 42 topology samples were available and max sampled pending/lag was 295.
+    Sampled heap averaged 10.30 MB, peaked at 13.71 MB, and ended at 10.17 MB;
+    high-frequency peak was 14.97 MB. Four equal-window averages were
+    10.71/9.45/10.42/10.67 MB, peak goroutines were 155, and final sampled
+    goroutines were 34. Allocated Kafka data peaked/finalized at 565,137,408
+    bytes across 36 samples; cleanup was verified. The Kafka retry10 1m cell is
+    closed.
+    Kafka 1m delayed/preload evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, requested five-second delay, and a benchmark-only
+    `kafka_delay_batch_size=1000` override that is recorded and validated while
+    library/demo defaults remain 100. It completed 1,000,000 unique messages with
+    zero duplicates/final obligations at 206.98 msg/s over 4,831.38 seconds. All
+    1,008 topology samples were available; sampled maxima were 961,238 delayed and
+    38,762 pending/lag. Measurement heap averaged 334.20 MB, peaked at 452.22 MB,
+    and returned to 8.25 MB after drain; high-frequency peak was 499.37 MB.
+    Quarter averages were 328.14/350.92/343.65/314.08 MB with near-flat maxima,
+    showing backlog-proportional working set rather than retained growth. Peak
+    goroutines were 154 and final sampled goroutines were 36. Allocated Kafka data
+    peaked at 885,276,672 bytes and ended at 848,666,624 bytes across 819 samples;
+    cleanup was verified. The Kafka delayed/preload 1m cell is closed with its
+    nonlinear scheduler throughput and client heap documented as production
+    tuning concerns.
+    Kafka 1m retry50 evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, and `kafka_delay_batch_size=1000`. It completed
+    1,000,000 unique messages, all 500,000 expected retry failures, and exactly
+    1,500,000 handler invocations with zero duplicates/final obligations at
+    4,124.16 msg/s over 242.47 seconds. All 49 topology samples were available and
+    max sampled pending/lag was 909. Sampled heap averaged 12.20 MB, peaked at
+    15.67 MB, and ended at 8.48 MB; high-frequency peak was 16.32 MB and four
+    equal-window averages were 12.46/11.62/11.80/12.88 MB. Peak goroutines were
+    161 and final sampled goroutines were 34. Allocated Kafka data
+    peaked/finalized at 734,973,952 bytes across 42 samples, final container
+    memory was about 1,017 MiB, and cleanup was verified. Both Kafka 1m retry
+    workloads are closed at the canonical 1 KiB/concurrency-100 dimension;
+    immediate and remaining 100k/payload/concurrency dimensions remain open.
+    Kafka 1m immediate/preload evidence then completed with 1 KiB payloads,
+    concurrency/partitions 100, and `kafka_delay_batch_size=1000` recorded for
+    harness identity. It completed 1,000,000 unique messages with zero
+    duplicates/final obligations at 4,177.66 msg/s over 239.37 measurement
+    seconds. All 99 topology samples were available. Preload ended at 1,000,000
+    pending/lag with 8.38 MB heap; the first measurement sample had 17,710
+    completed and 982,277 pending/lag. Measurement heap averaged 330.31 MB,
+    peaked at 442.72 MB, and ended at 32.38 MB; high-frequency peak was 536.87 MB.
+    Quarter averages were 337.18/357.93/367.64/258.50 MB while average pending
+    declined from 862,154 to 116,698, demonstrating backlog-proportional
+    verifier/consumer working set rather than retained growth. Peak goroutines
+    were 150 and final sampled goroutines were 34. Allocated Kafka data peaked at
+    570,462,208 bytes and ended at 505,024,512 bytes across 82 samples, final
+    container memory was about 1,008 MiB, and cleanup was verified. All four
+    Kafka 1m workloads are closed at the canonical 1 KiB/concurrency-100
+    dimension; remaining 100k and payload/concurrency dimensions remain open.
     Redis 100k retry50 broker-restart evidence then completed with 1 KiB payloads,
     concurrency 100, a restart after five seconds, and explicitly recorded
     `redis_delay_batch_size=1000`. The restart occurred during active work at
@@ -1083,11 +1357,10 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     is the loss invariant. This closes the sustained soak evidence cell, not the
     remaining 100k/1m matrix dimensions.
     Go-focused verification passed on Linux; PowerShell execution remains to be
-    rerun on Windows because this environment has no PowerShell executable. The
-    remaining 1m matrix cells, durable workload cells, production ordering/rebalance
-    and scheduler ownership changes, repeated broker-process restart evidence,
-    full matrix volume/resource review, and sustained soak remain open, so the
-    task stays `[~]`.
+    rerun on Windows because this environment has no PowerShell executable.
+    Remaining 100k and payload/concurrency matrix cells, PowerShell runtime
+    verification, immutable fixture digest pinning, and full matrix
+    volume/resource review remain open, so the task stays `[~]`.
 
 - [ ] **P6.7.7 Finalize the API and scalability model before adapters**
   - Make all public operations return deterministic lifecycle errors while

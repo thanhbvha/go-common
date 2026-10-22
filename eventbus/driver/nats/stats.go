@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
+	"time"
 
 	"github.com/goccy/go-json"
 	gonats "github.com/nats-io/nats.go"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
+
+var errStopKVSnapshot = errors.New("nats: stop KV snapshot")
 
 // Stats returns delivery obligations, rather than retained stream history.
 // JetStream limit-retention streams keep acknowledged messages, so consumer
@@ -93,60 +95,36 @@ func (t *natsTransport) Stats(ctx context.Context, topology transport.Topology) 
 }
 
 func (t *natsTransport) addPrivateRetryStats(ctx context.Context, topology transport.Topology, stats *transport.TopologyStats) error {
-	kv, err := t.getKV(t.kvBucketName(topology))
-	if err != nil {
-		return fmt.Errorf("nats: inspect subscriber lane registry: %w", err)
-	}
-	watcher, err := kv.Watch("subscriber."+retryLaneVersion+".>", gonats.IgnoreDeletes(), gonats.Context(ctx))
-	if err != nil {
-		return fmt.Errorf("nats: watch subscriber lane registry: %w", err)
-	}
-	defer watcher.Stop()
 	seen := make(map[string]struct{})
-	errorsCh := watcher.Error()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case watchErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if watchErr != nil {
-				return fmt.Errorf("nats: watch subscriber lane registry: %w", watchErr)
-			}
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				return fmt.Errorf("nats: subscriber lane watcher closed before initial snapshot completed")
-			}
-			if entry == nil {
-				return nil
-			}
-			var state subscriberLaneState
-			if err := json.Unmarshal(entry.Value(), &state); err != nil || state.Version != subscriberLaneVersion || state.Durable == "" {
-				return fmt.Errorf("nats: invalid subscriber lane registry entry %q", entry.Key())
-			}
-			if _, ok := seen[state.Durable]; ok {
-				continue
-			}
-			seen[state.Durable] = struct{}{}
-			info, err := t.js.ConsumerInfo(t.retryStreamName(topology, state.Durable), t.retryConsumerName(topology, state.Durable), gonats.Context(ctx))
-			if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("nats: inspect private retry consumer: %w", err)
-			}
-			if err := addNATSCount(&stats.Pending, info.NumPending); err != nil {
-				return err
-			}
-			if info.NumAckPending < 0 || stats.InFlight > math.MaxInt64-int64(info.NumAckPending) {
-				return fmt.Errorf("nats: invalid or overflowing private retry in-flight count")
-			}
-			stats.InFlight += int64(info.NumAckPending)
+	err := t.walkKVSnapshot(ctx, topology, "subscriber."+retryLaneVersion+".>", func(entry gonats.KeyValueEntry) error {
+		var state subscriberLaneState
+		if err := json.Unmarshal(entry.Value(), &state); err != nil || state.Version != subscriberLaneVersion || state.Durable == "" {
+			return fmt.Errorf("nats: invalid subscriber lane registry entry")
 		}
+		if _, ok := seen[state.Durable]; ok {
+			return nil
+		}
+		seen[state.Durable] = struct{}{}
+		info, err := t.js.ConsumerInfo(t.retryStreamName(topology, state.Durable), t.retryConsumerName(topology, state.Durable), gonats.Context(ctx))
+		if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("nats: inspect private retry consumer: %w", err)
+		}
+		if err := addNATSCount(&stats.Pending, info.NumPending); err != nil {
+			return err
+		}
+		if info.NumAckPending < 0 || stats.InFlight > math.MaxInt64-int64(info.NumAckPending) {
+			return fmt.Errorf("nats: invalid or overflowing private retry in-flight count")
+		}
+		stats.InFlight += int64(info.NumAckPending)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("nats: snapshot subscriber lane registry: %w", err)
 	}
+	return nil
 }
 
 func (t *natsTransport) SubscriptionStats(ctx context.Context, sub transport.Subscription) (transport.TopologyStats, error) {
@@ -189,90 +167,113 @@ func (t *natsTransport) SubscriptionStats(ctx context.Context, sub transport.Sub
 }
 
 func (t *natsTransport) subscriberDelayedCount(ctx context.Context, topology transport.Topology, durable string) (int64, error) {
-	kv, err := t.getKV(t.kvBucketName(topology))
-	if err != nil {
-		return 0, fmt.Errorf("nats: inspect subscriber delayed records: %w", err)
-	}
-	watcher, err := kv.Watch("v2.>", gonats.IgnoreDeletes(), gonats.Context(ctx))
-	if err != nil {
-		return 0, fmt.Errorf("nats: watch subscriber delayed records: %w", err)
-	}
-	defer watcher.Stop()
 	var count int64
-	errorsCh := watcher.Error()
-	for {
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case watchErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if watchErr != nil {
-				return 0, fmt.Errorf("nats: watch subscriber delayed records: %w", watchErr)
-			}
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				return 0, fmt.Errorf("nats: subscriber delayed watcher closed before initial snapshot completed")
-			}
-			if entry == nil {
-				return count, nil
-			}
-			var record delayRecord
-			if err := json.Unmarshal(entry.Value(), &record); err != nil {
-				return 0, fmt.Errorf("nats: decode subscriber delayed record: %w", err)
-			}
-			if record.Target == durable {
-				if count == math.MaxInt64 {
-					return 0, fmt.Errorf("nats: overflowing subscriber delayed count")
-				}
-				count++
-			}
+	err := t.walkKVSnapshot(ctx, topology, "v2.>", func(entry gonats.KeyValueEntry) error {
+		var record delayRecord
+		if err := json.Unmarshal(entry.Value(), &record); err != nil {
+			return fmt.Errorf("nats: decode subscriber delayed record: %w", err)
 		}
-	}
-}
-
-func (t *natsTransport) delayedCount(ctx context.Context, topology transport.Topology) (int64, error) {
-	kv, err := t.getKV(t.kvBucketName(topology))
-	if err != nil {
-		return 0, fmt.Errorf("nats: inspect delayed records: %w", err)
-	}
-	lister, err := kv.ListKeys(gonats.Context(ctx))
-	if err != nil {
-		return 0, fmt.Errorf("nats: list delayed records: %w", err)
-	}
-	defer lister.Stop()
-	var count int64
-	errorsCh := lister.Error()
-	keysCh := lister.Keys()
-	for keysCh != nil || errorsCh != nil {
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case key, ok := <-keysCh:
-			if !ok {
-				keysCh = nil
-				continue
+		if record.Target == durable {
+			if count == math.MaxInt64 {
+				return fmt.Errorf("nats: overflowing subscriber delayed count")
 			}
-			if strings.HasPrefix(key, "v2.") {
-				if count == math.MaxInt64 {
-					return 0, fmt.Errorf("nats: overflowing delayed count")
-				}
-				count++
-			}
-		case listErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if listErr != nil {
-				return 0, fmt.Errorf("nats: list delayed records: %w", listErr)
-			}
+			count++
 		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("nats: snapshot subscriber delayed records: %w", err)
 	}
 	return count, nil
 }
+
+func (t *natsTransport) delayedCount(ctx context.Context, topology transport.Topology) (int64, error) {
+	var count int64
+	err := t.walkKVSnapshot(ctx, topology, "v2.>", func(gonats.KeyValueEntry) error {
+		if count == math.MaxInt64 {
+			return fmt.Errorf("nats: overflowing delayed count")
+		}
+		count++
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("nats: snapshot delayed records: %w", err)
+	}
+	return count, nil
+}
+
+func (t *natsTransport) walkKVSnapshot(ctx context.Context, topology transport.Topology, pattern string, visit func(gonats.KeyValueEntry) error) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	bucket := t.kvBucketName(topology)
+	prefix := "$KV." + bucket + "."
+	sub, err := t.js.PullSubscribe(prefix+pattern, "",
+		gonats.BindStream("KV_"+bucket),
+		gonats.DeliverLastPerSubject(),
+		gonats.AckNone(),
+		gonats.InactiveThreshold(time.Minute),
+		gonats.Context(ctx),
+	)
+	if err != nil {
+		return err
+	}
+	defer sub.Unsubscribe()
+	info, err := sub.ConsumerInfo()
+	if err != nil {
+		return err
+	}
+	remaining := info.NumPending
+	for remaining > 0 {
+		batch := min(remaining, 1000)
+		messages, err := sub.Fetch(int(batch), gonats.Context(ctx))
+		if err != nil {
+			return err
+		}
+		if len(messages) == 0 {
+			return fmt.Errorf("snapshot returned no messages with %d pending", remaining)
+		}
+		for _, message := range messages {
+			if op := message.Header.Get("KV-Operation"); op == "DEL" || op == "PURGE" {
+				continue
+			}
+			metadata, err := message.Metadata()
+			if err != nil {
+				return err
+			}
+			entry := &snapshotKVEntry{
+				bucket: bucket, key: message.Subject[len(prefix):], value: message.Data,
+				revision: metadata.Sequence.Stream, created: metadata.Timestamp, delta: metadata.NumPending,
+			}
+			if err := visit(entry); errors.Is(err, errStopKVSnapshot) {
+				return nil
+			} else if err != nil {
+				return err
+			}
+		}
+		remaining -= uint64(len(messages))
+	}
+	return nil
+}
+
+type snapshotKVEntry struct {
+	bucket   string
+	key      string
+	value    []byte
+	revision uint64
+	created  time.Time
+	delta    uint64
+}
+
+func (e *snapshotKVEntry) Bucket() string               { return e.bucket }
+func (e *snapshotKVEntry) Key() string                  { return e.key }
+func (e *snapshotKVEntry) Value() []byte                { return e.value }
+func (e *snapshotKVEntry) Revision() uint64             { return e.revision }
+func (e *snapshotKVEntry) Created() time.Time           { return e.created }
+func (e *snapshotKVEntry) Delta() uint64                { return e.delta }
+func (e *snapshotKVEntry) Operation() gonats.KeyValueOp { return gonats.KeyValuePut }
 
 func checkedNATSCount(name string, value uint64) (int64, error) {
 	if value > math.MaxInt64 {

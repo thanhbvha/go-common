@@ -229,7 +229,7 @@ func (t *natsTransport) delaySweeper(ctx context.Context, topo transport.Topolog
 }
 
 // dispatchDue performs bounded publication work without retaining the delayed
-// backlog in process memory. KV watchers stream a fixed-size window internally.
+// backlog in process memory. Ephemeral pull snapshots fetch fixed-size batches.
 func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time) (int, error) {
 	t.recordSchedulerPoll(topo, now)
 	if err := t.validateEventLayoutKV(topo, kv); err != nil {
@@ -253,7 +253,7 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 	}
 	current := delaySlot(now)
 	if current-cursor > defaultDelayCatchupSlots {
-		entry, cursor, err = recoverDelayCursor(ctx, kv, entry, cursor, current)
+		entry, cursor, err = t.recoverDelayCursor(ctx, topo, kv, entry, cursor, current)
 		if err != nil {
 			t.recordSchedulerError(topo, "dispatch", err, now)
 			return 0, err
@@ -294,62 +294,41 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 }
 
 // recoverDelayCursor skips arbitrarily long empty downtime without probing one
-// second at a time. The watcher streams only metadata and has bounded buffering.
+// second at a time. The pull snapshot has bounded client-side buffering.
 // New schedules cannot be inserted behind current because PublishAt accepts only
 // future run times, so advancing to the oldest live slot (or current) is safe.
-func recoverDelayCursor(ctx context.Context, kv gonats.KeyValue, entry gonats.KeyValueEntry, cursor, current int64) (gonats.KeyValueEntry, int64, error) {
-	watcher, err := kv.Watch("v2.>", gonats.IgnoreDeletes(), gonats.MetaOnly(), gonats.Context(ctx))
-	if err != nil {
+func (t *natsTransport) recoverDelayCursor(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, entry gonats.KeyValueEntry, cursor, current int64) (gonats.KeyValueEntry, int64, error) {
+	target := current
+	if err := t.walkKVSnapshot(ctx, topo, "v2.>", func(scheduled gonats.KeyValueEntry) error {
+		parts := strings.Split(scheduled.Key(), ".")
+		if len(parts) != 4 {
+			return fmt.Errorf("nats delay invalid v2 key %q", scheduled.Key())
+		}
+		slot, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("nats delay invalid v2 key %q: %w", scheduled.Key(), err)
+		}
+		if slot >= cursor && slot < target {
+			target = slot
+		}
+		return nil
+	}); err != nil {
 		return nil, cursor, fmt.Errorf("nats delay recover cursor: %w", err)
 	}
-	defer watcher.Stop()
-	target := current
-	errorsCh := watcher.Error()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, cursor, ctx.Err()
-		case watchErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if watchErr != nil {
-				return nil, cursor, fmt.Errorf("nats delay recover cursor: %w", watchErr)
-			}
-		case scheduled, ok := <-watcher.Updates():
-			if !ok {
-				return nil, cursor, fmt.Errorf("nats delay recovery watcher closed before initial snapshot completed")
-			}
-			if scheduled == nil {
-				if target <= cursor {
-					return entry, cursor, nil
-				}
-				advanced, latest, err := advanceDelayCursor(kv, entry, target)
-				if err != nil {
-					return nil, cursor, err
-				}
-				if !advanced {
-					target, err = strconv.ParseInt(string(latest.Value()), 10, 64)
-					if err != nil {
-						return nil, cursor, fmt.Errorf("nats delay parse recovered cursor: %w", err)
-					}
-				}
-				return latest, target, nil
-			}
-			parts := strings.Split(scheduled.Key(), ".")
-			if len(parts) != 4 {
-				return nil, cursor, fmt.Errorf("nats delay invalid v2 key %q", scheduled.Key())
-			}
-			slot, err := strconv.ParseInt(parts[1], 10, 64)
-			if err != nil {
-				return nil, cursor, fmt.Errorf("nats delay invalid v2 key %q: %w", scheduled.Key(), err)
-			}
-			if slot >= cursor && slot < target {
-				target = slot
-			}
+	if target <= cursor {
+		return entry, cursor, nil
+	}
+	advanced, latest, err := advanceDelayCursor(kv, entry, target)
+	if err != nil {
+		return nil, cursor, err
+	}
+	if !advanced {
+		target, err = strconv.ParseInt(string(latest.Value()), 10, 64)
+		if err != nil {
+			return nil, cursor, fmt.Errorf("nats delay parse recovered cursor: %w", err)
 		}
 	}
+	return latest, target, nil
 }
 
 func advanceDelayCursor(kv gonats.KeyValue, current gonats.KeyValueEntry, next int64) (bool, gonats.KeyValueEntry, error) {
@@ -380,46 +359,27 @@ func (e *delayKVEntry) Value() []byte    { return e.value }
 func (e *delayKVEntry) Revision() uint64 { return e.revision }
 
 func (t *natsTransport) dispatchDelaySlot(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, minute int64, now time.Time, limit int) (int, bool, error) {
-	watcher, err := kv.Watch(delaySlotPattern(minute), gonats.IgnoreDeletes(), gonats.Context(ctx))
-	if err != nil {
-		return 0, false, fmt.Errorf("nats delay watch slot: %w", err)
-	}
-	defer watcher.Stop()
 	published := 0
 	pending := false
-	errorsCh := watcher.Error()
-	for {
-		select {
-		case <-ctx.Done():
-			return published, false, ctx.Err()
-		case watchErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if watchErr != nil {
-				return published, false, fmt.Errorf("nats delay watch slot: %w", watchErr)
-			}
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				return published, false, fmt.Errorf("nats delay watcher closed before initial snapshot completed")
-			}
-			if entry == nil {
-				return published, !pending, nil
-			}
-			if published >= limit {
-				return published, false, nil
-			}
-			didPublish, remains, err := t.dispatchDelayEntry(ctx, topo, kv, entry, now)
-			if err != nil {
-				return published, false, err
-			}
-			if didPublish {
-				published++
-			}
-			pending = pending || remains
+	err := t.walkKVSnapshot(ctx, topo, delaySlotPattern(minute), func(entry gonats.KeyValueEntry) error {
+		if published >= limit {
+			pending = true
+			return errStopKVSnapshot
 		}
+		didPublish, remains, err := t.dispatchDelayEntry(ctx, topo, kv, entry, now)
+		if err != nil {
+			return err
+		}
+		if didPublish {
+			published++
+		}
+		pending = pending || remains
+		return nil
+	})
+	if err != nil {
+		return published, false, fmt.Errorf("nats delay snapshot slot: %w", err)
 	}
+	return published, !pending, nil
 }
 
 func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, entry gonats.KeyValueEntry, now time.Time) (bool, bool, error) {
@@ -624,69 +584,52 @@ func natsSchedulerOperation(err error) string {
 // migrateLegacyDelayed transfers the P4.2 timestamp_ID records into v2 keys.
 // Create-before-delete makes interruption duplicate-prone rather than lossy.
 func (t *natsTransport) migrateLegacyDelayed(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time, limit int) (int, error) {
-	watcher, err := kv.Watch("*", gonats.IgnoreDeletes(), gonats.Context(ctx))
-	if err != nil {
-		return 0, fmt.Errorf("nats delay watch legacy records: %w", err)
-	}
-	defer watcher.Stop()
 	migrated := 0
-	errorsCh := watcher.Error()
-	for {
-		select {
-		case <-ctx.Done():
-			return migrated, ctx.Err()
-		case watchErr, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if watchErr != nil {
-				return migrated, fmt.Errorf("nats delay watch legacy records: %w", watchErr)
-			}
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				return migrated, fmt.Errorf("nats delay legacy watcher closed before initial snapshot completed")
-			}
-			if entry == nil || migrated >= limit {
-				return migrated, nil
-			}
-			parts := strings.SplitN(entry.Key(), "_", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			runAt, err := strconv.ParseInt(parts[0], 10, 64)
-			if err != nil {
-				return migrated, fmt.Errorf("nats delay invalid legacy key %q: %w", entry.Key(), err)
-			}
-			hash := sha256.Sum256([]byte(entry.Key()))
-			scheduleID := fmt.Sprintf("legacy-%x", hash[:])
-			record := delayRecord{
-				Version: delayRecordVersion, ScheduleID: scheduleID, MessageID: parts[1],
-				RunAt: runAt, Payload: entry.Value(),
-			}
-			if topo.Kind == transport.EventTopology {
-				if err := quarantineDelayRecord(kv, entry, record, "legacy event delay has unknown subscriber provenance", now); err != nil {
-					return migrated, err
-				}
-				migrated++
-				continue
-			}
-			minute := delaySlot(time.UnixMilli(runAt))
-			if runAt <= now.UnixMilli() {
-				minute = delaySlot(now)
-			}
-			data, err := json.Marshal(record)
-			if err != nil {
-				return migrated, err
-			}
-			_, err = kv.Create(delayKey(minute, runAt, scheduleID), data)
-			if err != nil && !errors.Is(err, gonats.ErrKeyExists) {
-				return migrated, fmt.Errorf("nats delay migrate %q: %w", entry.Key(), err)
-			}
-			if err := kv.Delete(entry.Key(), gonats.LastRevision(entry.Revision())); err != nil && !errors.Is(err, gonats.ErrKeyExists) {
-				return migrated, fmt.Errorf("nats delay delete legacy %q: %w", entry.Key(), err)
+	err := t.walkKVSnapshot(ctx, topo, "*", func(entry gonats.KeyValueEntry) error {
+		if migrated >= limit {
+			return errStopKVSnapshot
+		}
+		parts := strings.SplitN(entry.Key(), "_", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		runAt, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return fmt.Errorf("nats delay invalid legacy key %q: %w", entry.Key(), err)
+		}
+		hash := sha256.Sum256([]byte(entry.Key()))
+		scheduleID := fmt.Sprintf("legacy-%x", hash[:])
+		record := delayRecord{
+			Version: delayRecordVersion, ScheduleID: scheduleID, MessageID: parts[1],
+			RunAt: runAt, Payload: entry.Value(),
+		}
+		if topo.Kind == transport.EventTopology {
+			if err := quarantineDelayRecord(kv, entry, record, "legacy event delay has unknown subscriber provenance", now); err != nil {
+				return err
 			}
 			migrated++
+			return nil
 		}
+		minute := delaySlot(time.UnixMilli(runAt))
+		if runAt <= now.UnixMilli() {
+			minute = delaySlot(now)
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		_, err = kv.Create(delayKey(minute, runAt, scheduleID), data)
+		if err != nil && !errors.Is(err, gonats.ErrKeyExists) {
+			return fmt.Errorf("nats delay migrate %q: %w", entry.Key(), err)
+		}
+		if err := kv.Delete(entry.Key(), gonats.LastRevision(entry.Revision())); err != nil && !errors.Is(err, gonats.ErrKeyExists) {
+			return fmt.Errorf("nats delay delete legacy %q: %w", entry.Key(), err)
+		}
+		migrated++
+		return nil
+	})
+	if err != nil {
+		return migrated, fmt.Errorf("nats delay snapshot legacy records: %w", err)
 	}
+	return migrated, nil
 }

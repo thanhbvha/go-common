@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -369,6 +370,75 @@ func TestTopologyStatsAggregatePrivateRetryConsumersExactlyOnce(t *testing.T) {
 	stats, err := backend.Stats(ctx, topo)
 	if err != nil || stats.Pending != 1 || stats.InFlight != 1 || stats.Lag != 2 {
 		t.Fatalf("topology private retry stats = %#v, %v", stats, err)
+	}
+}
+
+func TestTopologyStatsRepeatedLargeDelayedSnapshotsDoNotLeakGoroutines(t *testing.T) {
+	_, backend, topo, kv, now := schedulerFixture(t, nil)
+	ctx := context.Background()
+	for i := range 300 {
+		putDelayRecord(t, kv, now.Add(time.Hour), delayRecord{
+			Version: delayRecordVersion, ScheduleID: fmt.Sprintf("stats-%d", i),
+			MessageID: fmt.Sprintf("stats-%d", i), RunAt: now.Add(time.Hour).UnixMilli(),
+			Payload: []byte("payload"), TransferID: fmt.Sprintf("transfer-%d", i),
+		})
+	}
+	transient := delayRecord{
+		Version: delayRecordVersion, ScheduleID: "stats-transient", MessageID: "stats-transient",
+		RunAt: now.Add(time.Hour).UnixMilli(), Payload: []byte("payload"), TransferID: "transfer-transient",
+	}
+	transientKey := delayKey(delaySlot(now.Add(time.Hour)), transient.RunAt, transient.ScheduleID)
+	transientData, err := json.Marshal(transient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCtx, stopWrites := context.WithCancel(ctx)
+	writerDone := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-writeCtx.Done():
+				writerDone <- nil
+				return
+			default:
+			}
+			if _, err := kv.Put(transientKey, transientData); err != nil {
+				writerDone <- err
+				return
+			}
+			if err := kv.Delete(transientKey); err != nil {
+				writerDone <- err
+				return
+			}
+		}
+	}()
+	writerRunning := true
+	defer func() {
+		if writerRunning {
+			stopWrites()
+			<-writerDone
+		}
+	}()
+	runtime.GC()
+	before := runtime.NumGoroutine()
+	for range 25 {
+		stats, err := backend.Stats(ctx, topo)
+		if err != nil || stats.Delayed < 299 || stats.Delayed > 301 {
+			t.Fatalf("stats = %#v, %v", stats, err)
+		}
+	}
+	stopWrites()
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	writerRunning = false
+	if stats, err := backend.Stats(ctx, topo); err != nil || stats.Delayed != 300 {
+		t.Fatalf("settled stats = %#v, %v", stats, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	if growth := runtime.NumGoroutine() - before; growth > 3 {
+		t.Fatalf("goroutine growth after repeated stats = %d, want <= 3", growth)
 	}
 }
 

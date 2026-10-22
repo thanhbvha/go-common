@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbvha/go-common/eventbus"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
 )
@@ -207,6 +208,17 @@ func TestKafkaPartitionsMatchRequestedConcurrency(t *testing.T) {
 	}
 }
 
+func TestKafkaDelayBatchUsesValidatedMaximum(t *testing.T) {
+	cfg := config{}
+	if got := kafkaDelayBatchSize(cfg); got != 0 {
+		t.Fatalf("non-Kafka delay batch = %d, want 0", got)
+	}
+	cfg.Driver = "kafka"
+	if got := kafkaDelayBatchSize(cfg); got != 1000 {
+		t.Fatalf("Kafka delay batch = %d, want 1000", got)
+	}
+}
+
 func TestNATSDelayBatchUsesValidatedMaximum(t *testing.T) {
 	cfg := config{}
 	if got := natsDelayBatchSize(cfg); got != 0 {
@@ -228,6 +240,39 @@ func TestRedisDelayBatchUsesValidatedMaximum(t *testing.T) {
 		t.Fatalf("Redis delay batch = %d, want 1000", got)
 	}
 }
+
+func TestStartBusAllowsKafkaTopicProvisioning(t *testing.T) {
+	for _, test := range []struct {
+		driver string
+		want   time.Duration
+	}{{driver: "redis", want: 20 * time.Second}, {driver: "kafka", want: 2 * time.Minute}} {
+		t.Run(test.driver, func(t *testing.T) {
+			bus := &startDeadlineBus{}
+			if err := startBus(context.Background(), test.driver, bus); err != nil {
+				t.Fatal(err)
+			}
+			if bus.remaining < test.want-time.Second || bus.remaining > test.want {
+				t.Fatalf("startup deadline remaining = %v, want approximately %v", bus.remaining, test.want)
+			}
+		})
+	}
+}
+
+type startDeadlineBus struct {
+	eventbus.Bus
+	remaining time.Duration
+}
+
+func (b *startDeadlineBus) Start(ctx context.Context) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errors.New("startup context has no deadline")
+	}
+	b.remaining = time.Until(deadline)
+	return nil
+}
+
+func (*startDeadlineBus) Ping(context.Context) error { return nil }
 
 func TestRetryEnqueueBoundsEachAttempt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)

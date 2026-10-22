@@ -17,6 +17,7 @@ param(
     [timespan]$Delay = "00:00:05",
     [timespan]$Timeout = "06:00:00",
     [timespan]$SampleEvery = "00:00:05",
+    [bool]$SampleTopology = $true,
     [timespan]$BrokerRestartAfter = [timespan]::Zero,
     [timespan]$BrokerRestartEvery = [timespan]::Zero,
     [timespan]$KafkaSecondWorkerAfter = [timespan]::Zero,
@@ -113,6 +114,15 @@ if ($EvidenceSelfTest) {
         Add-JSONLine $broker ([ordered]@{ phase = "preload"; named_volume_allocated_bytes = 100 })
         Add-JSONLine $broker ([ordered]@{ phase = "measurement"; named_volume_allocated_bytes = 123 })
         Assert-Evidence $benchmark $broker $true
+        $noMeasurementBroker = Join-Path $root "no-measurement-broker.jsonl"
+        Add-JSONLine $noMeasurementBroker ([ordered]@{ phase = "preload"; named_volume_allocated_bytes = 123 })
+        try {
+            Assert-Evidence $benchmark $noMeasurementBroker $true
+            throw "missing measurement broker evidence accepted"
+        }
+        catch {
+            if ($_.Exception.Message -eq "missing measurement broker evidence accepted") { throw }
+        }
         "production evidence validation self-test passed"
     }
     finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
@@ -146,6 +156,8 @@ $brokerSamplesPath = Join-Path $artifactDir "broker-samples.jsonl"
 $faultsPath = Join-Path $artifactDir "fault-actions.jsonl"
 $stdoutPath = Join-Path $artifactDir "result.json"
 $stderrPath = Join-Path $artifactDir "benchmark.stderr.log"
+$heapProfilePath = Join-Path $artifactDir "heap.pprof"
+$goroutineProfilePath = Join-Path $artifactDir "goroutines.txt"
 $brokerInspectPath = Join-Path $artifactDir "broker-inspect.json"
 $brokerLogsPath = Join-Path $artifactDir "broker.log"
 $summaryPath = Join-Path $artifactDir "summary.json"
@@ -168,7 +180,7 @@ $benchmarkArgs = @(
     "--driver", $Driver, "--namespace", $namespace, "--payload-kb", $PayloadKB,
     "--concurrency", $Concurrency, "--workload", $Workload, "--messages", $Messages,
     "--delay", (Convert-DurationArgument $Delay), "--timeout", (Convert-DurationArgument $Timeout),
-    "--sample-every", (Convert-DurationArgument $SampleEvery), "--samples-jsonl", $samplesPath
+    "--sample-every", (Convert-DurationArgument $SampleEvery), "--sample-topology=$($SampleTopology.ToString().ToLowerInvariant())", "--samples-jsonl", $samplesPath, "--heap-profile", $heapProfilePath, "--goroutine-profile", $goroutineProfilePath
 ) + $driverArgs
 if ($Preload) { $benchmarkArgs += "--preload" }
 if ($Duration -gt [timespan]::Zero) { $benchmarkArgs += @("--duration", (Convert-DurationArgument $Duration), "--rate", $Rate) }
@@ -179,8 +191,8 @@ $manifest = [ordered]@{
     compose_project = $project; compose_file = $composeFile; driver = $Driver; workload = $Workload
     mode = if ($Duration -gt [timespan]::Zero) { "duration" } else { "messages" }
     messages = $Messages; duration = $Duration.ToString(); rate = $Rate; preload = [bool]$Preload
-    concurrency = $Concurrency; payload_kb = $PayloadKB; kafka_partitions = if ($Driver -eq "kafka") { $Concurrency } else { 0 }; nats_delay_batch_size = if ($Driver -eq "nats") { 1000 } else { 0 }; redis_delay_batch_size = if ($Driver -eq "redis") { 1000 } else { 0 }; delay = $Delay.ToString(); timeout = $Timeout.ToString()
-    sample_every = $SampleEvery.ToString(); broker_restart_after = $BrokerRestartAfter.ToString(); broker_restart_every = $BrokerRestartEvery.ToString()
+    concurrency = $Concurrency; payload_kb = $PayloadKB; kafka_partitions = if ($Driver -eq "kafka") { $Concurrency } else { 0 }; kafka_delay_batch_size = if ($Driver -eq "kafka") { 1000 } else { 0 }; nats_delay_batch_size = if ($Driver -eq "nats") { 1000 } else { 0 }; redis_delay_batch_size = if ($Driver -eq "redis") { 1000 } else { 0 }; delay = $Delay.ToString(); timeout = $Timeout.ToString()
+    sample_every = $SampleEvery.ToString(); topology_sampling = $SampleTopology; broker_restart_after = $BrokerRestartAfter.ToString(); broker_restart_every = $BrokerRestartEvery.ToString()
     kafka_second_worker_after = $KafkaSecondWorkerAfter.ToString(); namespace = $namespace; loopback_ports = $ports
     synthetic_data = $true; shared_broker_allowed = $false; go_version = (& go version)
     docker_compose_version = (& docker compose version); cleanup = "docker compose --project-name $project --file $composeFile --profile $Driver down -v --remove-orphans"
@@ -254,16 +266,21 @@ try {
     $process.WaitForExit(); $process.Refresh()
     if ($null -eq $process.ExitCode) { throw "benchmark exit code unavailable; see $stderrPath" }
     if ($process.ExitCode -ne 0) { throw "benchmark exited with code $($process.ExitCode); see $stderrPath" }
+    if (-not (Test-Path -LiteralPath $heapProfilePath) -or (Get-Item -LiteralPath $heapProfilePath).Length -le 0) { throw "post-drain heap profile is missing" }
+    if (-not (Test-Path -LiteralPath $goroutineProfilePath) -or (Get-Item -LiteralPath $goroutineProfilePath).Length -le 0) { throw "post-drain goroutine profile is missing" }
     try { $result = Get-Content -LiteralPath $stdoutPath -Raw | ConvertFrom-Json } catch { throw "result.json is not valid JSON: $($_.Exception.Message)" }
     foreach ($field in @("driver", "namespace", "messages", "elapsed_seconds", "throughput_per_second", "duplicates")) {
         if ($null -eq $result.$field) { throw "result.json is missing required field $field" }
     }
     if ($result.driver -ne $Driver -or $result.namespace -ne $namespace) { throw "result identity does not match manifest" }
+    if ([bool]$result.topology_sampling -ne $SampleTopology) { throw "result topology sampling mode does not match manifest" }
+    if ($Driver -eq "kafka" -and [int]$result.kafka_delay_batch_size -ne 1000) { throw "Kafka benchmark delay batch size was not recorded as 1000" }
     if ($Driver -eq "nats" -and [int]$result.nats_delay_batch_size -ne 1000) { throw "NATS benchmark delay batch size was not recorded as 1000" }
     if ($Driver -eq "redis" -and [int]$result.redis_delay_batch_size -ne 1000) { throw "Redis benchmark delay batch size was not recorded as 1000" }
-    foreach ($field in @("final_stats_available", "final_pending", "final_delayed", "final_in_flight", "final_dlq", "final_lag", "second_worker_started", "second_worker_active_work", "primary_worker_handled", "second_worker_handled", "expected_retries", "synthetic_retry_failures", "retry_candidates_failed_at_attempt_one", "retry_first_seen_after_attempt_one")) {
+    foreach ($field in @("final_stats_available", "final_pending", "final_delayed", "final_in_flight", "final_dlq", "final_lag", "post_drain_heap_bytes", "post_drain_goroutines", "second_worker_started", "second_worker_active_work", "primary_worker_handled", "second_worker_handled", "expected_retries", "synthetic_retry_failures", "retry_candidates_failed_at_attempt_one", "retry_first_seen_after_attempt_one")) {
         if ($null -eq $result.$field) { throw "result.json is missing required field $field" }
     }
+    if ([int64]$result.post_drain_heap_bytes -lt 0 -or [int]$result.post_drain_goroutines -le 0) { throw "post-drain resource metrics are invalid" }
     if ([int64]$result.expected_retries -ne ([int64]$result.retry_candidates_failed_at_attempt_one + [int64]$result.retry_first_seen_after_attempt_one)) { throw "retry accounting does not cover the expected retry set" }
     if (([int64]$result.primary_worker_handled + [int64]$result.second_worker_handled) -ne ([int64]$result.messages + [int64]$result.synthetic_retry_failures + [int64]$result.duplicates)) { throw "handler invocation accounting does not match completions, retries, and duplicates" }
     if (-not $result.final_stats_available) { throw "benchmark did not obtain final topology stats" }

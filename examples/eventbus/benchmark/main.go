@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	runtimemetrics "runtime/metrics"
+	"runtime/pprof"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,9 @@ type config struct {
 	Delay             time.Duration
 	SampleEvery       time.Duration
 	SamplesJSONL      string
+	HeapProfile       string
+	GoroutineProfile  string
+	SampleTopology    bool
 }
 
 type payload struct {
@@ -52,6 +56,7 @@ type result struct {
 	PayloadKB                  int     `json:"payload_kb"`
 	Concurrency                int     `json:"concurrency"`
 	KafkaPartitions            int     `json:"kafka_partitions,omitempty"`
+	KafkaDelayBatchSize        int     `json:"kafka_delay_batch_size,omitempty"`
 	NATSDelayBatchSize         int     `json:"nats_delay_batch_size,omitempty"`
 	RedisDelayBatchSize        int     `json:"redis_delay_batch_size,omitempty"`
 	Workload                   string  `json:"workload"`
@@ -80,6 +85,8 @@ type result struct {
 	AllocBytesPerMessage       float64 `json:"alloc_bytes_per_message"`
 	AllocsPerMessage           float64 `json:"allocs_per_message"`
 	PeakHeapBytes              uint64  `json:"peak_heap_bytes"`
+	PostDrainHeapBytes         uint64  `json:"post_drain_heap_bytes"`
+	PostDrainGoroutines        int     `json:"post_drain_goroutines"`
 	CPUSeconds                 float64 `json:"cpu_seconds"`
 	GCCycles                   uint32  `json:"gc_cycles"`
 	Duplicates                 int64   `json:"duplicates"`
@@ -90,6 +97,7 @@ type result struct {
 	FinalInFlight              int64   `json:"final_in_flight"`
 	FinalDLQ                   int64   `json:"final_dlq"`
 	FinalLag                   int64   `json:"final_lag"`
+	TopologySampling           bool    `json:"topology_sampling"`
 }
 
 type periodicSample struct {
@@ -245,7 +253,7 @@ func main() {
 }
 
 func run(args []string) (returnErr error) {
-	cfg := config{Config: demo.DefaultConfig(), PayloadKB: 1, Concurrency: 10, Workload: "immediate", Messages: 1000, Timeout: 10 * time.Minute, Delay: time.Second, SampleEvery: 5 * time.Second}
+	cfg := config{Config: demo.DefaultConfig(), PayloadKB: 1, Concurrency: 10, Workload: "immediate", Messages: 1000, Timeout: 10 * time.Minute, Delay: time.Second, SampleEvery: 5 * time.Second, SampleTopology: true}
 	fs := flag.NewFlagSet("eventbus-benchmark", flag.ContinueOnError)
 	demo.BindFlags(fs, &cfg.Config)
 	fs.IntVar(&cfg.PayloadKB, "payload-kb", cfg.PayloadKB, "payload size: 1, 10, or 100 KiB")
@@ -259,7 +267,10 @@ func run(args []string) (returnErr error) {
 	fs.DurationVar(&cfg.SecondWorkerAfter, "second-worker-after", 0, "start a second Kafka consumer after this interval")
 	fs.DurationVar(&cfg.Delay, "delay", cfg.Delay, "delay applied to delayed workload messages")
 	fs.DurationVar(&cfg.SampleEvery, "sample-every", cfg.SampleEvery, "resource/topology sample interval")
+	fs.BoolVar(&cfg.SampleTopology, "sample-topology", cfg.SampleTopology, "include topology stats in periodic samples")
 	fs.StringVar(&cfg.SamplesJSONL, "samples-jsonl", "", "write periodic resource/topology samples to a new JSONL file")
+	fs.StringVar(&cfg.HeapProfile, "heap-profile", "", "write a post-drain heap profile to a new file")
+	fs.StringVar(&cfg.GoroutineProfile, "goroutine-profile", "", "write a post-drain goroutine profile to a new file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -311,7 +322,10 @@ func run(args []string) (returnErr error) {
 		eventbus.WithMaxPayloadBytes(128*1024),
 	)
 	if cfg.Driver == "kafka" {
-		topologyOptions = append(topologyOptions, kafkadriver.WithPartitions(int32(cfg.Concurrency)))
+		topologyOptions = append(topologyOptions,
+			kafkadriver.WithPartitions(int32(cfg.Concurrency)),
+			kafkadriver.WithDelayBatchSize(kafkaDelayBatchSize(cfg)),
+		)
 	}
 	if cfg.Driver == "nats" {
 		topologyOptions = append(topologyOptions, natsdriver.WithDelayBatchSize(natsDelayBatchSize(cfg)))
@@ -389,7 +403,7 @@ func run(args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	if err := demo.Start(ctx, bus); err != nil {
+	if err := startBus(ctx, cfg.Driver, bus); err != nil {
 		return err
 	}
 	if cfg.Preload {
@@ -418,7 +432,7 @@ func run(args []string) (returnErr error) {
 		benchmarkStart = time.Now()
 		resourceDone = make(chan resourcePeaks, 1)
 		stopResources = make(chan struct{})
-		go sampleResources(ctx, stopResources, bus, topology, phase, benchmarkStart, cfg.SampleEvery, before.HeapAlloc, &producedCount, completed.counter, sampleFile, resourceDone)
+		go sampleResources(ctx, stopResources, bus, topology, phase, benchmarkStart, cfg.SampleEvery, cfg.SampleTopology, before.HeapAlloc, &producedCount, completed.counter, sampleFile, resourceDone)
 	}
 	stopResourceSampler := func() resourcePeaks {
 		close(stopResources)
@@ -456,7 +470,7 @@ func run(args []string) (returnErr error) {
 				workerBus, workerErr = openBus(workerRuntime, &secondWorkerHandled)
 			}
 			if workerErr == nil {
-				workerErr = demo.Start(workerCtx, workerBus)
+				workerErr = startBus(workerCtx, cfg.Driver, workerBus)
 			}
 			secondWorkerResult <- workerStart{
 				bus: workerBus, runtime: workerRuntime, produced: producedCount.Load(),
@@ -549,12 +563,39 @@ func run(args []string) (returnErr error) {
 	peaks := stopResourceSampler()
 	resourcesStopped = true
 	cpuUsed := cpuSeconds() - cpuBefore
+	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
+	if cfg.HeapProfile != "" {
+		profile, err := os.OpenFile(cfg.HeapProfile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("create post-drain heap profile: %w", err)
+		}
+		if err := pprof.WriteHeapProfile(profile); err != nil {
+			_ = profile.Close()
+			return fmt.Errorf("write post-drain heap profile: %w", err)
+		}
+		if err := profile.Close(); err != nil {
+			return fmt.Errorf("close post-drain heap profile: %w", err)
+		}
+	}
+	if cfg.GoroutineProfile != "" {
+		profile, err := os.OpenFile(cfg.GoroutineProfile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("create post-drain goroutine profile: %w", err)
+		}
+		if err := pprof.Lookup("goroutine").WriteTo(profile, 2); err != nil {
+			_ = profile.Close()
+			return fmt.Errorf("write post-drain goroutine profile: %w", err)
+		}
+		if err := profile.Close(); err != nil {
+			return fmt.Errorf("close post-drain goroutine profile: %w", err)
+		}
+	}
 
 	report := result{
 		Driver: cfg.Driver, Namespace: cfg.Namespace, PayloadKB: cfg.PayloadKB,
-		Concurrency: cfg.Concurrency, KafkaPartitions: kafkaPartitions(cfg), NATSDelayBatchSize: natsDelayBatchSize(cfg), RedisDelayBatchSize: redisDelayBatchSize(cfg), Workload: cfg.Workload, Messages: produced, Preloaded: cfg.Preload,
+		Concurrency: cfg.Concurrency, KafkaPartitions: kafkaPartitions(cfg), KafkaDelayBatchSize: kafkaDelayBatchSize(cfg), NATSDelayBatchSize: natsDelayBatchSize(cfg), RedisDelayBatchSize: redisDelayBatchSize(cfg), Workload: cfg.Workload, Messages: produced, Preloaded: cfg.Preload,
 		Mode: benchmarkMode(cfg), RequestedMessages: requestedMessages(cfg), DurationSeconds: cfg.Duration.Seconds(), TargetRatePerSecond: cfg.Rate,
 		SecondWorker: cfg.SecondWorkerAfter > 0, SecondWorkerStarted: secondBus != nil,
 		SecondWorkerProduced: secondWorkerProduced, SecondWorkerCompleted: secondWorkerCompleted,
@@ -565,10 +606,12 @@ func run(args []string) (returnErr error) {
 		P50Milliseconds: latencies.Percentile(0.50), P95Milliseconds: latencies.Percentile(0.95), P99Milliseconds: latencies.Percentile(0.99),
 		AllocBytesPerMessage: float64(after.TotalAlloc-before.TotalAlloc) / float64(produced),
 		AllocsPerMessage:     float64(after.Mallocs-before.Mallocs) / float64(produced),
-		PeakHeapBytes:        peaks.heap, CPUSeconds: max(0, cpuUsed), GCCycles: after.NumGC - before.NumGC,
+		PeakHeapBytes:        peaks.heap, PostDrainHeapBytes: after.HeapAlloc, PostDrainGoroutines: runtime.NumGoroutine(),
+		CPUSeconds: max(0, cpuUsed), GCCycles: after.NumGC - before.NumGC,
 		Duplicates: completed.duplicates.Load(), PeakGoroutines: peaks.goroutines,
 		FinalStatsAvailable: true, FinalPending: finalStats.Pending, FinalDelayed: finalStats.Delayed,
 		FinalInFlight: finalStats.InFlight, FinalDLQ: finalStats.DLQ, FinalLag: finalStats.Lag,
+		TopologySampling: cfg.SampleTopology,
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -651,6 +694,13 @@ func validateFinalStats(stats transport.TopologyStats) error {
 func kafkaPartitions(cfg config) int {
 	if cfg.Driver == "kafka" {
 		return cfg.Concurrency
+	}
+	return 0
+}
+
+func kafkaDelayBatchSize(cfg config) int {
+	if cfg.Driver == "kafka" {
+		return 1000
 	}
 	return 0
 }
@@ -759,6 +809,22 @@ func retryEnqueue(ctx context.Context, enqueue func(context.Context) error) erro
 	}
 }
 
+func startBus(ctx context.Context, driver string, bus eventbus.Bus) error {
+	timeout := 20 * time.Second
+	if driver == "kafka" {
+		timeout = 2 * time.Minute
+	}
+	startCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := bus.Start(startCtx); err != nil {
+		return fmt.Errorf("start eventbus: %w", err)
+	}
+	if err := bus.Ping(startCtx); err != nil {
+		return fmt.Errorf("ping eventbus: %w", err)
+	}
+	return nil
+}
+
 func cpuSeconds() float64 {
 	samples := []runtimemetrics.Sample{{Name: "/cpu/classes/total:cpu-seconds"}, {Name: "/cpu/classes/idle:cpu-seconds"}}
 	runtimemetrics.Read(samples)
@@ -770,7 +836,7 @@ type resourcePeaks struct {
 	goroutines int
 }
 
-func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus, topology, phase string, started time.Time, interval time.Duration, initialHeap uint64, produced *atomic.Int64, completed *completionCounter, output io.Writer, result chan<- resourcePeaks) {
+func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus, topology, phase string, started time.Time, interval time.Duration, sampleTopology bool, initialHeap uint64, produced *atomic.Int64, completed *completionCounter, output io.Writer, result chan<- resourcePeaks) {
 	peaks := resourcePeaks{heap: initialHeap, goroutines: runtime.NumGoroutine()}
 	peakTicker := time.NewTicker(min(100*time.Millisecond, interval))
 	defer peakTicker.Stop()
@@ -797,16 +863,18 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 		if elapsed > 0 {
 			record.ThroughputPerSecond = float64(record.Completed) / elapsed.Seconds()
 		}
-		statsCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, interval))
-		topologyStats, err := bus.Stats(statsCtx, topology)
-		cancel()
-		if err == nil {
-			record.TopologyStatsAvailable = true
-			record.Pending = topologyStats.Pending
-			record.Delayed = topologyStats.Delayed
-			record.InFlight = topologyStats.InFlight
-			record.DLQ = topologyStats.DLQ
-			record.Lag = topologyStats.Lag
+		if sampleTopology {
+			statsCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, interval))
+			topologyStats, err := bus.Stats(statsCtx, topology)
+			cancel()
+			if err == nil {
+				record.TopologyStatsAvailable = true
+				record.Pending = topologyStats.Pending
+				record.Delayed = topologyStats.Delayed
+				record.InFlight = topologyStats.InFlight
+				record.DLQ = topologyStats.DLQ
+				record.Lag = topologyStats.Lag
+			}
 		}
 		_ = encoder.Encode(record)
 	}
