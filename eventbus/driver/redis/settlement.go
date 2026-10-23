@@ -85,6 +85,9 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 	capacity := maxDLQEntries(d.topo)
 	resource := "dlq"
 	if decision.Kind == transport.DecisionRetry {
+		if disabled, _ := d.topo.Options["eventbus.delay_disabled"].(bool); disabled {
+			return transport.ErrNotSupported
+		}
 		msg = decision.Next
 		target = d.transport.delayedKey(d.topo)
 		if d.topo.Kind == transport.EventTopology {

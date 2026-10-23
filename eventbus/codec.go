@@ -69,21 +69,26 @@ func (c *Codec) buildEnvelope(kind TopologyKind, jobType string, payload any, ma
 	}
 
 	maxAttempts := max(maxAttemptsDefault, 1)
+	messageID := uuid.NewString()
+	if options.messageIDSet {
+		messageID = options.MessageID
+	}
 
 	env := &Envelope{
-		V:           3,
-		ID:          uuid.NewString(),
-		Kind:        kind,
-		Type:        jobType,
-		Payload:     json.RawMessage(rawPayload),
-		Attempt:     1,
-		MaxAttempts: maxAttempts,
-		CreatedAt:   now.UnixMilli(),
-		RunAt:       runAt,
-		OrderingKey: options.OrderingKey,
-		DedupeKey:   options.DedupeKey,
-		DedupeTTL:   int64(options.DedupeTTL),
-		Headers:     options.Headers,
+		V:              3,
+		ID:             messageID,
+		Kind:           kind,
+		Type:           jobType,
+		Payload:        json.RawMessage(rawPayload),
+		Attempt:        1,
+		MaxAttempts:    maxAttempts,
+		CreatedAt:      now.UnixMilli(),
+		RunAt:          runAt,
+		OrderingKey:    options.OrderingKey,
+		ConcurrencyKey: options.ConcurrencyKey,
+		DedupeKey:      options.DedupeKey,
+		DedupeTTL:      int64(options.DedupeTTL),
+		Headers:        options.Headers,
 	}
 
 	return env, nil

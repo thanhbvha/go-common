@@ -1,5 +1,33 @@
 # EventBus migration guide
 
+## P6.7.7 publication and topology API
+
+Existing `Enqueue`, `EnqueueBatch`, and `Publish` calls remain supported. New
+code that needs reconciliation should use `EnqueueWithResult`,
+`EnqueueBatchWithResult`, and `PublishWithResult`. Each successful result returns
+the stable logical EventBus ID. On batch failure, `Results` contains only the
+durably accepted prefix and `BatchError.Index` identifies the first failed item.
+
+`WithMessageID` supplies a validated logical identity. It is not portable
+duplicate suppression by itself; combine it with `WithDedupeKey` when retrying
+the same business publication. Confirmed duplicates on built-in dedupe-capable
+drivers return the original accepted ID with `Duplicate: true`.
+
+Use `WithConcurrencyKey` for process-local keyed admission on any driver and
+`WithBrokerOrderingKey` for broker partition ordering. The legacy
+`WithOrderingKey` temporarily sets both fields for compatibility.
+
+Provisioning options belong on `DeclareTask`/`DeclareEvent`; subscriber options
+are limited to runtime fetch, admission, retry, and payload controls. Equal
+redeclarations are idempotent, conflicting declarations and duplicate local
+handler/subscriber names are errors. Implicit event declaration remains a
+deprecated compatibility path and no longer inherits subscriber options.
+
+`WithDelayDisabled` declares an immediate-only topology and lets drivers omit
+delay scheduler resources. Future publication/retry is rejected before broker
+I/O. `Config.MaxTopologies` and `Config.MaxSubscribers` are optional startup
+planning bounds; zero leaves them unlimited.
+
 This guide covers migration from `queue`, `queue_kafka`, and `queue_nats`, and
 from the pre-refactor EventBus API. EventBus provides at-least-once delivery:
 handlers must be idempotent and may receive a message more than once.

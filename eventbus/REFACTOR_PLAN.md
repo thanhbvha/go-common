@@ -1376,7 +1376,7 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     Payload/concurrency expansion remains conditional on being separately
     confirmed as a new exit criterion. P6.7.6 is complete.
 
-- [ ] **P6.7.7 Finalize the API and scalability model before adapters**
+- [x] **P6.7.7 Finalize the API and scalability model before adapters**
   - Make all public operations return deterministic lifecycle errors while
     preserving the documented producer-only flow before `Start` (EB-14).
   - Separate declaration/provisioning options from subscriber/runtime options;
@@ -1402,6 +1402,30 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     examples cover old and new entry points, and no Phase 7 adapter must depend
     on an ambiguous or silently ignored option.
   - Notes:
+    Completed on 2026-10-23. Public operations now use deterministic lifecycle
+    admission: producer-only publication remains valid before `Start`, while
+    stopping/stopped operations return `ErrBusClosed` before validation or
+    transport I/O. Existing error-only publication methods remain compatibility
+    adapters over result-returning task, event, and durable-prefix batch APIs.
+    Caller-supplied IDs are validated and built-in dedupe stores return the
+    original accepted ID for confirmed duplicates.
+    Task/event/subscriber option aliases document scope; subscriber provisioning
+    options fail closed, equal declarations are idempotent, conflicts and
+    duplicate local handlers/subscribers are rejected, and implicit event
+    declaration no longer promotes subscriber options.
+    Process-local `ConcurrencyKey` is separate from broker `OrderingKey`;
+    legacy `WithOrderingKey` temporarily populates both fields. Portable
+    `WithDelayDisabled` is implemented with default-enabled compatibility, and
+    optional topology/subscriber startup limits fail before provisioning.
+    Kafka example concurrency/partitions are both four; production guidance
+    retains `ceil(partitions/planned instances)` only as a starting point.
+    Structured capabilities now declare durability, delay provisioning,
+    ordering scope, settlement, dedupe, heartbeat, administration, scheduler,
+    and payload guarantees while retaining normalized legacy mirrors.
+    Verification passed with `go test ./...`, `go vet ./...`, race-enabled core
+    and driver suites, integration-tag compilation, full embedded JetStream
+    integration, benchmark script validation, and focused Redis/NATS assertions
+    that delay-disabled topologies omit scheduler/storage resources.
 
 ### Phase 6.7 exit criteria
 

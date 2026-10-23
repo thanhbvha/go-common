@@ -40,6 +40,18 @@ var (
 	// as both a competing-consumer task and a fan-out event.
 	ErrTopologyKindConflict = errors.New("eventbus: topology kind conflict")
 
+	// ErrConflictingDeclaration is returned when the same topology is declared
+	// again with different provisioning or runtime defaults.
+	ErrConflictingDeclaration = errors.New("eventbus: conflicting topology declaration")
+
+	// ErrDuplicateHandler is returned when a task handler would replace an
+	// existing local handler.
+	ErrDuplicateHandler = errors.New("eventbus: duplicate task handler")
+
+	// ErrDuplicateSubscriber is returned when an event subscriber name would
+	// replace an existing local subscriber.
+	ErrDuplicateSubscriber = errors.New("eventbus: duplicate event subscriber")
+
 	// ErrUndeclaredTopology is returned when a handler is attached to a task
 	// that has not been explicitly declared.
 	ErrUndeclaredTopology = errors.New("eventbus: topology is not declared")

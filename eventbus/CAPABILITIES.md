@@ -328,38 +328,44 @@ consumers from broker addresses. This wiring work does not yet promote Kafka's
 ordering, settlement, delay, DLQ administration, or statistics capabilities;
 those remain assigned to P5.2-P5.8.
 
-## Target capability declarations
+## Structured capability declarations
 
-Optional Go interfaces answer whether an operation exists. Later transport
-phases should enrich the descriptive capability metadata with guarantee levels
-similar to:
+Optional Go interfaces remain authoritative for whether an operation exists.
+`transport.Capabilities` now describes its guarantee and coordination scope.
+Older custom transports that populate only `DelayPrecision` and `Ordering` are
+normalized for compatibility.
 
 ```go
-type Durability uint8
+type DurabilityGuarantee uint8
 type OrderingScope uint8
 type SettlementGuarantee uint8
 
 type Capabilities struct {
-    Durability            Durability
-    Delay                 bool
-    DelayPrecision        time.Duration
-    Ordering              OrderingScope
-    Dedupe                bool
-    Heartbeat             bool
-    AtomicRetrySettlement SettlementGuarantee
-    AtomicDLQSettlement   SettlementGuarantee
-    DLQAdmin              bool
-    Stats                 bool
-    PauseResume           bool
-    MaxPayloadBytes       int64
+    Durability DurabilityGuarantee
+    Delay      DelayCapabilities
+    Order      OrderingCapabilities
+    Settlement SettlementCapabilities
+    Dedupe     DedupeGuarantee
+    Heartbeat  CapabilityScope
+    Admin      AdminCapabilities
+    Scheduler  SchedulerCapabilities
+    Payload    PayloadCapabilities
+
+    // Deprecated compatibility mirrors.
+    DelayPrecision time.Duration
+    Ordering       bool
 }
 ```
 
-Suggested enum semantics:
+Implemented enum semantics include:
 
-- Durability: `NonDurable`, `BrokerDurable`.
-- Ordering: `None`, `Partition`, `OrderingKey`.
-- Settlement: `None`, `PublishBeforeAck`, `Atomic`, `Transactional`.
+- Durability: none, process-local, or broker durable.
+- Ordering: none, partition, or ordering-key scope, with process/broker
+  coordination declared separately.
+- Settlement: none, process-local, publish-before-source, atomic, or
+  transactional, independently for retry and DLQ.
+- Delay provisioning: unavailable, shared scheduler, per-topology scheduler, or
+  tiered per-topology scheduler. Delay is topology-optional for built-in drivers.
 
 Avoid a single `ExactlyOnce` flag. Broker settlement cannot make arbitrary
 handler side effects exactly once.

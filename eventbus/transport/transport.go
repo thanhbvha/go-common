@@ -179,18 +179,31 @@ func encodeResourceTuple(components ...string) string {
 
 // Capabilities describes the features supported by a specific transport driver.
 type Capabilities struct {
+	Durability DurabilityGuarantee
+	Delay      DelayCapabilities
+	Order      OrderingCapabilities
+	Settlement SettlementCapabilities
+	Dedupe     DedupeGuarantee
+	Heartbeat  CapabilityScope
+	Admin      AdminCapabilities
+	Scheduler  SchedulerCapabilities
+	Payload    PayloadCapabilities
+
+	// Deprecated compatibility mirrors. Built-in transports keep these exactly
+	// synchronized with Delay and Order.
 	DelayPrecision time.Duration // e.g., 1ms for Redis, 1s for Kafka delay tier
 	Ordering       bool          // true if it supports partition/ordering keys (e.g., Kafka)
 }
 
 // Message is the data structure passed to the transport for publishing.
 type Message struct {
-	ID          string
-	Type        string
-	Payload     []byte // The serialized JSON Envelope
-	OrderingKey string
-	DedupeKey   string
-	Headers     map[string]string
+	ID             string
+	Type           string
+	Payload        []byte // The serialized JSON Envelope
+	OrderingKey    string
+	ConcurrencyKey string
+	DedupeKey      string
+	Headers        map[string]string
 }
 
 // DeadLetter contains information about a job that has permanently failed.
@@ -305,6 +318,21 @@ const (
 // acquired reservation; confirm/abort must not mutate another owner's state.
 type PublicationDeduper interface {
 	BeginPublication(ctx context.Context, topology Topology, key, reservationID string, ttl time.Duration) (DedupeReservationState, error)
+	ConfirmPublication(ctx context.Context, topology Topology, key, reservationID string) error
+	AbortPublication(ctx context.Context, topology Topology, key, reservationID string) error
+}
+
+// PublicationReservation includes the logical message ID owned by the durable
+// reservation. Published duplicates return the original accepted message ID.
+type PublicationReservation struct {
+	State     DedupeReservationState
+	MessageID string
+}
+
+// PublicationDeduperWithResult exposes stable publication identity without
+// changing the legacy PublicationDeduper contract.
+type PublicationDeduperWithResult interface {
+	BeginPublicationWithResult(ctx context.Context, topology Topology, key, reservationID string, ttl time.Duration) (PublicationReservation, error)
 	ConfirmPublication(ctx context.Context, topology Topology, key, reservationID string) error
 	AbortPublication(ctx context.Context, topology Topology, key, reservationID string) error
 }

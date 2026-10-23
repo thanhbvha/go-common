@@ -32,9 +32,12 @@ func (t *natsTransport) Stats(ctx context.Context, topology transport.Topology) 
 	if err != nil {
 		return transport.TopologyStats{}, fmt.Errorf("nats: inspect topology stream: %w", err)
 	}
-	delayed, err := t.delayedCount(ctx, topology)
-	if err != nil {
-		return transport.TopologyStats{}, err
+	var delayed int64
+	if topologyDelayEnabled(topology) {
+		delayed, err = t.delayedCount(ctx, topology)
+		if err != nil {
+			return transport.TopologyStats{}, err
+		}
 	}
 	dlq, err := t.Count(ctx, topology)
 	if err != nil {
@@ -214,6 +217,9 @@ func (t *natsTransport) SubscriptionStats(ctx context.Context, sub transport.Sub
 }
 
 func (t *natsTransport) subscriberDelayedCount(ctx context.Context, topology transport.Topology, durable string) (int64, error) {
+	if !topologyDelayEnabled(topology) {
+		return 0, nil
+	}
 	if delayLayoutIndexed(topology) {
 		return t.filteredDelayedCount(ctx, topology, "v3.*."+t.retryLaneID(topology, durable)+".>")
 	}

@@ -30,7 +30,7 @@ func TestDecodedMetadataReachesRetryAndDLQ(t *testing.T) {
 			e := newEngine(cfg, nil, NewCodec(nil))
 			defer e.cancel()
 			defer e.workerCancel()
-			payload, env, err := e.codec.EncodeTopology(TaskTopology, "task", 1, 3, WithOrderingKey("ordering"), WithDedupeKey("dedupe"), WithHeader("correlation-id", "synthetic"))
+			payload, env, err := e.codec.EncodeTopology(TaskTopology, "task", 1, 3, WithBrokerOrderingKey("ordering"), WithConcurrencyKey("concurrency"), WithDedupeKey("dedupe"), WithHeader("correlation-id", "synthetic"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,12 +64,12 @@ func TestDecodedMetadataReachesRetryAndDLQ(t *testing.T) {
 				t.Fatal("driver did not receive normalized source")
 			}
 			source := d.decision.Source
-			if source.ID != env.ID || source.Type != env.Type || source.OrderingKey != "ordering" || source.DedupeKey != "dedupe" || source.Headers["correlation-id"] != "synthetic" || string(source.Payload) != string(d.message.Payload) {
+			if source.ID != env.ID || source.Type != env.Type || source.OrderingKey != "ordering" || source.ConcurrencyKey != "concurrency" || source.DedupeKey != "dedupe" || source.Headers["correlation-id"] != "synthetic" || string(source.Payload) != string(d.message.Payload) {
 				t.Fatal("source metadata not restored from envelope")
 			}
 			if outcome == "retry" {
 				next := d.decision.Next
-				if next.ID != env.ID || next.Type != env.Type || next.OrderingKey != "ordering" || next.DedupeKey != "dedupe" || next.Headers["correlation-id"] != "synthetic" {
+				if next.ID != env.ID || next.Type != env.Type || next.OrderingKey != "ordering" || next.ConcurrencyKey != "concurrency" || next.DedupeKey != "dedupe" || next.Headers["correlation-id"] != "synthetic" {
 					t.Fatal("retry lost normalized metadata")
 				}
 			}

@@ -93,8 +93,15 @@ func (t *natsTransport) Name() string { return "nats" }
 
 func (t *natsTransport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
-		DelayPrecision: 1 * time.Second, // Sweeper checks every second
-		Ordering:       false,           // Standard jetstream consumers without strictly constrained max-inflight
+		Durability:     transport.DurabilityBroker,
+		Delay:          transport.DelayCapabilities{Supported: true, Precision: time.Second, Provisioning: transport.DelayPerTopologyScheduler, Optional: true},
+		Settlement:     transport.SettlementCapabilities{Retry: transport.SettlementPublishBeforeSource, DLQ: transport.SettlementPublishBeforeSource},
+		Dedupe:         transport.DedupeBrokerConfirmed,
+		Heartbeat:      transport.ScopeBroker,
+		Admin:          transport.AdminCapabilities{DLQ: true, CursorDLQ: true, Stats: true, SubscriptionStats: true, Pause: transport.ScopeProcess},
+		Scheduler:      transport.SchedulerCapabilities{Health: true, WorkerScope: transport.ScopeBroker},
+		Payload:        transport.PayloadCapabilities{CoreLimitSupported: true},
+		DelayPrecision: time.Second,
 	}
 }
 
@@ -108,6 +115,11 @@ func (t *natsTransport) dlqStreamName(topo transport.Topology) string {
 
 func (t *natsTransport) kvBucketName(topo transport.Topology) string {
 	return "eventbus_delay_" + topo.NameWithSeparator("_")
+}
+
+func topologyDelayEnabled(topo transport.Topology) bool {
+	disabled, _ := topo.Options["eventbus.delay_disabled"].(bool)
+	return !disabled
 }
 
 func (t *natsTransport) getKV(bucket string) (gonats.KeyValue, error) {
@@ -135,19 +147,25 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 		return fmt.Errorf("nats EnsureTopology DLQ: %w", err)
 	}
 
-	// Create Delay KV
-	kv, err := t.js.CreateKeyValue(&gonats.KeyValueConfig{
-		Bucket:  kvBucket,
-		Storage: gonats.FileStorage,
-	})
-	if err != nil {
-		if errors.Is(err, gonats.ErrStreamNameAlreadyInUse) {
-			kv, err = t.js.KeyValue(kvBucket)
-			if err != nil {
-				return fmt.Errorf("nats EnsureTopology get KV: %w", err)
+	// Event subscriber lifecycle metadata currently shares this bucket. Task
+	// topologies can omit it entirely when delay is disabled.
+	needsKV := topologyDelayEnabled(topo) || topo.Kind == transport.EventTopology
+	var kv gonats.KeyValue
+	var err error
+	if needsKV {
+		kv, err = t.js.CreateKeyValue(&gonats.KeyValueConfig{
+			Bucket:  kvBucket,
+			Storage: gonats.FileStorage,
+		})
+		if err != nil {
+			if errors.Is(err, gonats.ErrStreamNameAlreadyInUse) {
+				kv, err = t.js.KeyValue(kvBucket)
+				if err != nil {
+					return fmt.Errorf("nats EnsureTopology get KV: %w", err)
+				}
+			} else {
+				return fmt.Errorf("nats EnsureTopology CreateKeyValue: %w", err)
 			}
-		} else {
-			return fmt.Errorf("nats EnsureTopology CreateKeyValue: %w", err)
 		}
 	}
 
@@ -162,29 +180,37 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 		return fmt.Errorf("nats EnsureTopology Dedupe KV: %w", err)
 	}
 
-	t.mu.Lock()
-	t.kvs[kvBucket] = kv
-	t.mu.Unlock()
-	if err := t.ensureEventLayoutMarker(ctx, topo, kv); err != nil {
-		return fmt.Errorf("nats EnsureTopology event layout: %w", err)
+	if needsKV {
+		t.mu.Lock()
+		t.kvs[kvBucket] = kv
+		t.mu.Unlock()
 	}
-	if err := t.ensureDelayLayoutMarker(ctx, topo, kv); err != nil {
-		return fmt.Errorf("nats EnsureTopology delay layout: %w", err)
+	if topo.Kind == transport.EventTopology {
+		if err := t.ensureEventLayoutMarker(ctx, topo, kv); err != nil {
+			return fmt.Errorf("nats EnsureTopology event layout: %w", err)
+		}
 	}
-	if err := t.ensureDelayCursor(ctx, kv); err != nil {
-		return fmt.Errorf("nats EnsureTopology delay cursor: %w", err)
+	if topologyDelayEnabled(topo) {
+		if err := t.ensureDelayLayoutMarker(ctx, topo, kv); err != nil {
+			return fmt.Errorf("nats EnsureTopology delay layout: %w", err)
+		}
+		if err := t.ensureDelayCursor(ctx, kv); err != nil {
+			return fmt.Errorf("nats EnsureTopology delay cursor: %w", err)
+		}
 	}
 
 	topoName := topo.Name()
 	t.mu.Lock()
-	if _, ok := t.sweepers[topoName]; !ok {
-		sweepCtx, cancel := context.WithCancel(context.Background())
-		t.sweepers[topoName] = cancel
-		t.sweeperWG.Add(1)
-		go func() {
-			defer t.sweeperWG.Done()
-			t.delaySweeper(sweepCtx, topo, kv)
-		}()
+	if topologyDelayEnabled(topo) {
+		if _, ok := t.sweepers[topoName]; !ok {
+			sweepCtx, cancel := context.WithCancel(context.Background())
+			t.sweepers[topoName] = cancel
+			t.sweeperWG.Add(1)
+			go func() {
+				defer t.sweeperWG.Done()
+				t.delaySweeper(sweepCtx, topo, kv)
+			}()
+		}
 	}
 	t.mu.Unlock()
 
@@ -224,6 +250,9 @@ func (t *natsTransport) PublishAt(ctx context.Context, topo transport.Topology, 
 	delay := runAt.Sub(t.now())
 	if delay <= 0 {
 		return t.Publish(ctx, topo, msg)
+	}
+	if !topologyDelayEnabled(topo) {
+		return transport.ErrNotSupported
 	}
 
 	kvBucket := t.kvBucketName(topo)
@@ -357,66 +386,71 @@ type publicationDedupeRecord struct {
 }
 
 func (t *natsTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	reservation, err := t.BeginPublicationWithResult(ctx, topo, key, reservationID, ttl)
+	return reservation.State, err
+}
+
+func (t *natsTransport) BeginPublicationWithResult(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.PublicationReservation, error) {
 	if err := topo.Validate(); err != nil {
-		return 0, err
+		return transport.PublicationReservation{}, err
 	}
 	if key == "" || reservationID == "" || ttl <= 0 {
-		return 0, fmt.Errorf("nats dedupe: key, reservation ID, and positive TTL required")
+		return transport.PublicationReservation{}, fmt.Errorf("nats dedupe: key, reservation ID, and positive TTL required")
 	}
 	kv, err := t.js.KeyValue(dedupeBucket)
 	if err != nil {
-		return 0, fmt.Errorf("nats dedupe open bucket: %w", err)
+		return transport.PublicationReservation{}, fmt.Errorf("nats dedupe open bucket: %w", err)
 	}
 	storageKey := dedupeStorageKey(&topo, key)
 	record := publicationDedupeRecord{State: "reserved", Owner: reservationID, Expires: t.now().Add(ttl).UnixNano()}
 	value, err := json.Marshal(record)
 	if err != nil {
-		return 0, err
+		return transport.PublicationReservation{}, err
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return transport.PublicationReservation{}, err
 		}
 		if _, err := kv.Create(storageKey, value); err == nil {
-			return transport.DedupeReservationAcquired, nil
+			return transport.PublicationReservation{State: transport.DedupeReservationAcquired, MessageID: reservationID}, nil
 		} else if !errors.Is(err, gonats.ErrKeyExists) {
-			return 0, fmt.Errorf("nats dedupe create: %w", err)
+			return transport.PublicationReservation{}, fmt.Errorf("nats dedupe create: %w", err)
 		}
 		entry, err := kv.Get(storageKey)
 		if errors.Is(err, gonats.ErrKeyNotFound) || errors.Is(err, gonats.ErrKeyDeleted) {
 			continue
 		}
 		if err != nil {
-			return 0, fmt.Errorf("nats dedupe read: %w", err)
+			return transport.PublicationReservation{}, fmt.Errorf("nats dedupe read: %w", err)
 		}
 		var current publicationDedupeRecord
 		if err := json.Unmarshal(entry.Value(), &current); err != nil {
 			// A live v1 numeric reservation cannot prove publication.
 			if expires, legacyErr := strconv.ParseInt(string(entry.Value()), 10, 64); legacyErr == nil {
 				if t.now().UnixNano() < expires {
-					return transport.DedupeReservationPending, nil
+					return transport.PublicationReservation{State: transport.DedupeReservationPending}, nil
 				}
 				current.Expires = expires
 			} else {
-				return 0, fmt.Errorf("nats dedupe invalid stored state: %w", err)
+				return transport.PublicationReservation{}, fmt.Errorf("nats dedupe invalid stored state: %w", err)
 			}
 		}
 		if t.now().UnixNano() < current.Expires {
 			switch current.State {
 			case "published":
-				return transport.DedupeReservationPublished, nil
+				return transport.PublicationReservation{State: transport.DedupeReservationPublished, MessageID: current.Owner}, nil
 			case "reserved":
-				return transport.DedupeReservationPending, nil
+				return transport.PublicationReservation{State: transport.DedupeReservationPending, MessageID: current.Owner}, nil
 			default:
-				return 0, fmt.Errorf("nats dedupe invalid stored state %q", current.State)
+				return transport.PublicationReservation{}, fmt.Errorf("nats dedupe invalid stored state %q", current.State)
 			}
 		}
 		if _, err := kv.Update(storageKey, value, entry.Revision()); err == nil {
-			return transport.DedupeReservationAcquired, nil
+			return transport.PublicationReservation{State: transport.DedupeReservationAcquired, MessageID: reservationID}, nil
 		} else if errors.Is(err, gonats.ErrKeyExists) {
 			continue
 		} else {
-			return 0, fmt.Errorf("nats dedupe replace expired reservation: %w", err)
+			return transport.PublicationReservation{}, fmt.Errorf("nats dedupe replace expired reservation: %w", err)
 		}
 	}
 }
@@ -632,6 +666,9 @@ func (d *natsDelivery) Settle(ctx context.Context, decision transport.Decision) 
 		case transport.DecisionAck:
 			return d.ack(ctx)
 		case transport.DecisionRetry:
+			if !topologyDelayEnabled(d.topo) {
+				return transport.ErrNotSupported
+			}
 			target := ""
 			if d.topo.Kind == transport.EventTopology {
 				target = d.sourceGroup

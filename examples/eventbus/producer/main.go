@@ -57,13 +57,15 @@ func run(ctx context.Context, args []string) (returnErr error) {
 	if demo.SupportsDedupe(rt.Transport) {
 		opts = append(opts, eventbus.WithDedupeKey("producer:"+payload.UserID), eventbus.WithDedupeTTL(time.Minute))
 	}
-	if err := bus.Enqueue(ctx, demo.TaskName, payload, opts...); err != nil {
+	taskResult, err := bus.EnqueueWithResult(ctx, demo.TaskName, payload, opts...)
+	if err != nil {
 		return fmt.Errorf("enqueue task: %w", err)
 	}
-	if err := bus.Publish(ctx, demo.EventName, payload, eventbus.WithHeader("source", "producer")); err != nil {
+	eventResult, err := bus.PublishWithResult(ctx, demo.EventName, payload, eventbus.WithHeader("source", "producer"))
+	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}
-	logger.Info("messages accepted", "task", demo.TaskName, "event", demo.EventName)
+	logger.Info("messages accepted", "task", demo.TaskName, "task_id", taskResult.ID, "event", demo.EventName, "event_id", eventResult.ID)
 	return nil
 }
 

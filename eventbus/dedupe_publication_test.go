@@ -40,6 +40,17 @@ func (t *publicationDedupeTransport) BeginPublication(_ context.Context, _ trans
 	return t.state, nil
 }
 
+func (t *publicationDedupeTransport) BeginPublicationWithResult(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.PublicationReservation, error) {
+	state, err := t.BeginPublication(ctx, topo, key, reservationID, ttl)
+	if err != nil {
+		return transport.PublicationReservation{}, err
+	}
+	t.mu.Lock()
+	owner := t.owner
+	t.mu.Unlock()
+	return transport.PublicationReservation{State: state, MessageID: owner}, nil
+}
+
 func (t *publicationDedupeTransport) ConfirmPublication(ctx context.Context, _ transport.Topology, _, reservationID string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -116,6 +127,25 @@ func TestDedupeConfirmedPublicationIsTheOnlySuccessfulDuplicate(t *testing.T) {
 	}
 	if backend.state != transport.DedupeReservationPublished || backend.publishes != 1 {
 		t.Fatalf("state=%d publishes=%d", backend.state, backend.publishes)
+	}
+}
+
+func TestDedupeResultReturnsOriginalAcceptedID(t *testing.T) {
+	backend := &publicationDedupeTransport{}
+	b := openPublicationDedupeBus(t, backend)
+	first, err := b.EnqueueWithResult(context.Background(), "task", 1, WithMessageID("original"), WithDedupeKey("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := b.EnqueueWithResult(context.Background(), "task", 2, WithMessageID("replacement"), WithDedupeKey("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != "original" || first.Duplicate || duplicate.ID != "original" || !duplicate.Duplicate {
+		t.Fatalf("first=%#v duplicate=%#v", first, duplicate)
+	}
+	if backend.publishes != 1 {
+		t.Fatalf("publishes = %d", backend.publishes)
 	}
 }
 

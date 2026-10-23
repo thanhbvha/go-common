@@ -15,6 +15,8 @@ const (
 // DefaultNamespace is the default namespace to segregate eventbus from queue* modules.
 const DefaultNamespace = "eventbus"
 
+const delayDisabledOption = "eventbus.delay_disabled"
+
 // TopologyName returns a string representation of the topology.
 func TopologyName(t Topology) string {
 	return t.Name()
@@ -22,6 +24,16 @@ func TopologyName(t Topology) string {
 
 // TopologyOption allows configuring topology-specific options.
 type TopologyOption func(*Topology)
+
+// TaskOption configures a task declaration.
+type TaskOption = TopologyOption
+
+// EventOption configures an event declaration.
+type EventOption = TopologyOption
+
+// SubscriberOption configures one local event subscriber. Provisioning-only
+// options are rejected when used in this scope.
+type SubscriberOption = TopologyOption
 
 // WithOption adds a generic option to the topology.
 func WithOption(key string, value any) TopologyOption {
@@ -64,12 +76,30 @@ func WithRateLimit(perSecond float64, burst int) TopologyOption {
 // WithOrderingKeyConcurrency bounds simultaneous handlers sharing one nonempty
 // ordering key. Keys are isolated per local task or subscriber session.
 func WithOrderingKeyConcurrency(limit int) TopologyOption {
-	return WithOption("eventbus.ordering_key_concurrency", limit)
+	return WithConcurrencyKeyLimit(limit)
+}
+
+// WithConcurrencyKeyLimit bounds simultaneous handlers sharing one nonempty
+// process-local concurrency key.
+func WithConcurrencyKeyLimit(limit int) TopologyOption {
+	return WithOption("eventbus.concurrency_key_limit", limit)
 }
 
 // WithMaxPayloadBytes overrides the serialized envelope limit for one topology.
 func WithMaxPayloadBytes(max int) TopologyOption {
 	return WithOption("eventbus.max_payload_bytes", max)
+}
+
+// WithDelayDisabled declares an immediate-only topology. Future publications
+// and retries are rejected before broker I/O, allowing drivers to omit delay
+// infrastructure.
+func WithDelayDisabled() TopologyOption {
+	return WithOption(delayDisabledOption, true)
+}
+
+func delayEnabled(topology Topology) bool {
+	disabled, _ := topology.Options[delayDisabledOption].(bool)
+	return !disabled
 }
 
 // WithLegacyResourceNames explicitly selects the pre-v2 separator-joined

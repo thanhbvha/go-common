@@ -209,6 +209,26 @@ func TestDelayedSchedulerCapacityOrderAndClose(t *testing.T) {
 	}
 }
 
+func TestDelayDisabledDoesNotEnterSharedHeap(t *testing.T) {
+	backend := New().(*memoryTransport)
+	topo := transport.Topology{Namespace: "memory", JobType: "immediate", Kind: transport.TaskTopology, Options: map[string]any{"eventbus.delay_disabled": true}}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.PublishAt(context.Background(), topo, transport.Message{ID: "future"}, time.Now().Add(time.Hour)); !errors.Is(err, transport.ErrNotSupported) {
+		t.Fatalf("PublishAt = %v", err)
+	}
+	backend.mu.Lock()
+	delayed := backend.delayed.Len()
+	backend.mu.Unlock()
+	if delayed != 0 {
+		t.Fatalf("delayed heap length = %d", delayed)
+	}
+	if err := backend.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDelayedSchedulerAutomaticallyDispatchesAndReportsBackpressure(t *testing.T) {
 	backend := New().(*memoryTransport)
 	t.Cleanup(func() { _ = backend.Close(context.Background()) })

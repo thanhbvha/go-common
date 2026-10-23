@@ -133,7 +133,7 @@ func TopologyOptions(driver string) []eventbus.TopologyOption {
 	case "nats":
 		return append(base, natsdriver.WithAckWait(30*time.Second), natsdriver.WithBatchSize(12), natsdriver.WithFetchTimeout(time.Second), natsdriver.WithDelayBatchSize(100))
 	case "kafka":
-		return append(base, kafkadriver.WithPartitions(3), kafkadriver.WithReplicationFactor(1), kafkadriver.WithFetchMaxWait(500*time.Millisecond), kafkadriver.WithDelayBatchSize(100), kafkadriver.WithRetention(24*time.Hour))
+		return append(base, kafkadriver.WithPartitions(4), kafkadriver.WithReplicationFactor(1), kafkadriver.WithFetchMaxWait(500*time.Millisecond), kafkadriver.WithDelayBatchSize(100), kafkadriver.WithRetention(24*time.Hour))
 	default:
 		return base
 	}
@@ -161,7 +161,7 @@ func SupportsDedupe(tr transport.Transport) bool {
 }
 
 func SupportsOrdering(tr transport.Transport) bool {
-	return tr.Capabilities().Ordering
+	return tr.Capabilities().SupportsBrokerOrdering()
 }
 
 func Start(ctx context.Context, bus eventbus.Bus) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goccy/go-json"
 )
@@ -25,14 +26,15 @@ type Envelope struct {
 	// MaxRetry is populated only while decoding a v2 envelope.
 	//
 	// Deprecated: use MaxAttempts.
-	MaxRetry    int     `json:"max_retry,omitempty"`
-	CreatedAt   int64   `json:"created_at"`              // creation time in unix milliseconds
-	RunAt       int64   `json:"run_at"`                  // scheduled run time in unix milliseconds
-	OrderingKey string  `json:"ordering_key,omitempty"`  // optional partition/ordering key
-	DedupeKey   string  `json:"dedupe_key,omitempty"`    // optional deduplication key
-	DedupeTTL   int64   `json:"dedupe_ttl_ns,omitempty"` // reservation lifetime in nanoseconds
-	Headers     Headers `json:"headers,omitempty"`       // optional headers (e.g. traceparent)
-	legacy      bool
+	MaxRetry       int     `json:"max_retry,omitempty"`
+	CreatedAt      int64   `json:"created_at"`                // creation time in unix milliseconds
+	RunAt          int64   `json:"run_at"`                    // scheduled run time in unix milliseconds
+	OrderingKey    string  `json:"ordering_key,omitempty"`    // optional broker partition/ordering key
+	ConcurrencyKey string  `json:"concurrency_key,omitempty"` // optional process-local admission key
+	DedupeKey      string  `json:"dedupe_key,omitempty"`      // optional deduplication key
+	DedupeTTL      int64   `json:"dedupe_ttl_ns,omitempty"`   // reservation lifetime in nanoseconds
+	Headers        Headers `json:"headers,omitempty"`         // optional headers (e.g. traceparent)
+	legacy         bool
 }
 
 // Job is the public interface for handlers to access job context and payload.
@@ -82,18 +84,32 @@ func (j *Job) Header(key string) string {
 
 // JobOptions are used when enqueuing a job.
 type JobOptions struct {
-	Delay       time.Duration
-	RunAt       time.Time
-	OrderingKey string
-	DedupeKey   string
-	DedupeTTL   time.Duration
-	Headers     Headers
+	MessageID      string
+	Delay          time.Duration
+	RunAt          time.Time
+	OrderingKey    string
+	ConcurrencyKey string
+	DedupeKey      string
+	DedupeTTL      time.Duration
+	Headers        Headers
+	messageIDSet   bool
 }
 
 // JobOption is a functional option for customizing JobOptions.
 type JobOption func(*JobOptions)
 
 const MaxBatchJobs = 1000
+
+// PublicationResult identifies one durably accepted logical publication.
+type PublicationResult struct {
+	ID        string `json:"id"`
+	Duplicate bool   `json:"duplicate,omitempty"`
+}
+
+// BatchPublicationResult contains the accepted prefix in input order.
+type BatchPublicationResult struct {
+	Results []PublicationResult `json:"results"`
+}
 
 // BatchJob is one task publication in EnqueueBatch.
 type BatchJob struct {
@@ -133,12 +149,42 @@ func applyJobOptions(options *JobOptions, opts []JobOption) error {
 	if options.DedupeTTL > 0 && options.DedupeKey == "" {
 		return fmt.Errorf("%w: dedupe TTL requires a dedupe key", ErrInvalidOption)
 	}
+	if options.messageIDSet {
+		if err := validateMessageID(options.MessageID); err != nil {
+			return err
+		}
+	}
+	if len(options.OrderingKey) > maxEnvelopeKeyBytes || len(options.ConcurrencyKey) > maxEnvelopeKeyBytes || len(options.DedupeKey) > maxEnvelopeKeyBytes {
+		return fmt.Errorf("%w: ordering, concurrency, and dedupe keys must not exceed %d bytes", ErrInvalidOption, maxEnvelopeKeyBytes)
+	}
 	for key := range options.Headers {
 		if strings.TrimSpace(key) == "" || key != strings.TrimSpace(key) {
 			return fmt.Errorf("%w: header key %q is blank or malformed", ErrInvalidOption, key)
 		}
 	}
 	return nil
+}
+
+func validateMessageID(id string) error {
+	if id == "" || len(id) > maxEnvelopeIDBytes || !utf8.ValidString(id) || id != strings.TrimSpace(id) {
+		return fmt.Errorf("%w: message ID is empty or malformed", ErrInvalidOption)
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: message ID contains control characters", ErrInvalidOption)
+		}
+	}
+	return nil
+}
+
+// WithMessageID sets a stable caller-supplied logical EventBus ID. It does not
+// provide portable duplicate suppression; combine it with WithDedupeKey when
+// producer retries must resolve to one accepted publication.
+func WithMessageID(id string) JobOption {
+	return func(o *JobOptions) {
+		o.MessageID = id
+		o.messageIDSet = true
+	}
 }
 
 func WithDelay(d time.Duration) JobOption {
@@ -150,7 +196,22 @@ func WithRunAt(t time.Time) JobOption {
 }
 
 func WithOrderingKey(key string) JobOption {
+	return func(o *JobOptions) {
+		o.OrderingKey = key
+		o.ConcurrencyKey = key
+	}
+}
+
+// WithBrokerOrderingKey selects broker partition/ordering metadata without
+// changing process-local keyed admission.
+func WithBrokerOrderingKey(key string) JobOption {
 	return func(o *JobOptions) { o.OrderingKey = key }
+}
+
+// WithConcurrencyKey selects process-local keyed admission independently of
+// broker ordering support.
+func WithConcurrencyKey(key string) JobOption {
+	return func(o *JobOptions) { o.ConcurrencyKey = key }
 }
 
 func WithDedupeKey(key string) JobOption {

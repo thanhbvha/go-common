@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/thanhbvha/go-common/eventbus/driver/memory"
 	"github.com/thanhbvha/go-common/eventbus/registry"
+	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
 func TestEngine_C4_StateMachine(t *testing.T) {
@@ -161,14 +162,21 @@ func TestEngine_C14_PoisonMessage(t *testing.T) {
 	b.Start(ctx)
 	b.Enqueue(ctx, "test-poison", "payload")
 
-	// Wait for the message to be tried MaxDeliveries times
-	time.Sleep(500 * time.Millisecond)
-	b.Stop(ctx)
-
-	stats, _ := b.Stats(ctx, "test-poison")
+	// Wait for the message to be tried MaxDeliveries times before shutdown;
+	// administration is intentionally closed once Stop begins.
+	var stats transport.TopologyStats
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, _ = b.Stats(ctx, "test-poison")
+		if stats.DLQ == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if stats.DLQ != 1 {
 		t.Fatalf("Bug C14 NOT fixed! Expected 1 job in DLQ, got %d", stats.DLQ)
 	}
+	b.Stop(ctx)
 
 	actualAttempts := atomic.LoadInt32(&attempts)
 	if actualAttempts > int32(cfg.MaxDeliveries) {

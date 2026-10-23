@@ -20,13 +20,16 @@ and the runner rejects configurations that would require tracking more than
 100 million messages. The notification channel and producer in-flight window are
 bounded. Enqueue timestamps travel in payloads rather than an in-memory slice.
 
-`--samples-jsonl PATH` exclusively creates periodic JSONL containing produced and
-completed counts, observed throughput, Go heap, goroutines, and topology statistics.
-Unavailable topology statistics are marked with
-`topology_stats_available: false`. Each sample records `phase: preload` or
-`phase: measurement`. A preload run stops the preload sampler, resets Go heap,
-CPU, elapsed-time, and peak baselines, and starts a new measurement sampler
-immediately before resume. Stdout remains one final JSON object.
+`--samples-jsonl PATH` exclusively creates periodic JSONL. Process records use
+`type: sample` and contain produced/completed counts, observed throughput, Go
+heap, and goroutines. When enabled, topology records use
+`type: topology_sample` and contain pending, delayed, in-flight, DLQ, and lag.
+The two samplers have independent timestamps and run concurrently so a slow
+broker stats request cannot block heap peak sampling. Each record includes
+`phase: preload` or `phase: measurement`. A preload run stops the preload
+samplers, resets Go heap, CPU, elapsed-time, and peak baselines, and starts new
+measurement samplers immediately before resume. Stdout remains one final JSON
+object.
 
 For Kafka, `--second-worker-after D` opens a second independent runtime and bus
 with the same namespace and task handler. Both workers share the process-local
@@ -151,7 +154,8 @@ Each invocation creates a collision-resistant directory under
   can be distinguished from the last in-flight periodic sample. A normal run
   fails unless all final obligations are zero, the post-drain metrics are present,
   and the accounting equations hold.
-- `benchmark-samples.jsonl` contains process and topology samples.
+- `benchmark-samples.jsonl` contains independent `sample` process records and,
+  when enabled, `topology_sample` broker-topology records.
 - `broker-samples.jsonl` contains host process samples, Docker stats, the current
   benchmark phase, and named-volume allocated filesystem bytes measured inside
   the broker container from `du -sk` 1 KiB blocks. This avoids counting sparse

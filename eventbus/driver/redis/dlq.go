@@ -307,16 +307,18 @@ func decodeDeadLetter(record goredis.XMessage) (transport.DeadLetter, error) {
 
 	message := transport.Message{Payload: []byte(payload)}
 	var envelope struct {
-		ID          string            `json:"id"`
-		Type        string            `json:"type"`
-		OrderingKey string            `json:"ordering_key"`
-		DedupeKey   string            `json:"dedupe_key"`
-		Headers     map[string]string `json:"headers"`
+		ID             string            `json:"id"`
+		Type           string            `json:"type"`
+		OrderingKey    string            `json:"ordering_key"`
+		ConcurrencyKey string            `json:"concurrency_key"`
+		DedupeKey      string            `json:"dedupe_key"`
+		Headers        map[string]string `json:"headers"`
 	}
 	if json.Unmarshal(message.Payload, &envelope) == nil {
 		message.ID = envelope.ID
 		message.Type = envelope.Type
 		message.OrderingKey = envelope.OrderingKey
+		message.ConcurrencyKey = envelope.ConcurrencyKey
 		message.DedupeKey = envelope.DedupeKey
 		message.Headers = envelope.Headers
 	}

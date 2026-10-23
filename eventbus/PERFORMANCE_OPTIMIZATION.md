@@ -221,8 +221,9 @@ Implementation status (2026-10-23):
   read the subscriber manifest once, and pipeline legacy per-lane fallback
   counts in bounded chunks.
 - Redis unit, race, vet, and integration-tag compilation gates pass. The 1m
-  retry50 broker rerun remains required before claiming the documented 20%
-  throughput target.
+  retry50 rerun passed correctness and cleanup, but throughput was 657 msg/s
+  versus the 660 msg/s baseline, so the documented 20% throughput target was
+  not met. Allocations fell from 344.5 to 260.0 per message.
 
 Measured starting profiles after this refactor:
 
@@ -338,9 +339,15 @@ Implementation status (2026-10-23):
 - Indexed event retry lanes use versioned v3 resources and WorkQueue retention;
   existing v2 lanes retain Limits retention.
 - The production benchmark enables indexed-v3. Unit, full embedded-JetStream
-  integration, race, vet, and integration-tag compilation gates pass. The
-  100k/1m production reruns remain required before recording throughput, stats
-  overhead, and allocated-volume improvements.
+  integration, race, vet, and integration-tag compilation gates pass.
+- Production reruns passed exact accounting, final drain, profiles, and cleanup.
+  Resource-only delayed throughput was 879 msg/s at 100k and 351 msg/s at 1m.
+  The 1m result improved 52% from 231 msg/s, below the 2x target, and its
+  1m/100k ratio was 0.40, below the 0.7 target.
+- Five-second topology sampling reduced delayed throughput from 879 to 772
+  msg/s at 100k and from 351 to 275 msg/s at 1m. The measured 1m overhead was
+  21.7%, above the 5% target. The indexed layout reduced 100k allocated volume
+  by 32%; 1m allocated volume improved by only 4%.
 
 ### Current evidence
 
@@ -447,9 +454,14 @@ Implementation status (2026-10-23):
   per group.
 - `WithDelayDisabled` lets immediate-only topologies omit delay topics and
   scheduler clients while rejecting future publish/retry before broker I/O.
-- Unit, race, vet, and integration-tag compilation gates pass. The 100k/1m
-  broker-backed acceptance reruns remain required before recording measured
-  throughput and peak-heap improvements.
+- Unit, race, vet, and integration-tag compilation gates pass. Broker-backed
+  delayed reruns passed exact accounting, final drain, profiles, and cleanup.
+  Throughput improved from 205 to 4,843 msg/s at 100k and from 209 to 5,158
+  msg/s at 1m, exceeding the 2x target by a wide margin.
+- The independently sampled 1m peak heap was 1.17 GB versus the prior 537 MB
+  observation. Because the old combined sampler could miss peaks while blocked
+  in stats calls, this is not like-for-like evidence of a driver regression,
+  but it also does not satisfy the 25% peak-heap reduction target.
 
 ### Current evidence
 
@@ -575,6 +587,28 @@ Publish presets for low latency, balanced throughput, and high throughput. Do
 not assume partitions equal concurrency is optimal for every payload or handler.
 
 ## Measurement Plan
+
+### 2026-10-23 production rerun evidence
+
+All runs used the pinned broker fixtures, 1 KiB payloads, concurrency 100, a
+five-second sample cadence, exact completion accounting, post-drain profiles,
+and project-scoped cleanup. Artifacts are below
+`/tmp/thothan/eventbus-performance-20261023/`.
+
+| Driver/workload | Size and sampling | Throughput | Baseline | Result |
+| --- | --- | ---: | ---: | --- |
+| Kafka delayed/preload | 100k, topology on | 4,843 msg/s | 205 msg/s | 23.7x; 2x target passed |
+| Kafka delayed/preload | 1m, topology on | 5,158 msg/s | 209 msg/s | 24.7x; 2x target passed |
+| NATS delayed/preload | 100k, topology off | 879 msg/s | 1,067 msg/s | 17.6% below baseline |
+| NATS delayed/preload | 1m, topology off | 351 msg/s | 231 msg/s | 51.9% improvement; 2x target missed |
+| NATS delayed/preload | 1m, topology on | 275 msg/s | 351 msg/s off | 21.7% sampling overhead; 5% target missed |
+| Redis retry50 | 100k, topology on | 1,752 msg/s | 1,747 msg/s | essentially unchanged |
+| Redis retry50 | 1m, topology on | 657 msg/s | 660 msg/s | essentially unchanged; 20% target missed |
+
+Every listed run reported zero duplicates, pending, delayed, in-flight, DLQ,
+and lag at completion, with `acceptance_status: passed` and verified cleanup.
+The acceptance status validates run integrity; it does not override the explicit
+performance thresholds above.
 
 Every optimization PR should include:
 

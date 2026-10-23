@@ -66,3 +66,29 @@ func TestEnqueueBatchPublishesEveryItem(t *testing.T) {
 		t.Fatalf("published = %d", len(backend.payloads))
 	}
 }
+
+func TestEnqueueBatchWithResultReturnsDurablePrefix(t *testing.T) {
+	backend := &batchRecordingTransport{}
+	bus, err := Open(DefaultConfig(), WithTransport(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.DeclareTask("batch"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := bus.EnqueueBatchWithResult(context.Background(), "batch", []BatchJob{
+		{Payload: 1, Options: []JobOption{WithMessageID("first")}},
+		{Payload: 2, Options: []JobOption{nil}},
+		{Payload: 3, Options: []JobOption{WithMessageID("third")}},
+	})
+	var batchErr *BatchError
+	if !errors.As(err, &batchErr) || batchErr.Index != 1 {
+		t.Fatalf("error = %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].ID != "first" {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(backend.payloads) != 1 {
+		t.Fatalf("published = %d", len(backend.payloads))
+	}
+}

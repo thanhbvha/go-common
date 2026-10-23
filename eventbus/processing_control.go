@@ -19,7 +19,11 @@ func newProcessingPolicy(topo Topology) *processingPolicy {
 	if configured, ok := topo.Options["eventbus.rate_limit"].(RateLimit); ok {
 		policy.rate = rate.NewLimiter(rate.Limit(configured.PerSecond), configured.Burst)
 	}
-	if limit, ok := topo.Options["eventbus.ordering_key_concurrency"].(int); ok {
+	limit, ok := topo.Options["eventbus.concurrency_key_limit"].(int)
+	if !ok {
+		limit, ok = topo.Options["eventbus.ordering_key_concurrency"].(int)
+	}
+	if ok {
 		policy.keys = &keyedConcurrency{limit: limit, entries: make(map[string]*keyEntry)}
 	}
 	return policy

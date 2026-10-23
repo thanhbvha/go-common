@@ -150,7 +150,16 @@ func New() transport.Transport {
 func (m *memoryTransport) Name() string { return "memory" }
 
 func (m *memoryTransport) Capabilities() transport.Capabilities {
-	return transport.Capabilities{DelayPrecision: time.Millisecond}
+	return transport.Capabilities{
+		Durability:     transport.DurabilityProcess,
+		Delay:          transport.DelayCapabilities{Supported: true, Precision: time.Millisecond, Provisioning: transport.DelaySharedScheduler, Optional: true},
+		Settlement:     transport.SettlementCapabilities{Retry: transport.SettlementProcessLocal, DLQ: transport.SettlementProcessLocal},
+		Dedupe:         transport.DedupeProcessConfirmed,
+		Admin:          transport.AdminCapabilities{DLQ: true, CursorDLQ: true, Stats: true, SubscriptionStats: true, Pause: transport.ScopeProcess},
+		Scheduler:      transport.SchedulerCapabilities{Health: true, WorkerScope: transport.ScopeProcess},
+		Payload:        transport.PayloadCapabilities{CoreLimitSupported: true},
+		DelayPrecision: time.Millisecond,
+	}
 }
 
 func (m *memoryTransport) ValidateTopology(topology transport.Topology) error {
@@ -266,6 +275,9 @@ func (m *memoryTransport) PublishAt(ctx context.Context, topology transport.Topo
 	}
 	if !runAt.After(time.Now()) {
 		return m.Publish(ctx, topology, msg)
+	}
+	if disabled, _ := topology.Options["eventbus.delay_disabled"].(bool); disabled {
+		return transport.ErrNotSupported
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -558,30 +570,35 @@ func memoryDedupeKey(topo transport.Topology, key string) string {
 }
 
 func (m *memoryTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	reservation, err := m.BeginPublicationWithResult(ctx, topo, key, reservationID, ttl)
+	return reservation.State, err
+}
+
+func (m *memoryTransport) BeginPublicationWithResult(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.PublicationReservation, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return transport.PublicationReservation{}, err
 	}
 	if err := m.ValidateTopology(topo); err != nil {
-		return 0, err
+		return transport.PublicationReservation{}, err
 	}
 	if key == "" || reservationID == "" || ttl <= 0 {
-		return 0, fmt.Errorf("memory: dedupe key, reservation ID, and positive TTL required")
+		return transport.PublicationReservation{}, fmt.Errorf("memory: dedupe key, reservation ID, and positive TTL required")
 	}
 	storageKey := memoryDedupeKey(topo, key)
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return 0, errMemoryClosed
+		return transport.PublicationReservation{}, errMemoryClosed
 	}
 	if record, ok := m.dedupes[storageKey]; ok && now.Before(record.expires) {
 		if record.state == transport.DedupeReservationPublished {
-			return transport.DedupeReservationPublished, nil
+			return transport.PublicationReservation{State: transport.DedupeReservationPublished, MessageID: record.owner}, nil
 		}
-		return transport.DedupeReservationPending, nil
+		return transport.PublicationReservation{State: transport.DedupeReservationPending, MessageID: record.owner}, nil
 	}
 	m.dedupes[storageKey] = memoryDedupe{expires: now.Add(ttl), owner: reservationID, state: transport.DedupeReservationPending}
-	return transport.DedupeReservationAcquired, nil
+	return transport.PublicationReservation{State: transport.DedupeReservationAcquired, MessageID: reservationID}, nil
 }
 
 func (m *memoryTransport) ConfirmPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {
@@ -859,6 +876,9 @@ func (d *memoryDelivery) Settle(ctx context.Context, decision transport.Decision
 			}
 			next := cloneMessage(decision.Next)
 			if decision.RetryAt.After(time.Now()) {
+				if disabled, _ := d.topo.Options["eventbus.delay_disabled"].(bool); disabled {
+					return transport.ErrNotSupported
+				}
 				return m.scheduleLocked(d.topo, []string{d.group}, next, decision.RetryAt, d)
 			}
 			topo := m.ensureTopologyLocked(d.topo)

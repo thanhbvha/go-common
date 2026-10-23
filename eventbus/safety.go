@@ -49,7 +49,7 @@ func validateEnvelopeRoute(env *Envelope, kind TopologyKind, jobType string) (st
 	if env.DedupeTTL < 0 || (env.DedupeTTL > 0 && env.DedupeKey == "") {
 		return "invalid_dedupe", errors.New("eventbus: invalid envelope dedupe metadata")
 	}
-	if len(env.OrderingKey) > maxEnvelopeKeyBytes || len(env.DedupeKey) > maxEnvelopeKeyBytes {
+	if len(env.OrderingKey) > maxEnvelopeKeyBytes || len(env.ConcurrencyKey) > maxEnvelopeKeyBytes || len(env.DedupeKey) > maxEnvelopeKeyBytes {
 		return "invalid_keys", errors.New("eventbus: envelope key metadata too large")
 	}
 	if len(env.Headers) > maxEnvelopeHeaderCount {

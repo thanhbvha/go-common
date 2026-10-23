@@ -401,7 +401,7 @@ func Run(t *testing.T, h Harness) {
 
 	t.Run("advertised_ordering_serializes_same_key", func(t *testing.T) {
 		tr := h.New(t)
-		if !tr.Capabilities().Ordering {
+		if !tr.Capabilities().SupportsBrokerOrdering() {
 			t.Skip("transport does not advertise ordering")
 		}
 		topo := h.Topology(t.Name(), transport.TaskTopology)
@@ -801,7 +801,7 @@ func Run(t *testing.T, h Harness) {
 }
 
 func delayPrecision(tr transport.Transport) time.Duration {
-	precision := tr.Capabilities().DelayPrecision
+	precision := tr.Capabilities().EffectiveDelayPrecision()
 	if precision <= 0 {
 		return time.Millisecond
 	}

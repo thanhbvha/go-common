@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,9 +40,40 @@ type engine struct {
 	workerCancel context.CancelFunc
 	wg           sync.WaitGroup
 	mu           sync.RWMutex
+	operationMu  sync.RWMutex
 	startDone    chan struct{}
 	stopDone     chan struct{}
 	stopErr      error
+}
+
+func (e *engine) beginOperation() (func(), error) {
+	e.operationMu.RLock()
+	switch atomic.LoadInt32(&e.state) {
+	case stateStopping, stateStopped:
+		e.operationMu.RUnlock()
+		return nil, ErrBusClosed
+	default:
+		return e.operationMu.RUnlock, nil
+	}
+}
+
+func (e *engine) beginDeclaration() (func(), error) {
+	release, err := e.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	if atomic.LoadInt32(&e.state) != stateNew {
+		release()
+		return nil, ErrAlreadyStarted
+	}
+	return release, nil
+}
+
+func lifecycleDeclarationError(state int32) error {
+	if state == stateStopping || state == stateStopped {
+		return ErrBusClosed
+	}
+	return ErrAlreadyStarted
 }
 
 func newEngine(cfg Config, t transport.Transport, codec *Codec) *engine {
@@ -67,6 +99,11 @@ func newEngine(cfg Config, t transport.Transport, codec *Codec) *engine {
 }
 
 func (e *engine) Register(jobType string, handler Handler, opts ...TopologyOption) error {
+	release, err := e.beginDeclaration()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := validateName("task name", jobType); err != nil {
 		return err
 	}
@@ -80,20 +117,28 @@ func (e *engine) Register(jobType string, handler Handler, opts ...TopologyOptio
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
 	}
 	if _, exists := e.eventTopologies[jobType]; exists {
 		return fmt.Errorf("%w: %q is already an event", ErrTopologyKindConflict, jobType)
 	}
-	e.taskTopologies[jobType] = topo
+	if existing, exists := e.taskTopologies[jobType]; exists && !reflect.DeepEqual(existing, topo) {
+		return fmt.Errorf("%w: task %q", ErrConflictingDeclaration, jobType)
+	}
+	if _, exists := e.handlers[jobType]; exists {
+		return fmt.Errorf("%w: task %q", ErrDuplicateHandler, jobType)
+	}
+	e.taskTopologies[jobType] = cloneTopology(topo)
 	e.handlers[jobType] = handler
 	return nil
 }
 
-func (e *engine) DeclareTask(jobType string, opts ...TopologyOption) error {
-	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+func (e *engine) DeclareTask(jobType string, opts ...TaskOption) error {
+	release, err := e.beginDeclaration()
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	topo, err := e.buildTopology(TaskTopology, jobType, opts)
 	if err != nil {
@@ -103,19 +148,27 @@ func (e *engine) DeclareTask(jobType string, opts ...TopologyOption) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
 	}
 	if _, exists := e.eventTopologies[jobType]; exists {
 		return fmt.Errorf("%w: %q is already an event", ErrTopologyKindConflict, jobType)
 	}
-	e.taskTopologies[jobType] = topo
+	if existing, exists := e.taskTopologies[jobType]; exists {
+		if reflect.DeepEqual(existing, topo) {
+			return nil
+		}
+		return fmt.Errorf("%w: task %q", ErrConflictingDeclaration, jobType)
+	}
+	e.taskTopologies[jobType] = cloneTopology(topo)
 	return nil
 }
 
 func (e *engine) HandleTask(jobType string, handler Handler) error {
-	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+	release, err := e.beginDeclaration()
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	if err := validateName("task name", jobType); err != nil {
 		return err
@@ -127,7 +180,7 @@ func (e *engine) HandleTask(jobType string, handler Handler) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
 	}
 	if _, exists := e.eventTopologies[jobType]; exists {
 		return fmt.Errorf("%w: %q is already an event", ErrTopologyKindConflict, jobType)
@@ -135,14 +188,19 @@ func (e *engine) HandleTask(jobType string, handler Handler) error {
 	if _, declared := e.taskTopologies[jobType]; !declared {
 		return fmt.Errorf("%w: task %q", ErrUndeclaredTopology, jobType)
 	}
+	if _, exists := e.handlers[jobType]; exists {
+		return fmt.Errorf("%w: task %q", ErrDuplicateHandler, jobType)
+	}
 	e.handlers[jobType] = handler
 	return nil
 }
 
-func (e *engine) DeclareEvent(eventName string, opts ...TopologyOption) error {
-	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+func (e *engine) DeclareEvent(eventName string, opts ...EventOption) error {
+	release, err := e.beginDeclaration()
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	topo, err := e.buildTopology(EventTopology, eventName, opts)
 	if err != nil {
@@ -152,19 +210,27 @@ func (e *engine) DeclareEvent(eventName string, opts ...TopologyOption) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
 	}
 	if _, exists := e.taskTopologies[eventName]; exists {
 		return fmt.Errorf("%w: %q is already a task", ErrTopologyKindConflict, eventName)
 	}
-	e.eventTopologies[eventName] = topo
+	if existing, exists := e.eventTopologies[eventName]; exists {
+		if reflect.DeepEqual(existing, topo) {
+			return nil
+		}
+		return fmt.Errorf("%w: event %q", ErrConflictingDeclaration, eventName)
+	}
+	e.eventTopologies[eventName] = cloneTopology(topo)
 	return nil
 }
 
-func (e *engine) Subscribe(eventName, handlerName string, handler Handler, opts ...TopologyOption) error {
-	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+func (e *engine) Subscribe(eventName, handlerName string, handler Handler, opts ...SubscriberOption) error {
+	release, err := e.beginDeclaration()
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	if err := validateName("event name", eventName); err != nil {
 		return err
@@ -179,32 +245,30 @@ func (e *engine) Subscribe(eventName, handlerName string, handler Handler, opts 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if atomic.LoadInt32(&e.state) != stateNew {
-		return ErrAlreadyStarted
+		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
 	}
 	if _, exists := e.taskTopologies[eventName]; exists {
 		return fmt.Errorf("%w: %q is already a task", ErrTopologyKindConflict, eventName)
 	}
 
+	if _, exists := e.subscribers[eventName][handlerName]; exists {
+		return fmt.Errorf("%w: event %q subscriber %q", ErrDuplicateSubscriber, eventName, handlerName)
+	}
 	topo, declared := e.eventTopologies[eventName]
 	if !declared {
 		// Compatibility path: Subscribe historically declared the event. New
 		// code should call DeclareEvent explicitly before adding subscribers.
 		topo = Topology{Namespace: e.cfg.Namespace, JobType: eventName, Kind: EventTopology}
-	} else if topo.Options != nil {
-		cloned := make(map[string]any, len(topo.Options))
-		for key, value := range topo.Options {
-			cloned[key] = value
-		}
-		topo.Options = cloned
 	}
-	if err := applyTopologyOptions(&topo, opts); err != nil {
+	materialized, err := applySubscriberOptions(topo, opts)
+	if err != nil {
 		return err
 	}
-	if err := validateTopology(topo, e.transport); err != nil {
+	if err := validateTopology(materialized, e.transport); err != nil {
 		return err
 	}
 	if !declared {
-		e.eventTopologies[eventName] = topo
+		e.eventTopologies[eventName] = cloneTopology(topo)
 	}
 
 	if e.subscribers[eventName] == nil {
@@ -212,7 +276,7 @@ func (e *engine) Subscribe(eventName, handlerName string, handler Handler, opts 
 		e.subTopologies[eventName] = make(map[string]Topology)
 	}
 	e.subscribers[eventName][handlerName] = handler
-	e.subTopologies[eventName][handlerName] = topo
+	e.subTopologies[eventName][handlerName] = materialized
 
 	return nil
 }
@@ -229,22 +293,32 @@ func (e *engine) buildTopology(kind TopologyKind, name string, opts []TopologyOp
 }
 
 func (e *engine) Start(ctx context.Context) (err error) {
+	e.operationMu.Lock()
 	e.mu.Lock()
 	switch atomic.LoadInt32(&e.state) {
 	case stateStopping, stateStopped:
 		e.mu.Unlock()
+		e.operationMu.Unlock()
 		return ErrBusClosed
 	case stateStarting, stateRunning:
 		e.mu.Unlock()
+		e.operationMu.Unlock()
 		return ErrAlreadyStarted
 	}
 	if err := ctx.Err(); err != nil {
 		e.mu.Unlock()
+		e.operationMu.Unlock()
+		return err
+	}
+	if err := e.validateCapacityPlan(); err != nil {
+		e.mu.Unlock()
+		e.operationMu.Unlock()
 		return err
 	}
 	atomic.StoreInt32(&e.state, stateStarting)
 	e.startDone = make(chan struct{})
 	e.mu.Unlock()
+	e.operationMu.Unlock()
 
 	// Stop can interrupt provisioning without waiting for the registry lock.
 	startCtx, cancel := context.WithCancel(ctx)
@@ -315,6 +389,21 @@ func (e *engine) Start(ctx context.Context) (err error) {
 		}
 	}
 
+	return nil
+}
+
+func (e *engine) validateCapacityPlan() error {
+	topologies := len(e.taskTopologies) + len(e.eventTopologies)
+	subscribers := 0
+	for _, groups := range e.subscribers {
+		subscribers += len(groups)
+	}
+	if e.cfg.MaxTopologies > 0 && topologies > e.cfg.MaxTopologies {
+		return fmt.Errorf("%w: topology plan %d exceeds limit %d", ErrInvalidConfig, topologies, e.cfg.MaxTopologies)
+	}
+	if e.cfg.MaxSubscribers > 0 && subscribers > e.cfg.MaxSubscribers {
+		return fmt.Errorf("%w: subscriber plan %d exceeds limit %d", ErrInvalidConfig, subscribers, e.cfg.MaxSubscribers)
+	}
 	return nil
 }
 
@@ -534,6 +623,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	msg.ID = env.ID
 	msg.Type = env.Type
 	msg.OrderingKey = env.OrderingKey
+	msg.ConcurrencyKey = env.ConcurrencyKey
 	msg.DedupeKey = env.DedupeKey
 	msg.Headers = cloneHeaders(env.Headers)
 	e.observeQueueAge(metricsJobType, env)
@@ -585,7 +675,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 			<-heartbeatDone
 		}()
 	}
-	releaseKey, err := policy.wait(executionCtx, env.OrderingKey)
+	releaseKey, err := policy.wait(executionCtx, env.ConcurrencyKey)
 	if err != nil {
 		return
 	}
@@ -813,6 +903,7 @@ func (e *engine) Stop(ctx context.Context) error {
 }
 
 func (e *engine) Drain(ctx context.Context) error {
+	e.operationMu.Lock()
 	e.mu.Lock()
 	if e.stopDone == nil {
 		e.stopDone = make(chan struct{})
@@ -822,6 +913,7 @@ func (e *engine) Drain(ctx context.Context) error {
 	}
 	done := e.stopDone
 	e.mu.Unlock()
+	e.operationMu.Unlock()
 	// Once shutdown is complete, its recorded result wins even if this caller
 	// supplies an already-canceled waiting context.
 	select {
@@ -867,10 +959,30 @@ func (e *engine) shutdown(ctx context.Context, startDone <-chan struct{}) {
 }
 
 func (e *engine) Enqueue(ctx context.Context, jobType string, payload any, opts ...JobOption) error {
-	return e.publish(ctx, TaskTopology, jobType, payload, opts...)
+	release, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = e.publish(ctx, TaskTopology, jobType, payload, false, opts...)
+	return err
+}
+
+func (e *engine) EnqueueWithResult(ctx context.Context, jobType string, payload any, opts ...JobOption) (PublicationResult, error) {
+	release, err := e.beginOperation()
+	if err != nil {
+		return PublicationResult{}, err
+	}
+	defer release()
+	return e.publish(ctx, TaskTopology, jobType, payload, true, opts...)
 }
 
 func (e *engine) EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error {
+	release, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if len(jobs) == 0 {
 		return fmt.Errorf("%w: batch must contain at least one job", ErrInvalidOption)
 	}
@@ -881,20 +993,61 @@ func (e *engine) EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJ
 		if err := ctx.Err(); err != nil {
 			return &BatchError{Index: index, Err: err}
 		}
-		if err := e.publish(ctx, TaskTopology, jobType, job.Payload, job.Options...); err != nil {
+		if _, err := e.publish(ctx, TaskTopology, jobType, job.Payload, false, job.Options...); err != nil {
 			return &BatchError{Index: index, Err: err}
 		}
 	}
 	return nil
 }
 
-func (e *engine) PublishEvent(ctx context.Context, eventName string, payload any, opts ...JobOption) error {
-	return e.publish(ctx, EventTopology, eventName, payload, opts...)
+func (e *engine) EnqueueBatchWithResult(ctx context.Context, jobType string, jobs []BatchJob) (BatchPublicationResult, error) {
+	release, err := e.beginOperation()
+	if err != nil {
+		return BatchPublicationResult{}, err
+	}
+	defer release()
+	if len(jobs) == 0 {
+		return BatchPublicationResult{}, fmt.Errorf("%w: batch must contain at least one job", ErrInvalidOption)
+	}
+	if len(jobs) > MaxBatchJobs {
+		return BatchPublicationResult{}, fmt.Errorf("%w: batch has %d jobs, maximum is %d", ErrInvalidOption, len(jobs), MaxBatchJobs)
+	}
+	result := BatchPublicationResult{Results: make([]PublicationResult, 0, len(jobs))}
+	for index, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return result, &BatchError{Index: index, Err: err}
+		}
+		published, err := e.publish(ctx, TaskTopology, jobType, job.Payload, true, job.Options...)
+		if err != nil {
+			return result, &BatchError{Index: index, Err: err}
+		}
+		result.Results = append(result.Results, published)
+	}
+	return result, nil
 }
 
-func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, payload any, opts ...JobOption) (result error) {
-	if err := validateName("topology name", name); err != nil {
+func (e *engine) PublishEvent(ctx context.Context, eventName string, payload any, opts ...JobOption) error {
+	release, err := e.beginOperation()
+	if err != nil {
 		return err
+	}
+	defer release()
+	_, err = e.publish(ctx, EventTopology, eventName, payload, false, opts...)
+	return err
+}
+
+func (e *engine) PublishEventWithResult(ctx context.Context, eventName string, payload any, opts ...JobOption) (PublicationResult, error) {
+	release, err := e.beginOperation()
+	if err != nil {
+		return PublicationResult{}, err
+	}
+	defer release()
+	return e.publish(ctx, EventTopology, eventName, payload, true, opts...)
+}
+
+func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, payload any, requireStableDuplicateID bool, opts ...JobOption) (publication PublicationResult, result error) {
+	if err := validateName("topology name", name); err != nil {
+		return PublicationResult{}, err
 	}
 	ctx, endSpan := e.cfg.Tracer.Start(ctx, "eventbus.publish", nil)
 	defer endSpan()
@@ -925,11 +1078,11 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 
 	if !known {
 		if !e.cfg.AutoRegister {
-			return ErrUnknownJobType
+			return PublicationResult{}, ErrUnknownJobType
 		}
 		// Lazy EnsureTopology for unknown types if AutoRegister is true (Bug C5)
 		if err := e.transport.EnsureTopology(ctx, topo); err != nil {
-			return fmt.Errorf("ensure topology: %w", err)
+			return PublicationResult{}, fmt.Errorf("ensure topology: %w", err)
 		}
 	}
 
@@ -939,7 +1092,10 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	}
 	env, err := e.codec.buildEnvelope(kind, name, payload, maxAttempts, opts...)
 	if err != nil {
-		return err
+		return PublicationResult{}, err
+	}
+	if env.RunAt > time.Now().UnixMilli() && !delayEnabled(topo) {
+		return PublicationResult{}, ErrNotSupported
 	}
 	env.Headers = cloneHeaders(env.Headers)
 	if injector, ok := e.cfg.Tracer.(TraceInjector); ok {
@@ -950,27 +1106,28 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
-		return err
+		return PublicationResult{}, err
 	}
 	maxPayloadBytes := e.cfg.MaxPayloadBytes
 	if val, ok := topo.Options["eventbus.max_payload_bytes"].(int); ok && val > 0 {
 		maxPayloadBytes = val
 	}
 	if len(data) > maxPayloadBytes {
-		return payloadTooLargeError(len(data), maxPayloadBytes)
+		return PublicationResult{}, payloadTooLargeError(len(data), maxPayloadBytes)
 	}
 
 	msg := transport.Message{
-		ID:          env.ID,
-		Type:        env.Type,
-		Payload:     data,
-		OrderingKey: env.OrderingKey,
-		DedupeKey:   env.DedupeKey,
-		Headers:     cloneHeaders(env.Headers),
+		ID:             env.ID,
+		Type:           env.Type,
+		Payload:        data,
+		OrderingKey:    env.OrderingKey,
+		ConcurrencyKey: env.ConcurrencyKey,
+		DedupeKey:      env.DedupeKey,
+		Headers:        cloneHeaders(env.Headers),
 	}
 
-	if msg.OrderingKey != "" && !e.transport.Capabilities().Ordering {
-		return ErrNotSupported
+	if msg.OrderingKey != "" && !e.transport.Capabilities().SupportsBrokerOrdering() {
+		return PublicationResult{}, ErrNotSupported
 	}
 
 	// Handle Deduplication (Bug C11)
@@ -979,20 +1136,55 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		if dedupeTTL == 0 {
 			dedupeTTL = 24 * time.Hour
 		}
+		if deduper, ok := e.transport.(transport.PublicationDeduperWithResult); ok {
+			reservation, err := deduper.BeginPublicationWithResult(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			if err != nil {
+				return PublicationResult{}, fmt.Errorf("dedupe begin: %w", err)
+			}
+			switch reservation.State {
+			case transport.DedupeReservationPublished:
+				if reservation.MessageID == "" {
+					return PublicationResult{}, fmt.Errorf("%w: published reservation has no message ID", ErrDedupeAmbiguous)
+				}
+				status = "duplicate"
+				return PublicationResult{ID: reservation.MessageID, Duplicate: true}, nil
+			case transport.DedupeReservationPending:
+				return PublicationResult{}, fmt.Errorf("%w: unconfirmed reservation", ErrDedupeAmbiguous)
+			case transport.DedupeReservationAcquired:
+			default:
+				return PublicationResult{}, fmt.Errorf("%w: unknown reservation state %d", ErrDedupeAmbiguous, reservation.State)
+			}
+			pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if pubErr != nil {
+				if abortErr := deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); abortErr != nil {
+					return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
+				}
+				return PublicationResult{}, pubErr
+			}
+			if err := deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); err != nil {
+				return PublicationResult{}, fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
+			}
+			return PublicationResult{ID: msg.ID}, nil
+		}
 		if deduper, ok := e.transport.(transport.PublicationDeduper); ok {
 			state, err := deduper.BeginPublication(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
 			if err != nil {
-				return fmt.Errorf("dedupe begin: %w", err)
+				return PublicationResult{}, fmt.Errorf("dedupe begin: %w", err)
 			}
 			switch state {
 			case transport.DedupeReservationPublished:
 				status = "duplicate"
-				return nil
+				if requireStableDuplicateID {
+					return PublicationResult{}, fmt.Errorf("%w: legacy deduper cannot return the original message ID", ErrDedupeAmbiguous)
+				}
+				return PublicationResult{Duplicate: true}, nil
 			case transport.DedupeReservationPending:
-				return fmt.Errorf("%w: unconfirmed reservation", ErrDedupeAmbiguous)
+				return PublicationResult{}, fmt.Errorf("%w: unconfirmed reservation", ErrDedupeAmbiguous)
 			case transport.DedupeReservationAcquired:
 			default:
-				return fmt.Errorf("%w: unknown reservation state %d", ErrDedupeAmbiguous, state)
+				return PublicationResult{}, fmt.Errorf("%w: unknown reservation state %d", ErrDedupeAmbiguous, state)
 			}
 
 			pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
@@ -1000,14 +1192,14 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			defer cancel()
 			if pubErr != nil {
 				if abortErr := deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); abortErr != nil {
-					return errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
+					return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
 				}
-				return pubErr
+				return PublicationResult{}, pubErr
 			}
 			if err := deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); err != nil {
-				return fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
+				return PublicationResult{}, fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
 			}
-			return nil
+			return PublicationResult{ID: msg.ID}, nil
 		}
 
 		var reserve func(context.Context, string, time.Duration) (bool, error)
@@ -1020,15 +1212,15 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		} else if deduper, ok := e.transport.(transport.Deduper); ok {
 			reserve, release = deduper.Reserve, deduper.Release
 		} else {
-			return ErrDedupeUnavailable
+			return PublicationResult{}, ErrDedupeUnavailable
 		}
 
 		acquired, err := reserve(ctx, msg.DedupeKey, dedupeTTL)
 		if err != nil {
-			return fmt.Errorf("dedupe reserve: %w", err)
+			return PublicationResult{}, fmt.Errorf("dedupe reserve: %w", err)
 		}
 		if !acquired {
-			return fmt.Errorf("%w: legacy deduper cannot prove durable publication", ErrDedupeAmbiguous)
+			return PublicationResult{}, fmt.Errorf("%w: legacy deduper cannot prove durable publication", ErrDedupeAmbiguous)
 		}
 
 		// Publish
@@ -1039,21 +1231,21 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			if cleanupErr := release(cleanupCtx, msg.DedupeKey); cleanupErr != nil {
-				return errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, cleanupErr))
+				return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, cleanupErr))
 			}
-			return pubErr
+			return PublicationResult{}, pubErr
 		}
 
-		return nil
+		return PublicationResult{ID: msg.ID}, nil
 	}
 
 	pubErr := e.publishMessage(ctx, topo, msg, env.RunAt)
 
 	if pubErr != nil {
-		return pubErr
+		return PublicationResult{}, pubErr
 	}
 
-	return nil
+	return PublicationResult{ID: msg.ID}, nil
 }
 
 func (e *engine) publishMessage(ctx context.Context, topo Topology, msg transport.Message, runAt int64) error {

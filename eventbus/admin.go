@@ -55,6 +55,11 @@ func (b *bus) adminEventTopology(ref TopologyRef, subscriber string) (Topology, 
 }
 
 func (b *bus) TopologyStats(ctx context.Context, ref TopologyRef) (transport.TopologyStats, error) {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
+	defer release()
 	topo, err := b.adminTopology(ref)
 	if err != nil {
 		return transport.TopologyStats{}, err
@@ -73,6 +78,11 @@ func (b *bus) TopologyStats(ctx context.Context, ref TopologyRef) (transport.Top
 }
 
 func (b *bus) SubscriberStats(ctx context.Context, event, subscriber string) (transport.TopologyStats, error) {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
+	defer release()
 	topo, err := b.adminEventTopology(EventRef(event), subscriber)
 	if err != nil {
 		return transport.TopologyStats{}, err
@@ -91,6 +101,11 @@ func (b *bus) SubscriberStats(ctx context.Context, event, subscriber string) (tr
 }
 
 func (b *bus) ListDeadLetters(ctx context.Context, ref TopologyRef, cursor string, limit int) (transport.DLQPage, error) {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return transport.DLQPage{}, err
+	}
+	defer release()
 	topo, err := b.adminTopology(ref)
 	if err != nil {
 		return transport.DLQPage{}, err
@@ -110,6 +125,11 @@ func (b *bus) ListDeadLetters(ctx context.Context, ref TopologyRef, cursor strin
 }
 
 func (b *bus) CountDeadLetters(ctx context.Context, ref TopologyRef) (int64, error) {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	topo, err := b.adminTopology(ref)
 	if err != nil {
 		return 0, err
@@ -122,6 +142,11 @@ func (b *bus) CountDeadLetters(ctx context.Context, ref TopologyRef) (int64, err
 }
 
 func (b *bus) RequeueDeadLetters(ctx context.Context, ref TopologyRef, ids []string) error {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	topo, err := b.adminTopology(ref)
 	if err != nil {
 		return err
@@ -134,6 +159,11 @@ func (b *bus) RequeueDeadLetters(ctx context.Context, ref TopologyRef, ids []str
 }
 
 func (b *bus) PurgeDeadLetters(ctx context.Context, ref TopologyRef) error {
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	topo, err := b.adminTopology(ref)
 	if err != nil {
 		return err

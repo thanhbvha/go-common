@@ -109,11 +109,12 @@ return #jobs
 local current = redis.call("GET", KEYS[1])
 if not current then
     local created = redis.call("SET", KEYS[1], "r:" .. ARGV[1], "PX", ARGV[2], "NX")
-    if created then return 1 end
+    if created then return {1, ARGV[1]} end
     current = redis.call("GET", KEYS[1])
 end
-if current and string.sub(current, 1, 2) == "p:" then return 2 end
-return 3
+if current and string.sub(current, 1, 2) == "p:" then return {2, string.sub(current, 3)} end
+if current and string.sub(current, 1, 2) == "r:" then return {3, string.sub(current, 3)} end
+return {3, ""}
 `
 	luaConfirmPublication = `
 local current = redis.call("GET", KEYS[1])
@@ -193,8 +194,15 @@ func (t *redisTransport) Name() string { return "redis" }
 
 func (t *redisTransport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
-		DelayPrecision: 1 * time.Second, // Sweeper runs every second
-		Ordering:       false,           // Redis streams don't have per-message ordering keys
+		Durability:     transport.DurabilityBroker,
+		Delay:          transport.DelayCapabilities{Supported: true, Precision: time.Second, Provisioning: transport.DelayPerTopologyScheduler, Optional: true},
+		Settlement:     transport.SettlementCapabilities{Retry: transport.SettlementAtomic, DLQ: transport.SettlementAtomic},
+		Dedupe:         transport.DedupeBrokerConfirmed,
+		Heartbeat:      transport.ScopeBroker,
+		Admin:          transport.AdminCapabilities{DLQ: true, CursorDLQ: true, Stats: true, SubscriptionStats: true, Pause: transport.ScopeProcess},
+		Scheduler:      transport.SchedulerCapabilities{Health: true, WorkerScope: transport.ScopeBroker},
+		Payload:        transport.PayloadCapabilities{CoreLimitSupported: true},
+		DelayPrecision: time.Second,
 	}
 }
 
@@ -234,14 +242,17 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 		return fmt.Errorf("redis: transport closed")
 	}
 	topoName := topologyPrefix(topo)
-	if _, ok := t.sweepers[topoName]; !ok {
-		sweepCtx, cancel := context.WithCancel(context.Background())
-		t.sweepers[topoName] = cancel
-		t.sweeperWG.Add(1)
-		go func() {
-			defer t.sweeperWG.Done()
-			t.delaySweeper(sweepCtx, topo)
-		}()
+	delayDisabled, _ := topo.Options["eventbus.delay_disabled"].(bool)
+	if !delayDisabled {
+		if _, ok := t.sweepers[topoName]; !ok {
+			sweepCtx, cancel := context.WithCancel(context.Background())
+			t.sweepers[topoName] = cancel
+			t.sweeperWG.Add(1)
+			go func() {
+				defer t.sweeperWG.Done()
+				t.delaySweeper(sweepCtx, topo)
+			}()
+		}
 	}
 	t.retentionTopologies[topoName] = topo
 	select {
@@ -287,6 +298,12 @@ func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology,
 func (t *redisTransport) publishDelayed(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time, retryCapacity bool) error {
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
+	}
+	if disabled, _ := topo.Options["eventbus.delay_disabled"].(bool); disabled {
+		if runAt.After(time.Now()) {
+			return transport.ErrNotSupported
+		}
+		return t.publishReady(ctx, topo, msg, retryCapacity)
 	}
 	if err := t.ensureCapacityCounters(ctx, topo); err != nil {
 		return err
@@ -692,18 +709,34 @@ var (
 )
 
 func (t *redisTransport) BeginPublication(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.DedupeReservationState, error) {
+	reservation, err := t.BeginPublicationWithResult(ctx, topo, key, reservationID, ttl)
+	return reservation.State, err
+}
+
+func (t *redisTransport) BeginPublicationWithResult(ctx context.Context, topo transport.Topology, key, reservationID string, ttl time.Duration) (transport.PublicationReservation, error) {
 	if err := t.validateTopologyOptions(topo, false); err != nil {
-		return 0, err
+		return transport.PublicationReservation{}, err
 	}
 	if key == "" || reservationID == "" || ttl <= 0 {
-		return 0, fmt.Errorf("redis: dedupe key, reservation ID, and positive TTL required")
+		return transport.PublicationReservation{}, fmt.Errorf("redis: dedupe key, reservation ID, and positive TTL required")
 	}
 	ttlMillis := max(int64(1), ttl.Milliseconds())
-	state, err := beginPublicationScript.Run(ctx, t.rc, []string{t.dedupeKey(topo, key)}, reservationID, ttlMillis).Int()
+	values, err := beginPublicationScript.Run(ctx, t.rc, []string{t.dedupeKey(topo, key)}, reservationID, ttlMillis).Slice()
 	if err != nil {
-		return 0, fmt.Errorf("redis dedupe begin: %w", err)
+		return transport.PublicationReservation{}, fmt.Errorf("redis dedupe begin: %w", err)
 	}
-	return transport.DedupeReservationState(state), nil
+	if len(values) != 2 {
+		return transport.PublicationReservation{}, fmt.Errorf("redis dedupe begin returned %d values", len(values))
+	}
+	state, ok := values[0].(int64)
+	if !ok {
+		return transport.PublicationReservation{}, fmt.Errorf("redis dedupe begin returned invalid state %T", values[0])
+	}
+	owner, ok := values[1].(string)
+	if !ok {
+		return transport.PublicationReservation{}, fmt.Errorf("redis dedupe begin returned invalid owner %T", values[1])
+	}
+	return transport.PublicationReservation{State: transport.DedupeReservationState(state), MessageID: owner}, nil
 }
 
 func (t *redisTransport) ConfirmPublication(ctx context.Context, topo transport.Topology, key, reservationID string) error {

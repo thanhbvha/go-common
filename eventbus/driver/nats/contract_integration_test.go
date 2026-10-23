@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	gonats "github.com/nats-io/nats.go"
 	buscontract "github.com/thanhbvha/go-common/eventbus/contracttest"
 	"github.com/thanhbvha/go-common/eventbus/transport"
 	transportcontract "github.com/thanhbvha/go-common/eventbus/transport/contracttest"
@@ -134,6 +135,30 @@ func TestNATSTransportContract(t *testing.T) {
 		SubscriberDLQIsolation:   true,
 		ReceiveWithin:            5 * time.Second,
 	})
+}
+
+func TestNATSDelayDisabledTaskOmitsKVAndSweeper(t *testing.T) {
+	s, js := provisioningJetStream(t)
+	defer s.Shutdown()
+	backend := New(js).(*natsTransport)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	topo := transport.Topology{Namespace: "immediate", JobType: "task", Kind: transport.TaskTopology, Options: map[string]any{"eventbus.delay_disabled": true}}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.RLock()
+	_, kvExists := backend.kvs[backend.kvBucketName(topo)]
+	_, sweeperExists := backend.sweepers[topo.Name()]
+	backend.mu.RUnlock()
+	if kvExists || sweeperExists {
+		t.Fatalf("kv=%t sweeper=%t", kvExists, sweeperExists)
+	}
+	if _, err := js.KeyValue(backend.kvBucketName(topo)); !errors.Is(err, gonats.ErrBucketNotFound) {
+		t.Fatalf("delay KV lookup = %v", err)
+	}
+	if err := backend.PublishAt(context.Background(), topo, transport.Message{Payload: []byte("future")}, time.Now().Add(time.Hour)); !errors.Is(err, transport.ErrNotSupported) {
+		t.Fatalf("PublishAt = %v", err)
+	}
 }
 
 func TestNATSBusContract(t *testing.T) {

@@ -51,6 +51,11 @@ type Config struct {
 	// Default: 1 MiB.
 	MaxPayloadBytes int
 
+	// MaxTopologies and MaxSubscribers are optional startup planning bounds.
+	// Zero leaves the corresponding dimension unlimited for compatibility.
+	MaxTopologies  int
+	MaxSubscribers int
+
 	// MaxDeliveries is the legacy name for MaxAttempts. When greater than zero,
 	// it overrides MaxAttempts during validation.
 	//
@@ -132,6 +137,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxPayloadBytes == 0 {
 		c.MaxPayloadBytes = DefaultMaxPayloadBytes
+	}
+	if c.MaxTopologies < 0 || c.MaxSubscribers < 0 {
+		return fmt.Errorf("%w: topology and subscriber limits must not be negative", ErrInvalidConfig)
 	}
 	if c.RetryPolicy == nil {
 		c.RetryPolicy = DefaultExponentialBackoff()

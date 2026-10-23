@@ -278,3 +278,68 @@ func TestStartupContextCancellationDuringProvisionIsRetryable(t *testing.T) {
 		}
 	})
 }
+
+func TestPublicOperationsReturnBusClosedAfterClose(t *testing.T) {
+	backend := &lifecycleTransport{}
+	b := lifecycleBus(t, backend)
+	if err := b.DeclareEvent("event"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	handler := func(context.Context, Job) error { return nil }
+	operations := map[string]func() error{
+		"register":         func() error { return b.Register("", handler) },
+		"declare task":     func() error { return b.DeclareTask("") },
+		"handle task":      func() error { return b.HandleTask("", handler) },
+		"declare event":    func() error { return b.DeclareEvent("") },
+		"subscribe":        func() error { return b.Subscribe("", "", handler) },
+		"enqueue":          func() error { return b.Enqueue(canceled, "", nil) },
+		"enqueue batch":    func() error { return b.EnqueueBatch(canceled, "", nil) },
+		"publish":          func() error { return b.Publish(canceled, "", nil) },
+		"ping":             func() error { return b.Ping(canceled) },
+		"stats":            func() error { _, err := b.Stats(canceled, ""); return err },
+		"topology stats":   func() error { _, err := b.TopologyStats(canceled, TopologyRef{}); return err },
+		"subscriber stats": func() error { _, err := b.SubscriberStats(canceled, "", ""); return err },
+		"list DLQ":         func() error { _, err := b.ListDeadLetters(canceled, TopologyRef{}, "", 0); return err },
+		"count DLQ":        func() error { _, err := b.CountDeadLetters(canceled, TopologyRef{}); return err },
+		"requeue DLQ":      func() error { return b.RequeueDeadLetters(canceled, TopologyRef{}, nil) },
+		"purge DLQ":        func() error { return b.PurgeDeadLetters(canceled, TopologyRef{}) },
+		"pause":            func() error { return b.Pause(canceled, "") },
+		"resume":           func() error { return b.Resume(canceled, "") },
+		"drain topology":   func() error { return b.DrainTopology(canceled, "") },
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); !errors.Is(err, ErrBusClosed) {
+				t.Fatalf("operation error = %v, want ErrBusClosed", err)
+			}
+		})
+	}
+	if backend.published.Load() != 0 {
+		t.Fatalf("post-close operations published %d messages", backend.published.Load())
+	}
+}
+
+func TestProducerOnlyPublicationBeforeStart(t *testing.T) {
+	backend := &lifecycleTransport{}
+	b, err := Open(DefaultConfig(), WithTransport(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DeclareTask("task"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Enqueue(context.Background(), "task", "payload"); err != nil {
+		t.Fatal(err)
+	}
+	if backend.published.Load() != 1 {
+		t.Fatalf("published = %d, want 1", backend.published.Load())
+	}
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

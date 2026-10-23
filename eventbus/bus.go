@@ -12,7 +12,7 @@ import (
 type Bus interface {
 	// DeclareTask declares a competing-consumer task topology. Producer-only
 	// applications can enqueue after declaration without registering a handler.
-	DeclareTask(name string, opts ...TopologyOption) error
+	DeclareTask(name string, opts ...TaskOption) error
 
 	// HandleTask attaches a handler to an explicitly declared task topology.
 	HandleTask(name string, handler Handler) error
@@ -23,7 +23,7 @@ type Bus interface {
 
 	// DeclareEvent declares a fan-out event topology. Events can be published
 	// without any local subscribers.
-	DeclareEvent(name string, opts ...TopologyOption) error
+	DeclareEvent(name string, opts ...EventOption) error
 
 	// Start provisions all declared topologies before starting consumers. A
 	// provisioning failure can be retried. The context bounds startup only.
@@ -47,11 +47,13 @@ type Bus interface {
 
 	// Enqueue adds a job to the queue.
 	Enqueue(ctx context.Context, jobType string, payload any, opts ...JobOption) error
+	EnqueueWithResult(ctx context.Context, jobType string, payload any, opts ...JobOption) (PublicationResult, error)
 
 	// EnqueueBatch publishes tasks in input order. It is bounded and non-atomic:
 	// on failure, earlier items may already be durable and later items are not
 	// attempted. BatchError identifies the failed index.
 	EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error
+	EnqueueBatchWithResult(ctx context.Context, jobType string, jobs []BatchJob) (BatchPublicationResult, error)
 
 	// PublishEvent publishes an event to multiple subscribers.
 	//
@@ -60,11 +62,12 @@ type Bus interface {
 
 	// Publish publishes an event to its independent subscriber groups.
 	Publish(ctx context.Context, eventName string, payload any, opts ...JobOption) error
+	PublishWithResult(ctx context.Context, eventName string, payload any, opts ...JobOption) (PublicationResult, error)
 
 	// Subscribe registers a handler for an event in a fan-out setup. For
 	// compatibility it implicitly declares an undeclared event; new code should
 	// call DeclareEvent first.
-	Subscribe(eventName, handlerName string, handler Handler, opts ...TopologyOption) error
+	Subscribe(eventName, handlerName string, handler Handler, opts ...SubscriberOption) error
 
 	// Stats returns the statistics for a job type.
 	// Deprecated: use TopologyStats with TaskRef or EventRef.
@@ -147,7 +150,7 @@ func (b *bus) Register(jobType string, handler Handler, opts ...TopologyOption) 
 	return b.engine.Register(jobType, handler, opts...)
 }
 
-func (b *bus) DeclareTask(name string, opts ...TopologyOption) error {
+func (b *bus) DeclareTask(name string, opts ...TaskOption) error {
 	return b.engine.DeclareTask(name, opts...)
 }
 
@@ -155,7 +158,7 @@ func (b *bus) HandleTask(name string, handler Handler) error {
 	return b.engine.HandleTask(name, handler)
 }
 
-func (b *bus) DeclareEvent(name string, opts ...TopologyOption) error {
+func (b *bus) DeclareEvent(name string, opts ...EventOption) error {
 	return b.engine.DeclareEvent(name, opts...)
 }
 
@@ -179,8 +182,16 @@ func (b *bus) Enqueue(ctx context.Context, jobType string, payload any, opts ...
 	return b.engine.Enqueue(ctx, jobType, payload, opts...)
 }
 
+func (b *bus) EnqueueWithResult(ctx context.Context, jobType string, payload any, opts ...JobOption) (PublicationResult, error) {
+	return b.engine.EnqueueWithResult(ctx, jobType, payload, opts...)
+}
+
 func (b *bus) EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error {
 	return b.engine.EnqueueBatch(ctx, jobType, jobs)
+}
+
+func (b *bus) EnqueueBatchWithResult(ctx context.Context, jobType string, jobs []BatchJob) (BatchPublicationResult, error) {
+	return b.engine.EnqueueBatchWithResult(ctx, jobType, jobs)
 }
 
 // PublishEvent publishes an event to multiple subscribers.
@@ -194,7 +205,11 @@ func (b *bus) Publish(ctx context.Context, eventName string, payload any, opts .
 	return b.engine.PublishEvent(ctx, eventName, payload, opts...)
 }
 
-func (b *bus) Subscribe(eventName, handlerName string, handler Handler, opts ...TopologyOption) error {
+func (b *bus) PublishWithResult(ctx context.Context, eventName string, payload any, opts ...JobOption) (PublicationResult, error) {
+	return b.engine.PublishEventWithResult(ctx, eventName, payload, opts...)
+}
+
+func (b *bus) Subscribe(eventName, handlerName string, handler Handler, opts ...SubscriberOption) error {
 	return b.engine.Subscribe(eventName, handlerName, handler, opts...)
 }
 
@@ -203,9 +218,11 @@ func (b *bus) Stats(ctx context.Context, jobType string) (transport.TopologyStat
 }
 
 func (b *bus) Ping(ctx context.Context) error {
-	if b.transport == nil {
-		return ErrBusClosed
+	release, err := b.engine.beginOperation()
+	if err != nil {
+		return err
 	}
+	defer release()
 	return b.transport.Ping(ctx)
 }
 

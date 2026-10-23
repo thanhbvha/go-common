@@ -15,6 +15,32 @@ import (
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
+func TestDelayDisabledTopologyDoesNotStartSweeper(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rc := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	backend := New(rc).(*redisTransport)
+	t.Cleanup(func() {
+		_ = backend.Close(context.Background())
+		_ = rc.Close()
+	})
+	topo := transport.Topology{Namespace: "immediate", JobType: "task", Kind: transport.TaskTopology, Options: map[string]any{"eventbus.delay_disabled": true}}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	_, exists := backend.sweepers[topologyPrefix(topo)]
+	backend.mu.Unlock()
+	if exists {
+		t.Fatal("delay-disabled topology started a sweeper")
+	}
+	if err := backend.PublishAt(context.Background(), topo, transport.Message{Payload: []byte("future")}, time.Now().Add(time.Hour)); !errors.Is(err, transport.ErrNotSupported) {
+		t.Fatalf("PublishAt = %v", err)
+	}
+	if mr.Exists(backend.delayedKey(topo)) {
+		t.Fatal("delay-disabled topology created delayed storage")
+	}
+}
+
 func TestEnsureTopologyReconcilesMissingAggregateCapacityCounters(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rc := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
@@ -173,14 +199,12 @@ func TestRedisTransport_PublishAndConsume(t *testing.T) {
 	defer cancel()
 
 	received := make(chan transport.Delivery)
+	consumeDone := make(chan error, 1)
 
 	go func() {
-		err := trans.Consume(consumeCtx, transport.Subscription{Topology: topo}, func(d transport.Delivery) {
+		consumeDone <- trans.Consume(consumeCtx, transport.Subscription{Topology: topo}, func(d transport.Delivery) {
 			received <- d
 		})
-		if err != nil && err != context.Canceled {
-			t.Errorf("Consume error: %v", err)
-		}
 	}()
 
 	select {
@@ -198,8 +222,19 @@ func TestRedisTransport_PublishAndConsume(t *testing.T) {
 		t.Fatalf("Timeout waiting for message")
 	}
 
+	cancel()
+	select {
+	case err := <-consumeDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Consume error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not stop after cancellation")
+	}
 	// Close transport to stop sweepers
-	trans.Close(ctx)
+	if err := trans.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRedisTransport_Delay(t *testing.T) {

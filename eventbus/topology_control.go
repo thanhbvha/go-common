@@ -123,10 +123,14 @@ func (e *engine) controlFor(key consumerKey) *consumerControl {
 }
 
 func (e *engine) topologyControls(name string) ([]*consumerControl, error) {
+	state := atomic.LoadInt32(&e.state)
+	if state == stateStopping || state == stateStopped {
+		return nil, ErrBusClosed
+	}
 	if err := validateName("topology name", name); err != nil {
 		return nil, err
 	}
-	if atomic.LoadInt32(&e.state) != stateRunning {
+	if state != stateRunning {
 		return nil, ErrBusNotRunning
 	}
 	e.mu.RLock()
@@ -152,6 +156,11 @@ func (e *engine) topologyControls(name string) ([]*consumerControl, error) {
 }
 
 func (e *engine) Pause(ctx context.Context, name string) error {
+	release, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -166,6 +175,11 @@ func (e *engine) Pause(ctx context.Context, name string) error {
 }
 
 func (e *engine) Resume(ctx context.Context, name string) error {
+	release, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -180,6 +194,11 @@ func (e *engine) Resume(ctx context.Context, name string) error {
 }
 
 func (e *engine) DrainTopology(ctx context.Context, name string) error {
+	release, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	controls, err := e.topologyControls(name)
 	if err != nil {
 		return err

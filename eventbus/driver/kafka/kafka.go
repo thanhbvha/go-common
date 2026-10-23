@@ -128,7 +128,14 @@ func (t *kafkaTransport) Name() string { return "kafka" }
 
 func (t *kafkaTransport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
-		DelayPrecision: 5 * time.Second, // Based on the smallest tier
+		Durability:     transport.DurabilityBroker,
+		Delay:          transport.DelayCapabilities{Supported: true, Precision: 5 * time.Second, Provisioning: transport.DelayTieredPerTopology, Optional: true, Tiers: len(delayTiers)},
+		Order:          transport.OrderingCapabilities{Scope: transport.OrderingPartition, Coordination: transport.ScopeBroker},
+		Settlement:     transport.SettlementCapabilities{Retry: transport.SettlementPublishBeforeSource, DLQ: transport.SettlementPublishBeforeSource},
+		Admin:          transport.AdminCapabilities{DLQ: true, Stats: true, Pause: transport.ScopeProcess},
+		Scheduler:      transport.SchedulerCapabilities{Health: true, WorkerScope: transport.ScopeBroker},
+		Payload:        transport.PayloadCapabilities{CoreLimitSupported: true},
+		DelayPrecision: 5 * time.Second,
 		// Ordering is preserved only within one physical Kafka topic-partition.
 		// Related main, delay, and private topics are independent logs.
 		Ordering: true,
@@ -552,6 +559,9 @@ func (t *kafkaTransport) targetedDelayTopics(topo transport.Topology) []string {
 }
 
 func topologyDelayEnabled(topo transport.Topology) bool {
+	if disabled, _ := topo.Options["eventbus.delay_disabled"].(bool); disabled {
+		return false
+	}
 	disabled, _ := topo.Options["kafka.delay_disabled"].(bool)
 	return !disabled
 }

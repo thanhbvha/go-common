@@ -67,7 +67,7 @@ func WithDelayBatchSize(size int) eventbus.TopologyOption {
 // that never schedules future publishes or retries. Future PublishAt and retry
 // settlement fail before broker I/O. Existing/default topologies remain enabled.
 func WithDelayDisabled() eventbus.TopologyOption {
-	return eventbus.WithOption("kafka.delay_disabled", true)
+	return eventbus.WithDelayDisabled()
 }
 
 // WithEventLayoutTargeted opts an event topology into subscriber-targeted
