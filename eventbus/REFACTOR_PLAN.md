@@ -832,7 +832,7 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     `go vet ./...`, the complete tagged Kafka suite, focused default race tests,
     and the race-enabled live topology-admin test all passed on 2026-10-19.
 
-- [~] **P6.7.6 Complete contract coverage and production-scale evidence**
+- [x] **P6.7.6 Complete contract coverage and production-scale evidence**
   - Expand `transport/contracttest.Run` so every applicable item in the shared
     transport contract checklist has an executable capability-gated scenario
     (EB-12). Map each checklist row to exact tests in `CONTRACT_TESTS.md` and
@@ -1097,9 +1097,17 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     bytes, broker logs were clean, and cleanup was verified. This closes the
     final canonical cell: the 24-cell Redis/NATS/Kafka x
     immediate/delayed/retry10/retry50 x 100k/1m matrix is complete at the
-    1 KiB/concurrency-100 dimension. P6.7.6 remains `[~]` pending full evidence
-    review, PowerShell/Windows runtime verification, immutable Compose image
-    digest pinning, and any explicitly required payload/concurrency expansion.
+    1 KiB/concurrency-100 dimension. Full cross-artifact review then replaced
+    legacy profile-less cells with current-schema reruns or post-fix profile
+    artifacts and audited all 24 dimensions for identity, exact retry/handler
+    accounting, zero final obligations, numeric allocated volume, cleanup,
+    retained heap owners, and blocked goroutines. The review passed and is
+    recorded in `P6.7.6_MATRIX_REVIEW.md`. The Redis, NATS, and Kafka fixture
+    images were then pinned to immutable registry digests. Pulls, simultaneous
+    healthy startup, runtime-version checks, container image-ID checks, Compose
+    rendering, and project-scoped teardown passed. This closed the final defined
+    high-level gate. PowerShell/Windows execution and broader
+    payload/concurrency dimensions remain optional follow-ups.
     Redis 1m immediate/preload allocated-volume evidence then completed on the
     disposable 7.4.1 fixture with 1 KiB payloads and concurrency 100: 1,000,000
     unique messages, zero duplicates/final obligations, 4,712.62 msg/s over
@@ -1356,11 +1364,17 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
     catch up slots missed during outage, so actual produced versus unique completed
     is the loss invariant. This closes the sustained soak evidence cell, not the
     remaining 100k/1m matrix dimensions.
-    Go-focused verification passed on Linux; PowerShell execution remains to be
-    rerun on Windows because this environment has no PowerShell executable.
-    Remaining 100k and payload/concurrency matrix cells, PowerShell runtime
-    verification, immutable fixture digest pinning, and full matrix
-    volume/resource review remain open, so the task stays `[~]`.
+    Go-focused verification passed on Linux. PowerShell execution may optionally
+    be rerun for Windows tooling compatibility. A 2026-10-22 environment probe
+    found no `pwsh`,
+    `powershell`, `powershell.exe`, Wine, QEMU/libvirt, Windows mount, Windows
+    Docker context, repository workflow, or registered GitHub self-hosted runner.
+    This does not block production evidence for the Go library and Linux broker
+    containers.
+    The canonical matrix, full volume/resource/profile review, fault evidence,
+    sustained soak, and immutable fixture digest pinning are complete.
+    Payload/concurrency expansion remains conditional on being separately
+    confirmed as a new exit criterion. P6.7.6 is complete.
 
 - [ ] **P6.7.7 Finalize the API and scalability model before adapters**
   - Make all public operations return deterministic lifecycle errors while

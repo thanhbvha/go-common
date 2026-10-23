@@ -58,11 +58,11 @@ and retry transfers without changing the reusable library or demo default.
 
 `eventbus/testdata/benchmark/compose.yaml` defines profile-scoped pinned images:
 
-| Profile | Image | Container data path |
+| Profile | Immutable image | Container data path |
 | --- | --- | --- |
-| `redis` | `redis:7.4.1-alpine` | `/data` |
-| `nats` | `nats:2.10.22-alpine` | `/data` |
-| `kafka` | `apache/kafka:3.8.0` | `/var/lib/kafka/data` |
+| `redis` | `redis:7.4.1-alpine@sha256:c1e88455c85225310bbea54816e9c3f4b5295815e6dbf80c34d40afc6df28275` | `/data` |
+| `nats` | `nats:2.10.22-alpine@sha256:73b0ba5fec5518c5f698597c58d2a3350a2b5ccae43e84c308f8d2da1242deca` | `/data` |
+| `kafka` | `apache/kafka:3.8.0@sha256:c89f315cff967322c5d2021434b32271393cb193aa7ec1d43e97341924e57069` | `/var/lib/kafka/data` |
 
 The orchestrator allocates run-specific loopback ports, a unique guarded Compose
 project, a unique EventBus namespace, and named volumes labeled by that project.
@@ -141,8 +141,9 @@ Each invocation creates a collision-resistant directory under
   versions, synthetic/shared-broker declarations, namespace, and cleanup command.
 - `broker-inspect.json` captures the broker image ID, image/configuration, mounts,
   labels, and runtime settings reported by Docker.
-- `broker.log` captures scoped Compose service logs after startup, or immediately
-  when startup/health validation fails.
+- `broker.log` captures scoped Compose service logs after startup and refreshes
+  them immediately before teardown, or captures them immediately when
+  startup/health validation fails.
 - `result.json` is the runner's final result, including final pending, delayed,
   in-flight, DLQ, and lag counts read after topology drain and before transport
   close, plus retry and handler-accounting fields. It also records heap and
@@ -236,6 +237,11 @@ Parser and parameter validation does not require Docker:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   ./eventbus/testdata/benchmark/test-scripts.ps1
 ```
+
+The PowerShell validation command is an optional Windows tooling compatibility
+check, not a production-evidence release gate. Running it on an actual Windows
+host validates process argument quoting, `.exe` invocation, path handling, and
+Docker Desktop integration.
 
 The Bash runner preserves argument boundaries for artifact paths containing
 spaces, terminates its child before Compose teardown, and samples the broker's
@@ -370,5 +376,6 @@ after drain. Allocated Kafka data peaked/finalized at 82,849,792 bytes across 14
 samples; cleanup was verified. The artifact is under
 `/tmp/thothan/p676-production-evidence/20261022T054124064Z-kafka-retry10-100000-kafka-100k-retry10-final-35219fac/`.
 This completes the canonical 24-cell matrix only at the documented
-1 KiB/concurrency-100 dimension; it does not close the remaining tooling,
-cross-platform, digest-pinning, or broader dimension gates.
+1 KiB/concurrency-100 dimension. The fixture images are pinned by immutable
+digest; broader dimensions and cross-platform PowerShell execution are optional
+follow-ups rather than P6.7.6 gates.

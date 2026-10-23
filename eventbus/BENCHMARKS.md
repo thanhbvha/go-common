@@ -385,9 +385,18 @@ Artifacts are under
 `/tmp/thothan/p676-production-evidence/20261022T054124064Z-kafka-retry10-100000-kafka-100k-retry10-final-35219fac/`.
 This closes the final canonical cell. The 24-cell Redis/NATS/Kafka x
 immediate/delayed/retry10/retry50 x 100k/1m matrix is complete at the canonical
-1 KiB/concurrency-100 dimension. P6.7.6 remains `[~]` pending full evidence
-review, PowerShell/Windows runtime verification, immutable Compose image digest
-pinning, and any explicitly required payload/concurrency expansion.
+1 KiB/concurrency-100 dimension. The subsequent full cross-artifact accounting,
+volume, cleanup, resource, heap-profile, and goroutine-profile review is recorded
+in `P6.7.6_MATRIX_REVIEW.md` and passed after replacing legacy profile-less
+artifacts with current-schema reruns. PowerShell/Windows execution remains an
+optional cross-platform tooling compatibility check.
+
+The fixture images were then pinned to immutable Redis, NATS, and Kafka digests.
+Registry pulls, simultaneous healthy startup, runtime versions, container image
+IDs, Compose rendering, and project-scoped teardown all passed. This closed the
+final defined P6.7.6 gate; broader dimensions and Windows tooling execution are
+optional follow-ups. The pinned digests are Redis `c1e88455...`, NATS
+`73b0ba5f...`, and Kafka `c89f315c...` as recorded in `PRODUCTION_SCALE.md`.
 
 The final Redis 1,000,000-message immediate/preload allocated-volume rerun was
 accepted on 2026-10-20 with 1 KiB payloads and concurrency 100:

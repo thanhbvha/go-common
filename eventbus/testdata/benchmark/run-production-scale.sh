@@ -254,6 +254,7 @@ cleanup() {
     wait "$process_pid" 2>/dev/null
     process_forced_stop=true
   fi
+  docker compose --project-name "$project" --file "$compose_file" --profile "$driver" logs --no-color "$driver" >"$broker_logs_path" 2>&1 || true
   docker compose --project-name "$project" --file "$compose_file" --profile "$driver" down -v --remove-orphans >/dev/null 2>&1
   cleanup_exit=$?
   remaining_containers=$(docker ps -aq --filter "label=com.docker.compose.project=$project" | jq -Rsc 'split("\n")|map(select(length>0))')

@@ -304,6 +304,7 @@ catch {
 }
 finally {
     try { $processForcedStop = Stop-BenchmarkProcess $process } catch { if (-not $runError) { $runError = $_ } }
+    try { (& docker compose --project-name $project --file $composeFile --profile $Driver logs --no-color $Driver) | Set-Content -LiteralPath $brokerLogsPath -Encoding utf8 } catch { }
     & docker compose --project-name $project --file $composeFile --profile $Driver down -v --remove-orphans
     $cleanupExit = $LASTEXITCODE
     $remainingContainers = @(& docker ps -aq --filter "label=com.docker.compose.project=$project") | Where-Object { $_ }
