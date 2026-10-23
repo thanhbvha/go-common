@@ -348,9 +348,31 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 	if err != nil {
 		return transport.TopologyStats{}, err
 	}
+	topics := []string{main, t.dlqTopic(topology)}
+	for _, group := range groups {
+		if topology.Kind == transport.EventTopology {
+			topics = append(topics, group+".retry-ready")
+		}
+	}
+	if topologyDelayEnabled(topology) {
+		for _, tier := range delayTiers {
+			topics = append(topics, t.delayTopic(topology, tier))
+			if topology.Kind == transport.EventTopology {
+				topics = append(topics, t.targetedDelayTopic(topology, tier))
+			}
+		}
+	}
+	snapshot, err := t.loadOffsetSnapshot(ctx, topics...)
+	if err != nil {
+		return transport.TopologyStats{}, err
+	}
 	var mainLag int64
 	for _, group := range groups {
-		lag, err := t.groupLag(ctx, main, group)
+		groupTopics := []string{main}
+		if topology.Kind == transport.EventTopology {
+			groupTopics = append(groupTopics, group+".retry-ready")
+		}
+		lag, err := t.groupLagFromSnapshot(ctx, snapshot, group, groupTopics...)
 		if err != nil {
 			return transport.TopologyStats{}, err
 		}
@@ -358,29 +380,11 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 			return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing topology lag")
 		}
 		mainLag += lag
-		if topology.Kind == transport.EventTopology {
-			lag, err = t.groupLag(ctx, group+".retry-ready", group)
-			if err != nil {
-				return transport.TopologyStats{}, err
-			}
-			if mainLag > math.MaxInt64-lag {
-				return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing topology lag")
-			}
-			mainLag += lag
-		}
 	}
 	var delayed int64
-	for _, tier := range delayTiers {
-		lag, err := t.groupLag(ctx, t.delayTopic(topology, tier), fmt.Sprintf("%s-delay-%s-group", topology.Name(), tier))
-		if err != nil {
-			return transport.TopologyStats{}, err
-		}
-		if delayed > math.MaxInt64-lag {
-			return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing delayed count")
-		}
-		delayed += lag
-		if topology.Kind == transport.EventTopology {
-			lag, err = t.groupLag(ctx, t.targetedDelayTopic(topology, tier), fmt.Sprintf("%s-target-delay-%s-group", topology.Name(), tier))
+	if topologyDelayEnabled(topology) {
+		for _, tier := range delayTiers {
+			lag, err := t.groupLagFromSnapshot(ctx, snapshot, fmt.Sprintf("%s-delay-%s-group", topology.Name(), tier), t.delayTopic(topology, tier))
 			if err != nil {
 				return transport.TopologyStats{}, err
 			}
@@ -388,9 +392,19 @@ func (t *kafkaTransport) Stats(ctx context.Context, topology transport.Topology)
 				return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing delayed count")
 			}
 			delayed += lag
+			if topology.Kind == transport.EventTopology {
+				lag, err = t.groupLagFromSnapshot(ctx, snapshot, fmt.Sprintf("%s-target-delay-%s-group", topology.Name(), tier), t.targetedDelayTopic(topology, tier))
+				if err != nil {
+					return transport.TopologyStats{}, err
+				}
+				if delayed > math.MaxInt64-lag {
+					return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing delayed count")
+				}
+				delayed += lag
+			}
 		}
 	}
-	dlq, err := t.Count(ctx, topology)
+	dlq, err := t.groupLagFromSnapshot(ctx, snapshot, t.dlqAdminGroup(topology), t.dlqTopic(topology))
 	if err != nil {
 		return transport.TopologyStats{}, err
 	}
@@ -405,18 +419,15 @@ func (t *kafkaTransport) SubscriptionStats(ctx context.Context, sub transport.Su
 		return transport.TopologyStats{}, fmt.Errorf("kafka: event subscriber required")
 	}
 	group := kafkaConsumerGroup(sub.Topology, sub.Group)
-	lag, err := t.groupLag(ctx, t.mainTopic(sub.Topology), group)
+	main, private := t.mainTopic(sub.Topology), t.privateReadyTopic(sub.Topology, sub.Group)
+	snapshot, err := t.loadOffsetSnapshot(ctx, main, private)
 	if err != nil {
 		return transport.TopologyStats{}, err
 	}
-	privateLag, err := t.groupLag(ctx, t.privateReadyTopic(sub.Topology, sub.Group), group)
+	lag, err := t.groupLagFromSnapshot(ctx, snapshot, group, main, private)
 	if err != nil {
 		return transport.TopologyStats{}, err
 	}
-	if lag > math.MaxInt64-privateLag {
-		return transport.TopologyStats{}, fmt.Errorf("kafka: overflowing subscriber lag")
-	}
-	lag += privateLag
 	// Targeted delay tiers are shared logs and Kafka has no per-header index.
 	// Delayed is therefore unknown for one subscriber and is reported as zero,
 	// rather than incorrectly attributing the entire shared backlog to it.
@@ -447,28 +458,59 @@ func (t *kafkaTransport) groupLag(ctx context.Context, topic, group string) (int
 }
 
 func (t *kafkaTransport) logicalOffsets(ctx context.Context, topic, group string) (map[int32]int64, map[int32]int64, error) {
-	startResponse, err := t.listOffsetsWhenLeaderReady(ctx, topic, true)
+	snapshot, err := t.loadOffsetSnapshot(ctx, topic)
 	if err != nil {
-		return nil, nil, fmt.Errorf("kafka: list start offsets for %q: %w", topic, err)
-	}
-	endResponse, err := t.listOffsetsWhenLeaderReady(ctx, topic, false)
-	if err != nil {
-		return nil, nil, fmt.Errorf("kafka: list end offsets for %q: %w", topic, err)
+		return nil, nil, err
 	}
 	committed, err := t.adm.FetchOffsetsForTopics(ctx, group, topic)
 	if err != nil {
 		return nil, nil, fmt.Errorf("kafka: fetch group %q offsets: %w", group, err)
 	}
-	if err := startResponse.Error(); err != nil {
-		return nil, nil, fmt.Errorf("kafka: list start offsets for %q: %w", topic, err)
+	return logicalOffsetsFromSnapshot(snapshot, committed, topic, group)
+}
+
+type kafkaOffsetSnapshot struct {
+	starts kadm.ListedOffsets
+	ends   kadm.ListedOffsets
+}
+
+func (t *kafkaTransport) loadOffsetSnapshot(ctx context.Context, topics ...string) (kafkaOffsetSnapshot, error) {
+	startResponse, err := t.listOffsetsWhenLeaderReady(ctx, true, topics...)
+	if err != nil {
+		return kafkaOffsetSnapshot{}, fmt.Errorf("kafka: list start offsets: %w", err)
 	}
-	if err := endResponse.Error(); err != nil {
-		return nil, nil, fmt.Errorf("kafka: list end offsets for %q: %w", topic, err)
+	endResponse, err := t.listOffsetsWhenLeaderReady(ctx, false, topics...)
+	if err != nil {
+		return kafkaOffsetSnapshot{}, fmt.Errorf("kafka: list end offsets: %w", err)
 	}
-	starts := make(map[int32]int64, len(endResponse[topic]))
-	ends := make(map[int32]int64, len(endResponse[topic]))
-	for partition, end := range endResponse[topic] {
-		start, ok := startResponse.Lookup(topic, partition)
+	return kafkaOffsetSnapshot{starts: startResponse, ends: endResponse}, nil
+}
+
+func (t *kafkaTransport) groupLagFromSnapshot(ctx context.Context, snapshot kafkaOffsetSnapshot, group string, topics ...string) (int64, error) {
+	committed, err := t.adm.FetchOffsetsForTopics(ctx, group, topics...)
+	if err != nil {
+		return 0, fmt.Errorf("kafka: fetch group %q offsets: %w", group, err)
+	}
+	var total int64
+	for _, topic := range topics {
+		starts, ends, err := logicalOffsetsFromSnapshot(snapshot, committed, topic, group)
+		if err != nil {
+			return 0, err
+		}
+		lag, err := offsetDistance(starts, ends)
+		if err != nil || total > math.MaxInt64-lag {
+			return 0, fmt.Errorf("kafka: overflowing group %q lag", group)
+		}
+		total += lag
+	}
+	return total, nil
+}
+
+func logicalOffsetsFromSnapshot(snapshot kafkaOffsetSnapshot, committed kadm.OffsetResponses, topic, group string) (map[int32]int64, map[int32]int64, error) {
+	starts := make(map[int32]int64, len(snapshot.ends[topic]))
+	ends := make(map[int32]int64, len(snapshot.ends[topic]))
+	for partition, end := range snapshot.ends[topic] {
+		start, ok := snapshot.starts.Lookup(topic, partition)
 		if !ok || start.Offset < 0 || end.Offset < start.Offset {
 			return nil, nil, fmt.Errorf("kafka: invalid offset range for %s[%d]", topic, partition)
 		}
@@ -489,7 +531,7 @@ func (t *kafkaTransport) logicalOffsets(ctx context.Context, topic, group string
 	return starts, ends, nil
 }
 
-func (t *kafkaTransport) listOffsetsWhenLeaderReady(ctx context.Context, topic string, start bool) (kadm.ListedOffsets, error) {
+func (t *kafkaTransport) listOffsetsWhenLeaderReady(ctx context.Context, start bool, topics ...string) (kadm.ListedOffsets, error) {
 	backoff := 25 * time.Millisecond
 	for {
 		var (
@@ -497,9 +539,9 @@ func (t *kafkaTransport) listOffsetsWhenLeaderReady(ctx context.Context, topic s
 			err      error
 		)
 		if start {
-			response, err = t.adm.ListStartOffsets(ctx, topic)
+			response, err = t.adm.ListStartOffsets(ctx, topics...)
 		} else {
-			response, err = t.adm.ListEndOffsets(ctx, topic)
+			response, err = t.adm.ListEndOffsets(ctx, topics...)
 		}
 		if err == nil {
 			err = response.Error()

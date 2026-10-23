@@ -169,10 +169,12 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	main := t.mainTopic(topo)
 	dlq := t.dlqTopic(topo)
 	topics := []string{main, dlq}
-	for _, tier := range delayTiers {
-		topics = append(topics, t.delayTopic(topo, tier))
-		if topo.Kind == transport.EventTopology {
-			topics = append(topics, t.targetedDelayTopic(topo, tier))
+	if topologyDelayEnabled(topo) {
+		for _, tier := range delayTiers {
+			topics = append(topics, t.delayTopic(topo, tier))
+			if topo.Kind == transport.EventTopology {
+				topics = append(topics, t.targetedDelayTopic(topo, tier))
+			}
 		}
 	}
 	lockTopic := t.dlqAdminLockTopic(topo)
@@ -234,7 +236,10 @@ func (t *kafkaTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	topoName := topo.Name()
-	if _, ok := t.sweepers[topoName]; !ok {
+	if topologyDelayEnabled(topo) {
+		if _, ok := t.sweepers[topoName]; ok {
+			return nil
+		}
 		scheduler, err := t.startDelayScheduler(topo)
 		if err != nil {
 			return fmt.Errorf("kafka EnsureTopology delay scheduler: %w", err)
@@ -410,6 +415,9 @@ func (t *kafkaTransport) PublishAt(ctx context.Context, topo transport.Topology,
 		return err
 	}
 	removeMessageHeader(&msg, kafkaTargetGroupHeader)
+	if !topologyDelayEnabled(topo) && runAt.After(time.Now()) {
+		return fmt.Errorf("%w: kafka delay is disabled for topology %q", transport.ErrNotSupported, topo.Name())
+	}
 	topic := t.delayDestination(topo, runAt, time.Now())
 	if topic == t.mainTopic(topo) {
 		return t.produceConfirmed(ctx, messageRecord(topic, msg))
@@ -424,6 +432,9 @@ func (t *kafkaTransport) publishTargetedAt(ctx context.Context, topo transport.T
 	group := msg.Headers[kafkaTargetGroupHeader]
 	if group == "" {
 		return fmt.Errorf("kafka: targeted retry group required")
+	}
+	if !topologyDelayEnabled(topo) && runAt.After(time.Now()) {
+		return fmt.Errorf("%w: kafka delay is disabled for topology %q", transport.ErrNotSupported, topo.Name())
 	}
 	if err := t.validateProvisionedSubscriber(ctx, topo, group); err != nil {
 		return err
@@ -540,13 +551,30 @@ func (t *kafkaTransport) targetedDelayTopics(topo transport.Topology) []string {
 	return topics
 }
 
+func topologyDelayEnabled(topo transport.Topology) bool {
+	disabled, _ := topo.Options["kafka.delay_disabled"].(bool)
+	return !disabled
+}
+
 func topologyFetchOptions(topo transport.Topology) []kgo.Opt {
-	opts := make([]kgo.Opt, 0, 2)
+	opts := make([]kgo.Opt, 0, 6)
 	if val, ok := topo.Options["kafka.fetch_max_wait"].(time.Duration); ok && val > 0 {
 		opts = append(opts, kgo.FetchMaxWait(val))
 	}
+	if val, ok := topo.Options["kafka.fetch_min_bytes"].(int32); ok && val > 0 {
+		opts = append(opts, kgo.FetchMinBytes(val))
+	}
 	if val, ok := topo.Options["kafka.fetch_max_bytes"].(int32); ok && val > 0 {
 		opts = append(opts, kgo.FetchMaxBytes(val))
+	}
+	if val, ok := topo.Options["kafka.fetch_max_partition_bytes"].(int32); ok && val > 0 {
+		opts = append(opts, kgo.FetchMaxPartitionBytes(val))
+	}
+	if val, ok := topo.Options["kafka.max_buffered_records"].(int); ok && val > 0 {
+		opts = append(opts, kgo.MaxBufferedRecords(val))
+	}
+	if val, ok := topo.Options["kafka.max_buffered_bytes"].(int); ok && val > 0 {
+		opts = append(opts, kgo.MaxBufferedBytes(val))
 	}
 	return opts
 }

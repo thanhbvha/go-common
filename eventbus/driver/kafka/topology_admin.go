@@ -46,9 +46,14 @@ func (t *kafkaTransport) ExpandPartitions(ctx context.Context, topology transpor
 	if target <= 0 {
 		return result, fmt.Errorf("kafka: partition target must be positive")
 	}
-	topics := append([]string{t.mainTopic(topology), t.dlqTopic(topology)}, t.delayTopics(topology)...)
+	topics := []string{t.mainTopic(topology), t.dlqTopic(topology)}
+	if topologyDelayEnabled(topology) {
+		topics = append(topics, t.delayTopics(topology)...)
+	}
 	if topology.Kind == transport.EventTopology {
-		topics = append(topics, t.targetedDelayTopics(topology)...)
+		if topologyDelayEnabled(topology) {
+			topics = append(topics, t.targetedDelayTopics(topology)...)
+		}
 		privateTopics, err := t.registeredPrivateTopics(ctx, topology)
 		if err != nil {
 			return result, err

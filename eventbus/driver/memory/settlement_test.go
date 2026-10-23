@@ -90,6 +90,38 @@ func TestDLQUsesNormalizedSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestDLQListDoesNotExposeStoredMessage(t *testing.T) {
+	backend := New().(*memoryTransport)
+	defer backend.Close(context.Background())
+	topo := transport.Topology{Namespace: "test", JobType: "dlq-isolation"}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Publish(context.Background(), topo, transport.Message{Payload: []byte("original"), Headers: map[string]string{"trace": "original"}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deliveries := make(chan transport.Delivery, 1)
+	go func() {
+		_ = backend.Consume(ctx, transport.Subscription{Topology: topo}, func(delivery transport.Delivery) { deliveries <- delivery })
+	}()
+	delivery := <-deliveries
+	if err := delivery.Settle(context.Background(), transport.Decision{Kind: transport.DecisionDeadLetter, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := backend.List(context.Background(), topo, 0, 1)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%#v err=%v", records, err)
+	}
+	records[0].Message.Payload[0] = 'X'
+	records[0].Message.Headers["trace"] = "mutated"
+	again, err := backend.List(context.Background(), topo, 0, 1)
+	if err != nil || string(again[0].Message.Payload) != "original" || again[0].Message.Headers["trace"] != "original" {
+		t.Fatalf("stored DLQ message mutated = %#v, %v", again, err)
+	}
+}
+
 func TestMemoryDLQSanitizesMetadataAndBoundsRecord(t *testing.T) {
 	backend := New().(*memoryTransport)
 	defer backend.Close(context.Background())

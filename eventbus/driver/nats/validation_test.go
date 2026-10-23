@@ -26,6 +26,7 @@ func TestValidateTopologyRejectsInvalidNATSOptions(t *testing.T) {
 		{name: "delay batch too high", key: "nats.delay_batch_size", value: 1001},
 		{name: "delay lease zero", key: "nats.delay_lease", value: time.Duration(0)},
 		{name: "fetch timeout wrong type", key: "nats.fetch_timeout", value: "slow"},
+		{name: "delay layout invalid", key: natsDelayLayoutOption, value: "legacy"},
 		{name: "unknown", key: "nats.unknown", value: 1},
 	}
 
@@ -37,6 +38,20 @@ func TestValidateTopologyRejectsInvalidNATSOptions(t *testing.T) {
 				t.Fatal("ValidateTopology unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestIndexedDelayKeyIncludesSlotAndLane(t *testing.T) {
+	backend := &natsTransport{}
+	topo := transport.Topology{Namespace: "test", JobType: "events"}
+	shared := backend.indexedDelayKey(topo, 42, 1234, "schedule", "")
+	if shared != "v3.00000000000000000042.shared.00000000000000001234.schedule" {
+		t.Fatalf("shared key = %q", shared)
+	}
+	durable := "subscriber-alpha"
+	targeted := backend.indexedDelayKey(topo, 42, 1234, "schedule", durable)
+	if !strings.HasPrefix(targeted, "v3.00000000000000000042."+backend.retryLaneID(topo, durable)+".") {
+		t.Fatalf("targeted key = %q", targeted)
 	}
 }
 

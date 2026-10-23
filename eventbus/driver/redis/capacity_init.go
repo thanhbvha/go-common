@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -65,6 +66,13 @@ func (t *redisTransport) ensureCapacityCounters(ctx context.Context, topo transp
 	if err := t.validateEventLayout(ctx, topo); err != nil {
 		return err
 	}
+	key := topologyPrefix(topo)
+	t.mu.Lock()
+	cached := t.capacityReady[key]
+	t.mu.Unlock()
+	if cached {
+		return nil
+	}
 	metadata := t.metadataKey(topo)
 	lease := t.capacityInitLeaseKey(topo)
 	for {
@@ -73,6 +81,7 @@ func (t *redisTransport) ensureCapacityCounters(ctx context.Context, topo transp
 			return err
 		}
 		if ready {
+			t.markCapacityReady(topo)
 			return nil
 		}
 		token := generateID()
@@ -83,6 +92,7 @@ func (t *redisTransport) ensureCapacityCounters(ctx context.Context, topo transp
 		}
 		switch status {
 		case 0:
+			t.markCapacityReady(topo)
 			return nil
 		case 1:
 			err = t.reconcileCapacityCounters(ctx, topo, token)
@@ -90,6 +100,7 @@ func (t *redisTransport) ensureCapacityCounters(ctx context.Context, topo transp
 			_, _ = releaseCapacityInitScript.Run(releaseCtx, t.rc, []string{lease}, token).Result()
 			cancel()
 			if err == nil {
+				t.markCapacityReady(topo)
 				return nil
 			}
 			if !errors.Is(err, errCapacityManifestChanged) && !errors.Is(err, errCapacityLeaseLost) {
@@ -108,6 +119,30 @@ func (t *redisTransport) ensureCapacityCounters(ctx context.Context, topo transp
 		case <-timer.C:
 		}
 	}
+}
+
+func (t *redisTransport) markCapacityReady(topo transport.Topology) {
+	t.mu.Lock()
+	t.capacityReady[topologyPrefix(topo)] = true
+	t.mu.Unlock()
+}
+
+func (t *redisTransport) invalidateCapacityOnScriptError(topo transport.Topology, err error) {
+	if !isCapacityNotReadyError(err) {
+		return
+	}
+	t.mu.Lock()
+	delete(t.capacityReady, topologyPrefix(topo))
+	t.mu.Unlock()
+}
+
+func isCapacityNotReadyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "capacity counters are initializing") ||
+		strings.Contains(text, "capacity counter is missing")
 }
 
 func (t *redisTransport) capacityCountersReady(ctx context.Context, metadata string) (bool, error) {

@@ -16,6 +16,33 @@ import (
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
+func TestIndexedDelayLayoutUsesWorkQueueRetryLane(t *testing.T) {
+	s, js := provisioningJetStream(t)
+	defer s.Shutdown()
+	backend := New(js).(*natsTransport)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	topo := targetedEventTopology("provisioning", "indexed-retry")
+	WithDelayLayoutIndexed()(&topo)
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	sub := transport.Subscription{Topology: topo, Group: "alpha", Concurrency: 1, Prefetch: 1}
+	if err := backend.EnsureSubscription(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	durable := backend.consumerName(sub)
+	info, err := js.StreamInfo(backend.retryStreamName(topo, durable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Config.Retention != gonats.WorkQueuePolicy {
+		t.Fatalf("retry retention = %v, want work queue", info.Config.Retention)
+	}
+	if !strings.Contains(info.Config.Name, "_v3_") {
+		t.Fatalf("retry stream = %q, want v3 lane", info.Config.Name)
+	}
+}
+
 func TestEnsureTopologyCreatesAndUpdatesManagedStreamConfig(t *testing.T) {
 	server, js := provisioningJetStream(t)
 	defer server.Shutdown()

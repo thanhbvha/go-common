@@ -20,8 +20,12 @@ func delayedBackend(t *testing.T) (*redisTransport, *goredis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rc := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rc.Close() })
-	return New(rc).(*redisTransport), rc
+	backend := New(rc).(*redisTransport)
+	t.Cleanup(func() {
+		_ = backend.Close(context.Background())
+		_ = rc.Close()
+	})
+	return backend, rc
 }
 
 // DS-25/80/82: no early delivery, bounded batch, unchanged durable envelope,

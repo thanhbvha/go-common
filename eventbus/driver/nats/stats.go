@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -13,6 +14,8 @@ import (
 )
 
 var errStopKVSnapshot = errors.New("nats: stop KV snapshot")
+
+const privateRetryStatsConcurrency = 8
 
 // Stats returns delivery obligations, rather than retained stream history.
 // JetStream limit-retention streams keep acknowledged messages, so consumer
@@ -96,7 +99,8 @@ func (t *natsTransport) Stats(ctx context.Context, topology transport.Topology) 
 
 func (t *natsTransport) addPrivateRetryStats(ctx context.Context, topology transport.Topology, stats *transport.TopologyStats) error {
 	seen := make(map[string]struct{})
-	err := t.walkKVSnapshot(ctx, topology, "subscriber."+retryLaneVersion+".>", func(entry gonats.KeyValueEntry) error {
+	var durables []string
+	err := t.walkKVSnapshot(ctx, topology, "subscriber."+retryLaneVersionFor(topology)+".>", func(entry gonats.KeyValueEntry) error {
 		var state subscriberLaneState
 		if err := json.Unmarshal(entry.Value(), &state); err != nil || state.Version != subscriberLaneVersion || state.Durable == "" {
 			return fmt.Errorf("nats: invalid subscriber lane registry entry")
@@ -105,24 +109,67 @@ func (t *natsTransport) addPrivateRetryStats(ctx context.Context, topology trans
 			return nil
 		}
 		seen[state.Durable] = struct{}{}
-		info, err := t.js.ConsumerInfo(t.retryStreamName(topology, state.Durable), t.retryConsumerName(topology, state.Durable), gonats.Context(ctx))
-		if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("nats: inspect private retry consumer: %w", err)
-		}
-		if err := addNATSCount(&stats.Pending, info.NumPending); err != nil {
-			return err
-		}
-		if info.NumAckPending < 0 || stats.InFlight > math.MaxInt64-int64(info.NumAckPending) {
-			return fmt.Errorf("nats: invalid or overflowing private retry in-flight count")
-		}
-		stats.InFlight += int64(info.NumAckPending)
+		durables = append(durables, state.Durable)
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("nats: snapshot subscriber lane registry: %w", err)
+	}
+	type retryStats struct {
+		pending  uint64
+		inFlight int
+		err      error
+	}
+	jobs := make(chan string)
+	results := make(chan retryStats, len(durables))
+	workers := min(privateRetryStatsConcurrency, len(durables))
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for durable := range jobs {
+				info, err := t.js.ConsumerInfo(t.retryStreamName(topology, durable), t.retryConsumerName(topology, durable), gonats.Context(ctx))
+				if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
+					results <- retryStats{}
+					continue
+				}
+				if err != nil {
+					results <- retryStats{err: fmt.Errorf("nats: inspect private retry consumer: %w", err)}
+					continue
+				}
+				results <- retryStats{pending: info.NumPending, inFlight: info.NumAckPending}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, durable := range durables {
+			select {
+			case jobs <- durable:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for result := range results {
+		if result.err != nil {
+			return result.err
+		}
+		if err := addNATSCount(&stats.Pending, result.pending); err != nil {
+			return err
+		}
+		if result.inFlight < 0 || stats.InFlight > math.MaxInt64-int64(result.inFlight) {
+			return fmt.Errorf("nats: invalid or overflowing private retry in-flight count")
+		}
+		stats.InFlight += int64(result.inFlight)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -167,6 +214,9 @@ func (t *natsTransport) SubscriptionStats(ctx context.Context, sub transport.Sub
 }
 
 func (t *natsTransport) subscriberDelayedCount(ctx context.Context, topology transport.Topology, durable string) (int64, error) {
+	if delayLayoutIndexed(topology) {
+		return t.filteredDelayedCount(ctx, topology, "v3.*."+t.retryLaneID(topology, durable)+".>")
+	}
 	var count int64
 	err := t.walkKVSnapshot(ctx, topology, "v2.>", func(entry gonats.KeyValueEntry) error {
 		var record delayRecord
@@ -188,6 +238,9 @@ func (t *natsTransport) subscriberDelayedCount(ctx context.Context, topology tra
 }
 
 func (t *natsTransport) delayedCount(ctx context.Context, topology transport.Topology) (int64, error) {
+	if delayLayoutIndexed(topology) {
+		return t.filteredDelayedCount(ctx, topology, "v3.>")
+	}
 	var count int64
 	err := t.walkKVSnapshot(ctx, topology, "v2.>", func(gonats.KeyValueEntry) error {
 		if count == math.MaxInt64 {
@@ -198,6 +251,32 @@ func (t *natsTransport) delayedCount(ctx context.Context, topology transport.Top
 	})
 	if err != nil {
 		return 0, fmt.Errorf("nats: snapshot delayed records: %w", err)
+	}
+	return count, nil
+}
+
+func (t *natsTransport) filteredDelayedCount(ctx context.Context, topology transport.Topology, pattern string) (int64, error) {
+	kv, err := t.getKV(t.kvBucketName(topology))
+	if err != nil {
+		return 0, fmt.Errorf("nats: open indexed delay bucket: %w", err)
+	}
+	if err := t.validateDelayLayoutKV(topology, kv); err != nil {
+		return 0, err
+	}
+	bucket := t.kvBucketName(topology)
+	info, err := t.js.StreamInfo("KV_"+bucket, &gonats.StreamInfoRequest{
+		SubjectsFilter: "$KV." + bucket + "." + pattern,
+	}, gonats.Context(ctx))
+	if err != nil {
+		return 0, fmt.Errorf("nats: inspect indexed delayed records: %w", err)
+	}
+	var count int64
+	for _, messages := range info.State.Subjects {
+		value, err := checkedNATSCount("delayed", messages)
+		if err != nil || count > math.MaxInt64-value {
+			return 0, fmt.Errorf("nats: overflowing delayed count")
+		}
+		count += value
 	}
 	return count, nil
 }

@@ -32,6 +32,9 @@ type fakeKafkaAdmin struct {
 	listEndHook        func()
 	listStartResponses []kadm.ListedOffsets
 	listStartCalls     int
+	listStartTotal     int
+	listEndCalls       int
+	fetchOffsetCalls   map[string]int
 }
 
 func (*fakeKafkaAdmin) CreateTopics(context.Context, int32, int16, map[string]*string, ...string) (kadm.CreateTopicResponses, error) {
@@ -114,6 +117,7 @@ func (a *fakeKafkaAdmin) Metadata(context.Context, ...string) (kadm.Metadata, er
 	return a.metadata, nil
 }
 func (a *fakeKafkaAdmin) ListStartOffsets(_ context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	a.listStartTotal++
 	if a.listStartCalls < len(a.listStartResponses) {
 		response := a.listStartResponses[a.listStartCalls]
 		a.listStartCalls++
@@ -122,6 +126,7 @@ func (a *fakeKafkaAdmin) ListStartOffsets(_ context.Context, topics ...string) (
 	return a.listed(a.starts, topics), nil
 }
 func (a *fakeKafkaAdmin) ListEndOffsets(_ context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	a.listEndCalls++
 	if a.listEndHook != nil {
 		a.listEndHook()
 	}
@@ -135,6 +140,10 @@ func (a *fakeKafkaAdmin) ListGroups(context.Context, ...string) (kadm.ListedGrou
 	return groups, nil
 }
 func (a *fakeKafkaAdmin) FetchOffsetsForTopics(_ context.Context, group string, topics ...string) (kadm.OffsetResponses, error) {
+	if a.fetchOffsetCalls == nil {
+		a.fetchOffsetCalls = make(map[string]int)
+	}
+	a.fetchOffsetCalls[group]++
 	responses := make(kadm.OffsetResponses)
 	for _, topic := range topics {
 		responses[topic] = make(map[int32]kadm.OffsetResponse)
@@ -534,6 +543,14 @@ func TestKafkaStatsUsesEndAndCommittedOffsets(t *testing.T) {
 	if stats.Pending != 9 || stats.InFlight != 0 || stats.Lag != 9 || !stats.LagKnown || stats.Delayed != 3 || stats.DLQ != 2 || stats.OldestAgeKnown {
 		t.Fatalf("stats = %#v", stats)
 	}
+	if admin.listStartTotal != 1 || admin.listEndCalls != 1 {
+		t.Fatalf("offset snapshots = %d start / %d end, want 1/1", admin.listStartTotal, admin.listEndCalls)
+	}
+	for group, calls := range admin.fetchOffsetCalls {
+		if calls != 1 {
+			t.Fatalf("group %q offset fetches = %d, want 1", group, calls)
+		}
+	}
 }
 
 func TestKafkaLogicalOffsetsRetriesTransientLeaderError(t *testing.T) {
@@ -599,6 +616,12 @@ func TestKafkaEventStatsAggregateOnlySubscriberGroups(t *testing.T) {
 	if stats.Pending != 4 || stats.Lag != 4 {
 		t.Fatalf("event stats = %#v", stats)
 	}
+	if admin.listStartTotal != 1 || admin.listEndCalls != 1 {
+		t.Fatalf("offset snapshots = %d start / %d end, want 1/1", admin.listStartTotal, admin.listEndCalls)
+	}
+	if admin.fetchOffsetCalls[topo.ConsumerName("alpha")] != 1 || admin.fetchOffsetCalls[topo.ConsumerName("beta")] != 1 {
+		t.Fatalf("subscriber offset fetches = %#v", admin.fetchOffsetCalls)
+	}
 }
 
 func TestKafkaSubscriptionStatsDoesNotAttributeSharedTargetedDelayLag(t *testing.T) {
@@ -622,6 +645,9 @@ func TestKafkaSubscriptionStatsDoesNotAttributeSharedTargetedDelayLag(t *testing
 	}
 	if stats.Pending != 3 || stats.Lag != 3 || stats.Delayed != 0 || !stats.LagKnown || stats.OldestAgeKnown {
 		t.Fatalf("subscription stats = %#v", stats)
+	}
+	if admin.listStartTotal != 1 || admin.listEndCalls != 1 || admin.fetchOffsetCalls[group] != 1 {
+		t.Fatalf("requests = start:%d end:%d groups:%#v", admin.listStartTotal, admin.listEndCalls, admin.fetchOffsetCalls)
 	}
 }
 

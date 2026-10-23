@@ -13,6 +13,7 @@ import (
 	runtimemetrics "runtime/metrics"
 	"runtime/pprof"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -322,13 +323,20 @@ func run(args []string) (returnErr error) {
 		eventbus.WithMaxPayloadBytes(128*1024),
 	)
 	if cfg.Driver == "kafka" {
+		bufferedRecords := cfg.Concurrency * 3
+		bufferedBytes := bufferedRecords * cfg.PayloadKB * 1024 * 2
 		topologyOptions = append(topologyOptions,
 			kafkadriver.WithPartitions(int32(cfg.Concurrency)),
 			kafkadriver.WithDelayBatchSize(kafkaDelayBatchSize(cfg)),
+			kafkadriver.WithMaxBufferedRecords(bufferedRecords),
+			kafkadriver.WithMaxBufferedBytes(bufferedBytes),
 		)
 	}
 	if cfg.Driver == "nats" {
-		topologyOptions = append(topologyOptions, natsdriver.WithDelayBatchSize(natsDelayBatchSize(cfg)))
+		topologyOptions = append(topologyOptions,
+			natsdriver.WithDelayBatchSize(natsDelayBatchSize(cfg)),
+			natsdriver.WithDelayLayoutIndexed(),
+		)
 	}
 	if cfg.Driver == "redis" {
 		topologyOptions = append(topologyOptions, redisdriver.WithDelayBatchSize(redisDelayBatchSize(cfg)))
@@ -342,7 +350,10 @@ func run(args []string) (returnErr error) {
 	var producedCount atomic.Int64
 	var primaryWorkerHandled atomic.Int64
 	var secondWorkerHandled atomic.Int64
-	firstHandlerAttempt := make([]atomic.Uint32, sequenceLimit)
+	var firstHandlerAttempt []atomic.Uint32
+	if cfg.Workload == "retry10" || cfg.Workload == "retry50" {
+		firstHandlerAttempt = make([]atomic.Uint32, sequenceLimit)
+	}
 	var syntheticRetryFailures atomic.Int64
 	var retryCandidatesFailedAtOne atomic.Int64
 	var retryFirstSeenAfterOne atomic.Int64
@@ -373,7 +384,10 @@ func run(args []string) (returnErr error) {
 			if item.Sequence < 0 || item.Sequence >= sequenceLimit || item.EnqueuedUnixNS <= 0 {
 				return eventbus.MarkPermanent(fmt.Errorf("sequence outside benchmark range"))
 			}
-			firstAttempt := firstHandlerAttempt[item.Sequence].CompareAndSwap(0, 1)
+			firstAttempt := false
+			if item.Retry {
+				firstAttempt = firstHandlerAttempt[item.Sequence].CompareAndSwap(0, 1)
+			}
 			if item.Retry && job.Attempt() == 1 {
 				syntheticRetryFailures.Add(1)
 				if firstAttempt {
@@ -846,6 +860,51 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 	if output != nil {
 		encoder = json.NewEncoder(output)
 	}
+	var encoderMu sync.Mutex
+	encode := func(record periodicSample) {
+		if encoder == nil {
+			return
+		}
+		encoderMu.Lock()
+		_ = encoder.Encode(record)
+		encoderMu.Unlock()
+	}
+	var topologyDone chan struct{}
+	if sampleTopology {
+		topologyDone = make(chan struct{})
+		go func() {
+			defer close(topologyDone)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			sample := func() {
+				statsCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, interval))
+				topologyStats, err := bus.Stats(statsCtx, topology)
+				cancel()
+				if err != nil {
+					return
+				}
+				elapsed := time.Since(started)
+				record := periodicSample{
+					Type: "topology_sample", Phase: phase, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), ElapsedSeconds: elapsed.Seconds(),
+					Produced: produced.Load(), Completed: completed.count.Load(), TopologyStatsAvailable: true,
+					Pending: topologyStats.Pending, Delayed: topologyStats.Delayed, InFlight: topologyStats.InFlight, DLQ: topologyStats.DLQ, Lag: topologyStats.Lag,
+				}
+				if elapsed > 0 {
+					record.ThroughputPerSecond = float64(record.Completed) / elapsed.Seconds()
+				}
+				encode(record)
+			}
+			for {
+				select {
+				case <-ticker.C:
+					sample()
+				case <-stop:
+					sample()
+					return
+				}
+			}
+		}()
+	}
 	sample := func(write bool) {
 		var stats runtime.MemStats
 		runtime.ReadMemStats(&stats)
@@ -863,20 +922,7 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 		if elapsed > 0 {
 			record.ThroughputPerSecond = float64(record.Completed) / elapsed.Seconds()
 		}
-		if sampleTopology {
-			statsCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, interval))
-			topologyStats, err := bus.Stats(statsCtx, topology)
-			cancel()
-			if err == nil {
-				record.TopologyStatsAvailable = true
-				record.Pending = topologyStats.Pending
-				record.Delayed = topologyStats.Delayed
-				record.InFlight = topologyStats.InFlight
-				record.DLQ = topologyStats.DLQ
-				record.Lag = topologyStats.Lag
-			}
-		}
-		_ = encoder.Encode(record)
+		encode(record)
 	}
 	for {
 		select {
@@ -886,6 +932,9 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 			sample(true)
 		case <-stop:
 			sample(true)
+			if topologyDone != nil {
+				<-topologyDone
+			}
 			result <- peaks
 			return
 		}

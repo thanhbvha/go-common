@@ -60,6 +60,8 @@ const messageIDHeader = "X-EventBus-Message-Id"
 
 const eventLayoutMarkerKey = "meta.event_layout"
 
+const delayLayoutMarkerKey = "meta.delay_layout"
+
 var (
 	_ transport.Transport               = (*natsTransport)(nil)
 	_ transport.Deduper                 = (*natsTransport)(nil)
@@ -166,6 +168,9 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 	if err := t.ensureEventLayoutMarker(ctx, topo, kv); err != nil {
 		return fmt.Errorf("nats EnsureTopology event layout: %w", err)
 	}
+	if err := t.ensureDelayLayoutMarker(ctx, topo, kv); err != nil {
+		return fmt.Errorf("nats EnsureTopology delay layout: %w", err)
+	}
 	if err := t.ensureDelayCursor(ctx, kv); err != nil {
 		return fmt.Errorf("nats EnsureTopology delay cursor: %w", err)
 	}
@@ -227,7 +232,7 @@ func (t *natsTransport) PublishAt(ctx context.Context, topo transport.Topology, 
 		return err
 	}
 
-	return t.schedule(ctx, kv, msg, runAt)
+	return t.schedule(ctx, topo, kv, msg, runAt)
 }
 
 func (t *natsTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {

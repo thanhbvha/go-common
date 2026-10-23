@@ -45,6 +45,10 @@ func (t *natsTransport) ValidateTopology(topology transport.Topology) error {
 			if topology.Kind != transport.EventTopology || value != natsTargetedLayoutV1 {
 				return fmt.Errorf("nats: %s must be %q on event topologies", key, natsTargetedLayoutV1)
 			}
+		case natsDelayLayoutOption:
+			if value != natsDelayIndexedV3 {
+				return fmt.Errorf("nats: %s must be %q", key, natsDelayIndexedV3)
+			}
 		default:
 			if strings.HasPrefix(key, "nats.") {
 				return fmt.Errorf("nats: unknown option %q", key)

@@ -35,6 +35,68 @@ func TestEventPublishBeforeConsumeReachesProvisionedGroups(t *testing.T) {
 	}
 }
 
+func TestFanoutDeliveryMutationIsIsolated(t *testing.T) {
+	backend := New().(*memoryTransport)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	topo := transport.Topology{Namespace: "memory", JobType: "fanout-isolation", Kind: transport.EventTopology}
+	for _, group := range []string{"alpha", "beta"} {
+		if err := backend.EnsureSubscription(context.Background(), transport.Subscription{Topology: topo, Group: group}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backend.Publish(context.Background(), topo, transport.Message{Payload: []byte("original"), Headers: map[string]string{"trace": "original"}}); err != nil {
+		t.Fatal(err)
+	}
+	alpha, stopAlpha := receiveMemory(t, backend, transport.Subscription{Topology: topo, Group: "alpha"})
+	defer stopAlpha()
+	mutated := alpha.Message()
+	mutated.Payload[0] = 'X'
+	mutated.Headers["trace"] = "mutated"
+	if again := alpha.Message(); string(again.Payload) != "original" || again.Headers["trace"] != "original" {
+		t.Fatalf("alpha internal message mutated = %#v", again)
+	}
+	beta, stopBeta := receiveMemory(t, backend, transport.Subscription{Topology: topo, Group: "beta"})
+	defer stopBeta()
+	if got := beta.Message(); string(got.Payload) != "original" || got.Headers["trace"] != "original" {
+		t.Fatalf("beta message mutated = %#v", got)
+	}
+}
+
+func TestDelayedPublishOwnsCallerMessage(t *testing.T) {
+	backend := New().(*memoryTransport)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	topo := transport.Topology{Namespace: "memory", JobType: "delayed-ownership"}
+	if err := backend.EnsureTopology(context.Background(), topo); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("original")
+	headers := map[string]string{"trace": "original"}
+	if err := backend.PublishAt(context.Background(), topo, transport.Message{Payload: payload, Headers: headers}, time.Now().Add(20*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	payload[0] = 'X'
+	headers["trace"] = "mutated"
+	consumeCtx, cancelConsume := context.WithCancel(context.Background())
+	deliveries := make(chan transport.Delivery, 1)
+	releaseCallback := make(chan struct{})
+	consumeDone := make(chan error, 1)
+	go func() {
+		consumeDone <- backend.Consume(consumeCtx, transport.Subscription{Topology: topo}, func(delivery transport.Delivery) {
+			deliveries <- delivery
+			<-releaseCallback
+		})
+	}()
+	delivery := <-deliveries
+	defer func() {
+		close(releaseCallback)
+		cancelConsume()
+		<-consumeDone
+	}()
+	if got := delivery.Message(); string(got.Payload) != "original" || got.Headers["trace"] != "original" {
+		t.Fatalf("delayed message mutated = %#v", got)
+	}
+}
+
 func TestEventPublishWithoutProcessLocalSubscribersIsUnsupported(t *testing.T) {
 	backend := New().(*memoryTransport)
 	t.Cleanup(func() { _ = backend.Close(context.Background()) })
@@ -344,13 +406,24 @@ func TestStatsReportQueuedInFlightDelayedAndDLQ(t *testing.T) {
 	if err := backend.Publish(context.Background(), topo, transport.Message{ID: "active"}); err != nil {
 		t.Fatal(err)
 	}
-	delivery, stop := receiveMemory(t, backend, transport.Subscription{Topology: topo})
-	defer stop()
 	backend.mu.Lock()
 	backend.topologies[topo.Name()].groups[""].ready = append(backend.topologies[topo.Name()].groups[""].ready, memoryQueued{
 		message: transport.Message{ID: "ready"}, readyAt: time.Now(),
 	})
 	backend.mu.Unlock()
+	backend.mu.Lock()
+	group := backend.topologies[topo.Name()].groups[""]
+	queued := group.ready[0]
+	group.ready[0] = memoryQueued{}
+	group.ready = group.ready[1:]
+	backend.deliverySeq++
+	deliveryID := backend.deliverySeq
+	group.inFlight[deliveryID] = memoryInFlight{queued: queued}
+	backend.mu.Unlock()
+	delivery := &memoryDelivery{
+		transport: backend, msg: queued.message, topo: topo,
+		topologyName: topo.Name(), id: deliveryID, count: 1,
+	}
 	if err := backend.PublishAt(context.Background(), topo, transport.Message{ID: "delayed"}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}

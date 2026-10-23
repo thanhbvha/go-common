@@ -493,6 +493,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		return
 	}
 	leaseInterval := time.Duration(0)
+	_, hasLease := delivery.(transport.LeaseDelivery)
 	if lease, ok := delivery.(transport.LeaseDelivery); ok {
 		leaseInterval = lease.HeartbeatInterval()
 		opCtx, cancel := context.WithTimeout(e.workerCtx, min(5*time.Second, leaseInterval))
@@ -568,17 +569,22 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	}
 
 	// Rate/key waits keep the lease alive but do not consume handler timeout.
-	executionCtx, executionCancel := context.WithCancel(traceCtx)
-	heartbeatDone := make(chan struct{})
+	executionCtx := traceCtx
+	executionCancel := context.CancelFunc(noopRelease)
+	var heartbeatDone chan struct{}
 	var heartbeatFailed atomic.Bool
-	go func() {
-		defer close(heartbeatDone)
-		e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); executionCancel() })
-	}()
-	defer func() {
-		executionCancel()
-		<-heartbeatDone
-	}()
+	if hasLease {
+		executionCtx, executionCancel = context.WithCancel(traceCtx)
+		heartbeatDone = make(chan struct{})
+		go func() {
+			defer close(heartbeatDone)
+			e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); executionCancel() })
+		}()
+		defer func() {
+			executionCancel()
+			<-heartbeatDone
+		}()
+	}
 	releaseKey, err := policy.wait(executionCtx, env.OrderingKey)
 	if err != nil {
 		return
@@ -596,19 +602,21 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
 			metrics.IncHandlerFailure(metricsJobType, "panic")
 		}
-		e.traceEvent(procCtx, "handler.panic", map[string]string{"outcome": "panic"})
+		e.traceOutcome(procCtx, "handler.panic", "panic")
 	}
 	if errors.Is(procCtx.Err(), context.DeadlineExceeded) {
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
 			metrics.IncHandlerFailure(metricsJobType, "timeout")
 		}
-		e.traceEvent(procCtx, "handler.timeout", map[string]string{"outcome": "timeout"})
+		e.traceOutcome(procCtx, "handler.timeout", "timeout")
 		err = context.DeadlineExceeded
 	}
 	procCancel()
 	releaseKey()
-	executionCancel()
-	<-heartbeatDone
+	if hasLease {
+		executionCancel()
+		<-heartbeatDone
+	}
 
 	e.cfg.Metrics.ObserveDuration(metricsJobType, duration)
 	if heartbeatFailed.Load() {
@@ -710,12 +718,16 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	// Intake cancellation does not interrupt settlement; forced worker
 	// cancellation does. Drivers must never ACK after a failed durable transfer.
 	parent := e.workerCtx
+	var carrier Headers
 	if observed, ok := delivery.(*observedDelivery); ok {
 		parent = observed.ctx
 		source := observed.Message()
 		decision.Source = &source
+		carrier = cloneHeaders(source.Headers)
+	} else {
+		carrier = cloneHeaders(delivery.Message().Headers)
 	}
-	spanCtx, endSpan := e.cfg.Tracer.Start(parent, "eventbus.settle."+decision.Kind.String(), cloneHeaders(delivery.Message().Headers))
+	spanCtx, endSpan := e.cfg.Tracer.Start(parent, settlementSpanName(decision.Kind), carrier)
 	defer endSpan()
 	opCtx, cancel := context.WithTimeout(spanCtx, 5*time.Second)
 	defer cancel()
@@ -730,7 +742,7 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
 		metrics.ObserveSettlement(metricsJobType, decision.Kind.String(), outcome, time.Since(started).Seconds())
 	}
-	e.traceEvent(opCtx, "settlement", map[string]string{"decision": decision.Kind.String(), "outcome": outcome})
+	e.traceSettlement(opCtx, decision.Kind.String(), outcome)
 	if err != nil {
 		e.cfg.Logger.ErrorAsync("eventbus: delivery settlement failed",
 			"job_id", jobID,
@@ -741,6 +753,19 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 		return
 	}
 	e.cfg.Metrics.IncComplete(metricsJobType, decision.Kind.String())
+}
+
+func settlementSpanName(kind transport.DecisionKind) string {
+	switch kind {
+	case transport.DecisionAck:
+		return "eventbus.settle.ack"
+	case transport.DecisionRetry:
+		return "eventbus.settle.retry"
+	case transport.DecisionDeadLetter:
+		return "eventbus.settle.dlq"
+	default:
+		return "eventbus.settle.unknown"
+	}
 }
 
 func (e *engine) heartbeatLoop(ctx context.Context, delivery transport.Delivery, jobType, jobID string, leaseInterval time.Duration, leaseFailed func()) {
@@ -879,7 +904,7 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			status = "error"
 		}
 		e.cfg.Metrics.IncEnqueue(name, status)
-		e.traceEvent(ctx, "publish", map[string]string{"outcome": status})
+		e.traceOutcome(ctx, "publish", status)
 	}()
 	e.mu.RLock()
 	var known bool
@@ -912,15 +937,18 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	if val, ok := topo.Options["eventbus.max_attempts"].(int); ok && val > 0 {
 		maxAttempts = val
 	}
-	data, env, err := e.codec.EncodeTopology(kind, name, payload, maxAttempts, opts...)
+	env, err := e.codec.buildEnvelope(kind, name, payload, maxAttempts, opts...)
 	if err != nil {
 		return err
 	}
 	env.Headers = cloneHeaders(env.Headers)
 	if injector, ok := e.cfg.Tracer.(TraceInjector); ok {
+		if env.Headers == nil {
+			env.Headers = make(Headers)
+		}
 		injector.Inject(ctx, env.Headers)
 	}
-	data, err = json.Marshal(env)
+	data, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}

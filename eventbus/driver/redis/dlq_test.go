@@ -139,6 +139,10 @@ func TestRedisDLQRequeueFencedByConcurrentRetirement(t *testing.T) {
 	}}).Err(); err != nil {
 		t.Fatal(err)
 	}
+	// go-redis hooks must be installed before concurrent client use. This test
+	// does not exercise retention, so stop that background client user first.
+	backend.retentionCancel()
+	<-backend.retentionDone
 	hook := &pauseAfterDLQInspectHook{inspected: make(chan struct{}), resume: make(chan struct{})}
 	rc.AddHook(hook)
 	requeueDone := make(chan error, 1)

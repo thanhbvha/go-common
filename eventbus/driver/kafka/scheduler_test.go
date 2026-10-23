@@ -15,12 +15,13 @@ import (
 )
 
 type fakeDelayConsumer struct {
-	commits  []*kgo.Record
-	rewinds  map[string]map[int32]kgo.EpochOffset
-	commitFn func(*kgo.Record) error
-	pollFn   func(context.Context, int) kgo.Fetches
-	allowed  int
-	closed   bool
+	commits     []*kgo.Record
+	commitCalls int
+	rewinds     map[string]map[int32]kgo.EpochOffset
+	commitFn    func(*kgo.Record) error
+	pollFn      func(context.Context, int) kgo.Fetches
+	allowed     int
+	closed      bool
 }
 
 func (c *fakeDelayConsumer) PollRecords(ctx context.Context, limit int) kgo.Fetches {
@@ -30,6 +31,7 @@ func (c *fakeDelayConsumer) PollRecords(ctx context.Context, limit int) kgo.Fetc
 	return nil
 }
 func (c *fakeDelayConsumer) CommitRecords(_ context.Context, records ...*kgo.Record) error {
+	c.commitCalls++
 	for _, record := range records {
 		if c.commitFn != nil {
 			if err := c.commitFn(record); err != nil {
@@ -130,8 +132,8 @@ func TestDelaySchedulerFarFutureHeadDoesNotBlockNearFutureDeadline(t *testing.T)
 	if err := backend.processDelayBatch(context.Background(), topo, tier, client, []*kgo.Record{far, near}, now); err != nil {
 		t.Fatal(err)
 	}
-	if len(produced) != 2 || len(client.commits) != 2 {
-		t.Fatalf("produced=%d commits=%d, want 2/2", len(produced), len(client.commits))
+	if len(produced) != 2 || len(client.commits) != 1 || client.commits[0] != near {
+		t.Fatalf("produced=%d commits=%#v, want one watermark at the second record", len(produced), client.commits)
 	}
 	if produced[0].Topic != backend.delayTopic(topo, tier) {
 		t.Fatalf("far destination = %q", produced[0].Topic)
@@ -231,6 +233,81 @@ func TestDelaySchedulerFailureNeverCommitsAndBlocksLaterPartitionOffset(t *testi
 	}
 	if got := client.rewinds[records[0].Topic][0].Offset; got != records[0].Offset {
 		t.Fatalf("failed partition rewind = %d", got)
+	}
+}
+
+type batchSettlementProducer struct {
+	calls   int
+	records [][]*kgo.Record
+	errors  []error
+}
+
+func (p *batchSettlementProducer) ProduceSync(_ context.Context, records ...*kgo.Record) kgo.ProduceResults {
+	p.calls++
+	p.records = append(p.records, append([]*kgo.Record(nil), records...))
+	results := make(kgo.ProduceResults, len(records))
+	for i, record := range records {
+		results[i] = kgo.ProduceResult{Record: record}
+		if i < len(p.errors) {
+			results[i].Err = p.errors[i]
+		}
+	}
+	return results
+}
+
+func TestDelaySchedulerBatchesProduceAndCommitsPartitionWatermarks(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "batch"}
+	tier := 5 * time.Second
+	producer := &batchSettlementProducer{}
+	backend := &kafkaTransport{producer: producer}
+	client := &fakeDelayConsumer{}
+	records := []*kgo.Record{
+		delayedRecord(backend.delayTopic(topo, tier), 0, 10, now),
+		delayedRecord(backend.delayTopic(topo, tier), 0, 12, now),
+		delayedRecord(backend.delayTopic(topo, tier), 1, 20, now),
+	}
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, records, now); err != nil {
+		t.Fatal(err)
+	}
+	if producer.calls != 1 || len(producer.records) != 1 || len(producer.records[0]) != len(records) {
+		t.Fatalf("produce calls=%d records=%#v", producer.calls, producer.records)
+	}
+	if client.commitCalls != 1 || !reflect.DeepEqual(client.commits, []*kgo.Record{records[1], records[2]}) {
+		t.Fatalf("commit calls=%d watermarks=%#v", client.commitCalls, client.commits)
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Transfers != 3 || status[0].Commits != 3 {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
+func TestDelaySchedulerCommitsOnlyConfirmedPartitionPrefix(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	topo := transport.Topology{Namespace: "test", JobType: "prefix"}
+	tier := 5 * time.Second
+	injected := errors.New("injected middle failure")
+	producer := &batchSettlementProducer{errors: []error{nil, injected, nil, nil}}
+	backend := &kafkaTransport{producer: producer}
+	client := &fakeDelayConsumer{}
+	records := []*kgo.Record{
+		delayedRecord(backend.delayTopic(topo, tier), 0, 10, now),
+		delayedRecord(backend.delayTopic(topo, tier), 0, 12, now),
+		delayedRecord(backend.delayTopic(topo, tier), 0, 14, now),
+		delayedRecord(backend.delayTopic(topo, tier), 1, 20, now),
+	}
+	if err := backend.processDelayBatch(context.Background(), topo, tier, client, records, now); !errors.Is(err, injected) {
+		t.Fatalf("error=%v", err)
+	}
+	if !reflect.DeepEqual(client.commits, []*kgo.Record{records[0], records[3]}) {
+		t.Fatalf("watermarks=%#v", client.commits)
+	}
+	if got := client.rewinds[records[1].Topic][0].Offset; got != records[1].Offset {
+		t.Fatalf("rewind=%d, want %d", got, records[1].Offset)
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || status[0].Transfers != 3 || status[0].Commits != 2 {
+		t.Fatalf("status=%#v", status)
 	}
 }
 
@@ -386,6 +463,90 @@ func TestDelayBatchSize(t *testing.T) {
 	}
 }
 
+func TestTopologyFetchOptions(t *testing.T) {
+	topo := transport.Topology{Options: map[string]any{
+		"kafka.fetch_max_wait":            25 * time.Millisecond,
+		"kafka.fetch_min_bytes":           int32(1024),
+		"kafka.fetch_max_bytes":           int32(8 << 20),
+		"kafka.fetch_max_partition_bytes": int32(2 << 20),
+		"kafka.max_buffered_records":      300,
+		"kafka.max_buffered_bytes":        16 << 20,
+	}}
+	client, err := kgo.NewClient(topologyFetchOptions(topo)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for option, want := range map[string]any{
+		"FetchMaxWait":           25 * time.Millisecond,
+		"FetchMinBytes":          int32(1024),
+		"FetchMaxBytes":          int32(8 << 20),
+		"FetchMaxPartitionBytes": int32(2 << 20),
+		"MaxBufferedRecords":     300,
+		"MaxBufferedBytes":       16 << 20,
+	} {
+		var key any
+		switch option {
+		case "FetchMaxWait":
+			key = kgo.FetchMaxWait
+		case "FetchMinBytes":
+			key = kgo.FetchMinBytes
+		case "FetchMaxBytes":
+			key = kgo.FetchMaxBytes
+		case "FetchMaxPartitionBytes":
+			key = kgo.FetchMaxPartitionBytes
+		case "MaxBufferedRecords":
+			key = kgo.MaxBufferedRecords
+		case "MaxBufferedBytes":
+			key = kgo.MaxBufferedBytes
+		}
+		got := client.OptValue(key)
+		if reflect.ValueOf(got).Int() != reflect.ValueOf(want).Int() {
+			t.Fatalf("%s = %#v, want %#v", option, got, want)
+		}
+	}
+}
+
+func TestDelayDisabledRejectsFuturePublishBeforeBrokerIO(t *testing.T) {
+	topo := transport.Topology{
+		Namespace: "test", JobType: "no-delay",
+		Options: map[string]any{"kafka.delay_disabled": true},
+	}
+	backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error {
+		t.Fatal("future publish reached Kafka producer")
+		return nil
+	})}
+	err := backend.PublishAt(context.Background(), topo, transport.Message{Payload: []byte("payload")}, time.Now().Add(time.Minute))
+	if !errors.Is(err, transport.ErrNotSupported) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDelayDisabledRetryDoesNotCommitSource(t *testing.T) {
+	topo := transport.Topology{
+		Namespace: "test", JobType: "no-delay-retry",
+		Options: map[string]any{"kafka.delay_disabled": true},
+	}
+	client := &processingConsumer{}
+	coordinator := newOffsetCoordinator(client, 1)
+	defer coordinator.close()
+	record := processingRecord(0, 1)
+	if err := coordinator.register(context.Background(), []*kgo.Record{record}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error {
+		t.Fatal("future retry reached Kafka producer")
+		return nil
+	})}
+	delivery := &kafkaDelivery{transport: backend, topo: topo, coordinator: coordinator, record: record}
+	err := delivery.Settle(context.Background(), transport.Decision{
+		Kind: transport.DecisionRetry, Next: transport.Message{Payload: []byte("retry")}, RetryAt: time.Now().Add(time.Minute),
+	})
+	if !errors.Is(err, transport.ErrNotSupported) || client.committedCount() != 0 {
+		t.Fatalf("error=%v committed=%d", err, client.committedCount())
+	}
+}
+
 func TestDelayTierPollIsBoundedAndShutdownJoins(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -412,4 +573,91 @@ func TestDelayTierPollIsBoundedAndShutdownJoins(t *testing.T) {
 			t.Fatal("delay consumer was not closed on shutdown")
 		}
 	})
+}
+
+func TestDelayTierFullBatchUsesFastFollowUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		topo := transport.Topology{
+			Namespace: "test", JobType: "fast-follow-up",
+			Options: map[string]any{"kafka.delay_batch_size": 2},
+		}
+		tier := 5 * time.Second
+		backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error { return nil })}
+		polls := make(chan time.Time, 2)
+		calls := 0
+		client := &fakeDelayConsumer{pollFn: func(_ context.Context, _ int) kgo.Fetches {
+			calls++
+			polls <- time.Now()
+			if calls == 1 {
+				records := []*kgo.Record{
+					delayedRecord(backend.delayTopic(topo, tier), 0, 1, time.Now()),
+					delayedRecord(backend.delayTopic(topo, tier), 0, 2, time.Now()),
+				}
+				return fakeFetches(records)
+			}
+			cancel()
+			return nil
+		}}
+		done := make(chan struct{})
+		go func() {
+			backend.runDelayTier(ctx, topo, tier, false, client)
+			close(done)
+		}()
+		first, second := <-polls, <-polls
+		if elapsed := second.Sub(first); elapsed != delayActiveInterval {
+			t.Fatalf("follow-up interval = %v, want %v", elapsed, delayActiveInterval)
+		}
+		<-done
+	})
+}
+
+func TestDelayTierShortRotationReturnsToIdleCadence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		topo := transport.Topology{
+			Namespace: "test", JobType: "idle-rotation",
+			Options: map[string]any{"kafka.delay_batch_size": 2},
+		}
+		tier := 5 * time.Minute
+		backend := &kafkaTransport{producer: settlementProducer(func(context.Context, *kgo.Record) error { return nil })}
+		polls := make(chan time.Time, 2)
+		calls := 0
+		client := &fakeDelayConsumer{pollFn: func(_ context.Context, _ int) kgo.Fetches {
+			calls++
+			polls <- time.Now()
+			if calls == 1 {
+				return fakeFetches([]*kgo.Record{delayedRecord(backend.delayTopic(topo, tier), 0, 1, time.Now().Add(time.Hour))})
+			}
+			cancel()
+			return nil
+		}}
+		done := make(chan struct{})
+		go func() {
+			backend.runDelayTier(ctx, topo, tier, false, client)
+			close(done)
+		}()
+		first, second := <-polls, <-polls
+		if elapsed := second.Sub(first); elapsed != delaySchedulerInterval {
+			t.Fatalf("follow-up interval = %v, want %v", elapsed, delaySchedulerInterval)
+		}
+		<-done
+	})
+}
+
+func fakeFetches(records []*kgo.Record) kgo.Fetches {
+	partitions := make(map[int32]kgo.FetchPartition)
+	for _, record := range records {
+		partition := partitions[record.Partition]
+		partition.Partition = record.Partition
+		partition.Records = append(partition.Records, record)
+		partitions[record.Partition] = partition
+	}
+	fetchPartitions := make([]kgo.FetchPartition, 0, len(partitions))
+	for _, partition := range partitions {
+		fetchPartitions = append(fetchPartitions, partition)
+	}
+	return kgo.Fetches{{Topics: []kgo.FetchTopic{{Topic: records[0].Topic, Partitions: fetchPartitions}}}}
 }

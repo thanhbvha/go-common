@@ -153,19 +153,26 @@ func (t *natsTransport) retryLaneID(topo transport.Topology, durable string) str
 }
 
 func (t *natsTransport) retryStreamName(topo transport.Topology, durable string) string {
-	return "eventbus_retry_" + retryLaneVersion + "_" + t.retryLaneID(topo, durable)
+	return "eventbus_retry_" + retryLaneVersionFor(topo) + "_" + t.retryLaneID(topo, durable)
 }
 
 func (t *natsTransport) retrySubject(topo transport.Topology, durable string) string {
-	return "eventbus.retry." + retryLaneVersion + "." + t.retryLaneID(topo, durable)
+	return "eventbus.retry." + retryLaneVersionFor(topo) + "." + t.retryLaneID(topo, durable)
 }
 
 func (t *natsTransport) retryConsumerName(topo transport.Topology, durable string) string {
-	return "eventbus_retry_consumer_" + retryLaneVersion + "_" + t.retryLaneID(topo, durable)
+	return "eventbus_retry_consumer_" + retryLaneVersionFor(topo) + "_" + t.retryLaneID(topo, durable)
 }
 
 func (t *natsTransport) subscriberLaneKey(topo transport.Topology, durable string) string {
-	return "subscriber." + retryLaneVersion + "." + t.retryLaneID(topo, durable)
+	return "subscriber." + retryLaneVersionFor(topo) + "." + t.retryLaneID(topo, durable)
+}
+
+func retryLaneVersionFor(topo transport.Topology) string {
+	if delayLayoutIndexed(topo) {
+		return "v3"
+	}
+	return retryLaneVersion
 }
 
 func effectiveCapacity(sub transport.Subscription) (int, error) {
@@ -332,6 +339,9 @@ func (t *natsTransport) ensureRetryLane(ctx context.Context, sub transport.Subsc
 	desired := gonats.StreamConfig{
 		Name: stream, Subjects: []string{t.retrySubject(sub.Topology, durable)}, Storage: gonats.FileStorage,
 		MaxAge: maxAge, Replicas: replicas, Retention: gonats.LimitsPolicy, Duplicates: duplicates,
+	}
+	if delayLayoutIndexed(sub.Topology) {
+		desired.Retention = gonats.WorkQueuePolicy
 	}
 	if err := t.reconcileStreamWithLease(ctx, desired, lease); err != nil {
 		return fmt.Errorf("nats: provision subscriber retry stream: %w", err)

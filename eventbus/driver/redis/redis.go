@@ -131,6 +131,8 @@ return 1
 `
 )
 
+const maxEventLaneQuantum = 16
+
 var ensureTopologyMetadataScript = goredis.NewScript(ensureTopologyMetadataLua)
 
 type redisTransport struct {
@@ -147,6 +149,7 @@ type redisTransport struct {
 	capacityRejections  map[string]map[string]uint64
 	dispatchCursors     map[string]string
 	dispatchShared      map[string]bool
+	capacityReady       map[string]bool
 	retentionCancel     context.CancelFunc
 	retentionDone       chan struct{}
 	retentionWake       chan struct{}
@@ -178,6 +181,7 @@ func New(rc goredis.UniversalClient) transport.Transport {
 		capacityRejections:  make(map[string]map[string]uint64),
 		dispatchCursors:     make(map[string]string),
 		dispatchShared:      make(map[string]bool),
+		capacityReady:       make(map[string]bool),
 		retentionCancel:     cancel, retentionDone: make(chan struct{}), retentionWake: make(chan struct{}, 1),
 	}
 	t.sweepDelay = t.dispatchDue
@@ -249,6 +253,10 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 }
 
 func (t *redisTransport) Publish(ctx context.Context, topo transport.Topology, msg transport.Message) error {
+	return t.publishReady(ctx, topo, msg, true)
+}
+
+func (t *redisTransport) publishReady(ctx context.Context, topo transport.Topology, msg transport.Message, retryCapacity bool) error {
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
@@ -257,6 +265,13 @@ func (t *redisTransport) Publish(ctx context.Context, topo transport.Topology, m
 	}
 	result, err := publishReadyScript.Run(ctx, t.rc, []string{t.streamKey(topo), t.metadataKey(topo)}, maxReadyEntries(topo), msg.Payload).Int64()
 	if err != nil {
+		t.invalidateCapacityOnScriptError(topo, err)
+		if retryCapacity && isCapacityNotReadyError(err) {
+			if initErr := t.ensureCapacityCounters(ctx, topo); initErr != nil {
+				return fmt.Errorf("redis: capacity counters are initializing: %w", initErr)
+			}
+			return t.publishReady(ctx, topo, msg, false)
+		}
 		return fmt.Errorf("redis: publish ready: %w", err)
 	}
 	if result < 0 {
@@ -266,6 +281,10 @@ func (t *redisTransport) Publish(ctx context.Context, topo transport.Topology, m
 }
 
 func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time) error {
+	return t.publishDelayed(ctx, topo, msg, runAt, true)
+}
+
+func (t *redisTransport) publishDelayed(ctx context.Context, topo transport.Topology, msg transport.Message, runAt time.Time, retryCapacity bool) error {
 	if err := t.ValidateTopology(topo); err != nil {
 		return err
 	}
@@ -277,6 +296,13 @@ func (t *redisTransport) PublishAt(ctx context.Context, topo transport.Topology,
 
 	result, err := publishDelayedScript.Run(ctx, t.rc, []string{delayed, t.metadataKey(topo)}, maxDelayedEntries(topo), score, msg.Payload).Int64()
 	if err != nil {
+		t.invalidateCapacityOnScriptError(topo, err)
+		if retryCapacity && isCapacityNotReadyError(err) {
+			if initErr := t.ensureCapacityCounters(ctx, topo); initErr != nil {
+				return fmt.Errorf("redis: capacity counters are initializing: %w", initErr)
+			}
+			return t.publishDelayed(ctx, topo, msg, runAt, false)
+		}
 		return fmt.Errorf("redis: publish delayed: %w", err)
 	}
 	if result < 0 {
@@ -361,16 +387,19 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 		t.mu.Unlock()
 	}
 	var moved int64
-	for _, current := range lanes {
+	for index, current := range lanes {
 		if moved >= int64(limit) {
 			break
 		}
 		batch := limit - int(moved)
 		if topo.Kind == transport.EventTopology {
-			batch = 1
+			remainingLanes := len(lanes) - index
+			batch = max(1, batch/remainingLanes)
+			batch = min(batch, maxEventLaneQuantum)
 		}
 		count, err := moveDelayedScript.Run(ctx, t.rc, []string{current.delayed, current.ready, t.metadataKey(topo)}, now.UnixMilli(), batch, maxReadyEntries(topo)).Int64()
 		if err != nil {
+			t.invalidateCapacityOnScriptError(topo, err)
 			t.recordSchedulerError(topo, "dispatch", err, now)
 			return moved, err
 		}
@@ -492,6 +521,26 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		}
 	}
 	release := func() { <-permits }
+	reserveBatch := func(limit int) (int, error) {
+		if err := acquire(); err != nil {
+			return 0, err
+		}
+		reserved := 1
+		for reserved < limit {
+			select {
+			case permits <- struct{}{}:
+				reserved++
+			default:
+				return reserved, nil
+			}
+		}
+		return reserved, nil
+	}
+	releaseN := func(count int) {
+		for range count {
+			release()
+		}
+	}
 
 	blockTime := 2 * time.Second
 	if val, ok := sub.Topology.Options["redis.block"].(time.Duration); ok && val > 0 {
@@ -535,7 +584,8 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 				nextReclaim = time.Now().Add(interval)
 			}
 		}
-		if err := acquire(); err != nil {
+		reserved, err := reserveBatch(int(consumerBatchSize(sub)))
+		if err != nil {
 			return err
 		}
 		stream := streams[preferred]
@@ -543,39 +593,46 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 			Group:    group,
 			Consumer: consumer,
 			Streams:  []string{stream, ">"},
-			Count:    1,
+			Count:    int64(reserved),
 			Block:    min(blockTime, 2*time.Second),
 		}).Result()
 
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				release()
+				releaseN(reserved)
 				return ctx.Err()
 			}
 			if err == goredis.Nil {
-				release()
+				releaseN(reserved)
 				// Block timeout
 				preferred = (preferred + 1) % len(streams)
 				continue
 			}
-			release()
+			releaseN(reserved)
 			return err
 		}
 
-		delivered := false
+		deliveredCount := 0
 		for _, streamMsgs := range res {
 			for _, xmsg := range streamMsgs.Messages {
-				delivered, err = t.deliverStreamMessageWithRelease(ctx, sub, streamMsgs.Stream, xmsg, deliver, release, consumer)
-				if err != nil {
+				delivered, deliverErr := t.deliverStreamMessageWithRelease(ctx, sub, streamMsgs.Stream, xmsg, deliver, release, consumer)
+				if delivered {
+					deliveredCount++
+				} else {
+					release()
+				}
+				if deliverErr != nil {
+					remaining := reserved - deliveredCount
 					if !delivered {
-						release()
+						remaining--
 					}
-					return err
+					releaseN(remaining)
+					return deliverErr
 				}
 			}
 		}
-		if !delivered {
-			release()
+		if unused := reserved - deliveredCount; unused > 0 {
+			releaseN(unused)
 		}
 		preferred = (preferred + 1) % len(streams)
 	}

@@ -113,10 +113,9 @@ func TestKafkaDelaySchedulerBoundedBurstAndOrderingKey(t *testing.T) {
 			seen[string(record.Value)] = struct{}{}
 		}
 	}
-	if elapsed := time.Since(runAt); elapsed < 8*time.Second {
-		// With a batch of two and a five-second sweep, five records require at
-		// least three sweeps. This broker-level assertion proves the backlog is
-		// left in Kafka rather than expanded into per-record timers.
-		t.Fatalf("bounded burst drained too quickly: %v after deadline", elapsed)
+	if elapsed := time.Since(runAt); elapsed > 8*time.Second {
+		// A full bounded batch triggers a fast follow-up pass. The records remain
+		// durable in Kafka, but a backlog no longer waits five seconds per batch.
+		t.Fatalf("bounded burst drained too slowly: %v after deadline", elapsed)
 	}
 }

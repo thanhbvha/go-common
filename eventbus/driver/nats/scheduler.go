@@ -60,6 +60,21 @@ func delayKey(minute, runAtMillis int64, scheduleID string) string {
 
 func delaySlotPattern(minute int64) string { return fmt.Sprintf("v2.%020d.>", minute) }
 
+func (t *natsTransport) indexedDelayKey(topo transport.Topology, slot, runAtMillis int64, scheduleID, target string) string {
+	lane := "shared"
+	if target != "" {
+		lane = t.retryLaneID(topo, target)
+	}
+	return fmt.Sprintf("v3.%020d.%s.%020d.%s", slot, lane, runAtMillis, scheduleID)
+}
+
+func delaySlotPatternFor(topo transport.Topology, slot int64) string {
+	if delayLayoutIndexed(topo) {
+		return fmt.Sprintf("v3.%020d.>", slot)
+	}
+	return delaySlotPattern(slot)
+}
+
 func delayBatchSize(topo transport.Topology) int {
 	if value, ok := topo.Options["nats.delay_batch_size"].(int); ok {
 		return value
@@ -74,7 +89,10 @@ func delayLease(topo transport.Topology) time.Duration {
 	return defaultDelayLease
 }
 
-func (t *natsTransport) schedule(ctx context.Context, kv gonats.KeyValue, msg transport.Message, runAt time.Time) error {
+func (t *natsTransport) schedule(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, msg transport.Message, runAt time.Time) error {
+	if err := t.validateDelayLayoutKV(topo, kv); err != nil {
+		return err
+	}
 	for range 4 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -89,6 +107,9 @@ func (t *natsTransport) schedule(ctx context.Context, kv gonats.KeyValue, msg tr
 			return fmt.Errorf("nats delay encode: %w", err)
 		}
 		key := delayKey(delaySlot(runAt), record.RunAt, scheduleID)
+		if delayLayoutIndexed(topo) {
+			key = t.indexedDelayKey(topo, delaySlot(runAt), record.RunAt, scheduleID, "")
+		}
 		if _, err := kv.Create(key, data); err == nil {
 			return nil
 		} else if !errors.Is(err, gonats.ErrKeyExists) {
@@ -106,18 +127,21 @@ func (t *natsTransport) scheduleRetry(ctx context.Context, topo transport.Topolo
 	if err != nil {
 		return fmt.Errorf("nats retry open delay bucket: %w", err)
 	}
+	if err := t.validateDelayLayoutKV(topo, kv); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if target != "" {
 		return t.withSubscriberLane(ctx, topo, target, "schedule", func(lease *subscriberLaneLeaseHandle, _ subscriberLaneState) error {
-			return t.scheduleRetryRecord(ctx, kv, msg, runAt, transferID, target, lease)
+			return t.scheduleRetryRecord(ctx, topo, kv, msg, runAt, transferID, target, lease)
 		})
 	}
-	return t.scheduleRetryRecord(ctx, kv, msg, runAt, transferID, target, nil)
+	return t.scheduleRetryRecord(ctx, topo, kv, msg, runAt, transferID, target, nil)
 }
 
-func (t *natsTransport) scheduleRetryRecord(ctx context.Context, kv gonats.KeyValue, msg transport.Message, runAt time.Time, transferID, target string, lease *subscriberLaneLeaseHandle) error {
+func (t *natsTransport) scheduleRetryRecord(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, msg transport.Message, runAt time.Time, transferID, target string, lease *subscriberLaneLeaseHandle) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -130,9 +154,13 @@ func (t *natsTransport) scheduleRetryRecord(ctx context.Context, kv gonats.KeyVa
 		Version: delayRecordVersion, ScheduleID: transferID, MessageID: msg.ID,
 		RunAt: scheduledAt.UnixMilli(), Payload: msg.Payload, TransferID: transferID, Target: target,
 	}
+	key := delayKey(slot, record.RunAt, transferID)
+	if delayLayoutIndexed(topo) {
+		key = t.indexedDelayKey(topo, slot, record.RunAt, transferID, target)
+	}
 	transfer := delayTransfer{
 		Version: delayRecordVersion,
-		Key:     delayKey(slot, record.RunAt, transferID),
+		Key:     key,
 		Record:  record,
 	}
 	markerKey := "transfer." + transferID
@@ -236,10 +264,16 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
 	}
-	batch := delayBatchSize(topo)
-	if _, err := t.migrateLegacyDelayed(ctx, topo, kv, now, batch); err != nil {
+	if err := t.validateDelayLayoutKV(topo, kv); err != nil {
 		t.recordSchedulerError(topo, "poll", err, now)
 		return 0, err
+	}
+	batch := delayBatchSize(topo)
+	if !delayLayoutIndexed(topo) {
+		if _, err := t.migrateLegacyDelayed(ctx, topo, kv, now, batch); err != nil {
+			t.recordSchedulerError(topo, "poll", err, now)
+			return 0, err
+		}
 	}
 	entry, err := kv.Get(delayCursorKey)
 	if err != nil {
@@ -299,10 +333,18 @@ func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology
 // future run times, so advancing to the oldest live slot (or current) is safe.
 func (t *natsTransport) recoverDelayCursor(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, entry gonats.KeyValueEntry, cursor, current int64) (gonats.KeyValueEntry, int64, error) {
 	target := current
-	if err := t.walkKVSnapshot(ctx, topo, "v2.>", func(scheduled gonats.KeyValueEntry) error {
+	pattern := "v2.>"
+	if delayLayoutIndexed(topo) {
+		pattern = "v3.>"
+	}
+	if err := t.walkKVSnapshot(ctx, topo, pattern, func(scheduled gonats.KeyValueEntry) error {
 		parts := strings.Split(scheduled.Key(), ".")
-		if len(parts) != 4 {
-			return fmt.Errorf("nats delay invalid v2 key %q", scheduled.Key())
+		wantParts := 4
+		if delayLayoutIndexed(topo) {
+			wantParts = 5
+		}
+		if len(parts) != wantParts {
+			return fmt.Errorf("nats delay invalid key %q", scheduled.Key())
 		}
 		slot, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
@@ -361,7 +403,7 @@ func (e *delayKVEntry) Revision() uint64 { return e.revision }
 func (t *natsTransport) dispatchDelaySlot(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, minute int64, now time.Time, limit int) (int, bool, error) {
 	published := 0
 	pending := false
-	err := t.walkKVSnapshot(ctx, topo, delaySlotPattern(minute), func(entry gonats.KeyValueEntry) error {
+	err := t.walkKVSnapshot(ctx, topo, delaySlotPatternFor(topo, minute), func(entry gonats.KeyValueEntry) error {
 		if published >= limit {
 			pending = true
 			return errStopKVSnapshot
@@ -389,6 +431,19 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 	}
 	if (record.Version != delayRecordVersion && record.Version != legacyDelayRecordVersion) || record.ScheduleID == "" || record.RunAt <= 0 {
 		return false, true, fmt.Errorf("nats delay invalid record %q", entry.Key())
+	}
+	if delayLayoutIndexed(topo) {
+		parts := strings.Split(entry.Key(), ".")
+		if len(parts) != 5 || parts[0] != "v3" {
+			return false, true, fmt.Errorf("nats delay invalid indexed key %q", entry.Key())
+		}
+		lane := "shared"
+		if record.Target != "" {
+			lane = t.retryLaneID(topo, record.Target)
+		}
+		if parts[2] != lane {
+			return false, true, fmt.Errorf("nats delay indexed lane mismatch for %q", entry.Key())
+		}
 	}
 	if topo.Kind == transport.EventTopology && record.TransferID != "" && record.Target == "" {
 		if err := quarantineDelayRecord(kv, entry, record, "missing subscriber target", now); err != nil {
@@ -430,7 +485,7 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 			if err := lease.checkOwnership(ctx); err != nil {
 				return err
 			}
-			if err := kv.Delete(entry.Key(), gonats.LastRevision(claimRevision)); err != nil {
+			if err := t.deleteDelayRecord(ctx, topo, kv, entry.Key(), claimRevision); err != nil {
 				return fmt.Errorf("nats delay delete %q after publish: %w", entry.Key(), err)
 			}
 			deleted = true
@@ -466,7 +521,7 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 		return false, true, fmt.Errorf("nats delay publish %q: %w", entry.Key(), err)
 	}
 	if !deleted {
-		if err := kv.Delete(entry.Key(), gonats.LastRevision(claimRevision)); err != nil {
+		if err := t.deleteDelayRecord(ctx, topo, kv, entry.Key(), claimRevision); err != nil {
 			return true, true, fmt.Errorf("nats delay delete %q after publish: %w", entry.Key(), err)
 		}
 	}
@@ -477,6 +532,21 @@ func (t *natsTransport) dispatchDelayEntry(ctx context.Context, topo transport.T
 		_ = kv.Delete("transfer." + record.TransferID)
 	}
 	return true, false, nil
+}
+
+func (t *natsTransport) deleteDelayRecord(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, key string, revision uint64) error {
+	if !delayLayoutIndexed(topo) {
+		return kv.Delete(key, gonats.LastRevision(revision))
+	}
+	bucket := t.kvBucketName(topo)
+	return t.js.PurgeStream("KV_"+bucket, &gonats.StreamPurgeRequest{
+		Subject: "$KV." + bucket + "." + key, Sequence: revision + 1,
+	}, gonats.Context(ctx))
+}
+
+func delayLayoutIndexed(topo transport.Topology) bool {
+	layout, _ := topo.Options[natsDelayLayoutOption].(string)
+	return layout == natsDelayIndexedV3
 }
 
 type quarantinedDelayRecord struct {

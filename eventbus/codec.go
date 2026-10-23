@@ -28,23 +28,35 @@ func (c *Codec) Encode(jobType string, payload any, maxAttemptsDefault int, opts
 
 // EncodeTopology builds an Envelope v3 and serializes it to JSON.
 func (c *Codec) EncodeTopology(kind TopologyKind, jobType string, payload any, maxAttemptsDefault int, opts ...JobOption) ([]byte, *Envelope, error) {
-	if err := validateName("topology name", jobType); err != nil {
+	env, err := c.buildEnvelope(kind, jobType, payload, maxAttemptsDefault, opts...)
+	if err != nil {
 		return nil, nil, err
 	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode envelope: %w", err)
+	}
+	return data, env, nil
+}
+
+func (c *Codec) buildEnvelope(kind TopologyKind, jobType string, payload any, maxAttemptsDefault int, opts ...JobOption) (*Envelope, error) {
+	if err := validateName("topology name", jobType); err != nil {
+		return nil, err
+	}
 	if kind != TaskTopology && kind != EventTopology {
-		return nil, nil, fmt.Errorf("%w: unknown topology kind %d", ErrInvalidOption, kind)
+		return nil, fmt.Errorf("%w: unknown topology kind %d", ErrInvalidOption, kind)
 	}
 	if maxAttemptsDefault < 0 {
-		return nil, nil, fmt.Errorf("%w: max attempts must not be negative", ErrInvalidOption)
+		return nil, fmt.Errorf("%w: max attempts must not be negative", ErrInvalidOption)
 	}
 	options := &JobOptions{}
 	if err := applyJobOptions(options, opts); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	rawPayload, err := json.Marshal(payload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal payload: %w", err)
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
 	now := c.clock.Now()
@@ -74,12 +86,7 @@ func (c *Codec) EncodeTopology(kind TopologyKind, jobType string, payload any, m
 		Headers:     options.Headers,
 	}
 
-	data, err := json.Marshal(env)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode envelope: %w", err)
-	}
-
-	return data, env, nil
+	return env, nil
 }
 
 // Decode parses v3 envelopes and normalizes legacy v2 envelopes to v3

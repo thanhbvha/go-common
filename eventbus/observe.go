@@ -57,11 +57,26 @@ type TraceRecorder interface {
 }
 
 func cloneHeaders(headers Headers) Headers {
+	if headers == nil {
+		return nil
+	}
 	copy := make(Headers, len(headers))
 	for k, v := range headers {
 		copy[k] = v
 	}
 	return copy
+}
+
+func (e *engine) traceOutcome(ctx context.Context, name, outcome string) {
+	if recorder, ok := e.cfg.Tracer.(TraceRecorder); ok {
+		recorder.RecordEvent(ctx, name, map[string]string{"outcome": outcome})
+	}
+}
+
+func (e *engine) traceSettlement(ctx context.Context, decision, outcome string) {
+	if recorder, ok := e.cfg.Tracer.(TraceRecorder); ok {
+		recorder.RecordEvent(ctx, "settlement", map[string]string{"decision": decision, "outcome": outcome})
+	}
 }
 
 func (e *engine) traceEvent(ctx context.Context, name string, attributes map[string]string) {

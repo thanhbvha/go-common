@@ -56,6 +56,9 @@ func TestRedisStatsTaskReportsRealBacklog(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := rc.HSet(ctx, backend.metadataKey(topo), "delayed_entries", 3).Err(); err != nil {
+		t.Fatal(err)
+	}
 	addDLQRecord(t, backend, rc, topo, "1-0", 1)
 
 	stats, err := backend.Stats(ctx, topo)
@@ -173,6 +176,9 @@ func TestRedisStatsIncludeSubscriberPrivateLanes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := rc.ZAdd(ctx, backend.subscriberRetryDelayedKey(topo, alphaGroup), goredis.Z{Score: 1, Member: "delayed"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.HSet(ctx, backend.metadataKey(topo), "delayed_entries", 1).Err(); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := backend.Stats(ctx, topo)

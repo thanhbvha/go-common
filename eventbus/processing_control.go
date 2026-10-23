@@ -12,6 +12,8 @@ type processingPolicy struct {
 	keys *keyedConcurrency
 }
 
+var noopRelease = func() {}
+
 func newProcessingPolicy(topo Topology) *processingPolicy {
 	policy := &processingPolicy{}
 	if configured, ok := topo.Options["eventbus.rate_limit"].(RateLimit); ok {
@@ -25,9 +27,9 @@ func newProcessingPolicy(topo Topology) *processingPolicy {
 
 func (p *processingPolicy) wait(ctx context.Context, key string) (func(), error) {
 	if p == nil {
-		return func() {}, nil
+		return noopRelease, nil
 	}
-	release := func() {}
+	release := noopRelease
 	if p.keys != nil && key != "" {
 		var err error
 		release, err = p.keys.acquire(ctx, key)

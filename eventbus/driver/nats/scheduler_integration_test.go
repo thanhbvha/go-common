@@ -63,6 +63,36 @@ func TestDelaySchedulerBoundsBurstAndUsesCollisionFreeKeys(t *testing.T) {
 	t.Fatal("bounded scheduler did not drain burst")
 }
 
+func TestIndexedDelayLayoutCountsAndPhysicallyDeletesRecords(t *testing.T) {
+	js, backend, topo, kv, now := schedulerFixture(t, map[string]any{natsDelayLayoutOption: natsDelayIndexedV3})
+	ctx := context.Background()
+	runAt := now.Add(time.Second)
+	for i := range 3 {
+		if err := backend.PublishAt(ctx, topo, transport.Message{ID: fmt.Sprint(i), Payload: []byte("payload")}, runAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count, err := backend.delayedCount(ctx, topo)
+	if err != nil || count != 3 {
+		t.Fatalf("delayed count = %d, %v", count, err)
+	}
+	if published, err := backend.dispatchDue(ctx, topo, kv, runAt.Add(time.Second)); err != nil || published != 3 {
+		t.Fatalf("dispatch = %d, %v", published, err)
+	}
+	count, err = backend.delayedCount(ctx, topo)
+	if err != nil || count != 0 {
+		t.Fatalf("post-dispatch delayed count = %d, %v", count, err)
+	}
+	bucket := backend.kvBucketName(topo)
+	info, err := js.StreamInfo("KV_"+bucket, &gonats.StreamInfoRequest{SubjectsFilter: "$KV." + bucket + ".v3.>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.State.Subjects) != 0 {
+		t.Fatalf("completed indexed subjects remain = %#v", info.State.Subjects)
+	}
+}
+
 func TestDelaySchedulerBacklogDoesNotOccupyMainConsumerCapacity(t *testing.T) {
 	js, backend, topo, _, now := schedulerFixture(t, nil)
 	ctx := context.Background()
@@ -531,7 +561,7 @@ func scheduledKeys(t *testing.T, kv gonats.KeyValue) []string {
 	}
 	result := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if strings.HasPrefix(key, "v2.") {
+		if strings.HasPrefix(key, "v2.") || strings.HasPrefix(key, "v3.") {
 			result = append(result, key)
 		}
 	}

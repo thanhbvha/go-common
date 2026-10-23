@@ -39,15 +39,24 @@ func (t *kafkaTransport) ValidateTopology(topology transport.Topology) error {
 			if !ok || v <= 0 {
 				return fmt.Errorf("kafka: %s must be a positive duration", key)
 			}
-		case "kafka.fetch_max_bytes":
+		case "kafka.fetch_max_bytes", "kafka.fetch_min_bytes", "kafka.fetch_max_partition_bytes":
 			v, ok := value.(int32)
 			if !ok || v <= 0 {
 				return fmt.Errorf("kafka: %s must be a positive int32", key)
+			}
+		case "kafka.max_buffered_records", "kafka.max_buffered_bytes":
+			v, ok := value.(int)
+			if !ok || v <= 0 {
+				return fmt.Errorf("kafka: %s must be a positive int", key)
 			}
 		case "kafka.delay_batch_size":
 			v, ok := value.(int)
 			if !ok || v < 1 || v > maxDelayBatchSize {
 				return fmt.Errorf("kafka: %s must be an int between 1 and %d", key, maxDelayBatchSize)
+			}
+		case "kafka.delay_disabled":
+			if value != true {
+				return fmt.Errorf("kafka: %s must be true", key)
 			}
 		case kafkaEventLayoutOption:
 			if topology.Kind != transport.EventTopology || value != kafkaTargetedLayoutV1 {

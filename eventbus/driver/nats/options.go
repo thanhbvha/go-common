@@ -10,6 +10,8 @@ import (
 const (
 	natsEventLayoutOption = "nats.event_layout"
 	natsTargetedLayoutV1  = "targeted-v1"
+	natsDelayLayoutOption = "nats.delay_layout"
+	natsDelayIndexedV3    = "indexed-v3"
 )
 
 // WithMaxAge sets the maximum age for messages in the NATS stream.
@@ -60,6 +62,12 @@ func WithDelayBatchSize(size int) eventbus.TopologyOption {
 // before another instance may recover it. The default is 30 seconds.
 func WithDelayLease(lease time.Duration) eventbus.TopologyOption {
 	return eventbus.WithOption("nats.delay_lease", lease)
+}
+
+// WithDelayLayoutIndexed enables the indexed delayed-record layout. Older
+// drivers reject this option, fencing them out before they can write v2 keys.
+func WithDelayLayoutIndexed() eventbus.TopologyOption {
+	return eventbus.WithOption(natsDelayLayoutOption, natsDelayIndexedV3)
 }
 
 // WithDuplicateWindow sets the broker deduplication bound used by immediate,

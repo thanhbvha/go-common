@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ const (
 	defaultMaxReadyEntries   = 1000
 	defaultMaxDelayedEntries = 1000
 	defaultMaxDLQEntries     = 1000
+	memoryDelayDispatchBatch = 128
 )
 
 var errMemoryClosed = errors.New("memory: transport is closed")
@@ -48,8 +50,9 @@ type memoryTransport struct {
 }
 
 type memoryTopology struct {
-	topology transport.Topology
-	groups   map[string]*memoryGroup
+	topology      transport.Topology
+	groups        map[string]*memoryGroup
+	orderedGroups []string
 }
 
 type memoryGroup struct {
@@ -207,6 +210,8 @@ func (m *memoryTransport) EnsureSubscription(ctx context.Context, sub transport.
 	topo := m.ensureTopologyLocked(sub.Topology)
 	if _, ok := topo.groups[sub.Group]; !ok {
 		topo.groups[sub.Group] = newMemoryGroup()
+		topo.orderedGroups = append(topo.orderedGroups, sub.Group)
+		slices.Sort(topo.orderedGroups)
 	}
 	return nil
 }
@@ -219,6 +224,7 @@ func (m *memoryTransport) ensureTopologyLocked(topology transport.Topology) *mem
 	created := &memoryTopology{topology: topology, groups: make(map[string]*memoryGroup)}
 	if topology.Kind == transport.TaskTopology {
 		created.groups[""] = newMemoryGroup()
+		created.orderedGroups = []string{""}
 	}
 	m.topologies[name] = created
 	return created
@@ -241,11 +247,11 @@ func (m *memoryTransport) Publish(ctx context.Context, topology transport.Topolo
 		return errMemoryClosed
 	}
 	topo := m.ensureTopologyLocked(topology)
-	groups := groupNames(topo.groups)
+	groups := topo.orderedGroups
 	if topology.Kind == transport.EventTopology && len(groups) == 0 {
 		return fmt.Errorf("%w: memory event has no process-local subscriber groups", transport.ErrNotSupported)
 	}
-	if err := m.enqueueLocked(topo, groups, msg, time.Now(), "ready", nil); err != nil {
+	if err := m.enqueueLocked(topo, groups, cloneMessage(msg), time.Now(), "ready", nil); err != nil {
 		return err
 	}
 	return nil
@@ -267,11 +273,11 @@ func (m *memoryTransport) PublishAt(ctx context.Context, topology transport.Topo
 		return errMemoryClosed
 	}
 	topo := m.ensureTopologyLocked(topology)
-	groups := groupNames(topo.groups)
+	groups := topo.orderedGroups
 	if topology.Kind == transport.EventTopology && len(groups) == 0 {
 		return fmt.Errorf("%w: memory event has no process-local subscriber groups", transport.ErrNotSupported)
 	}
-	return m.scheduleLocked(topology, groups, msg, runAt, nil)
+	return m.scheduleLocked(topology, groups, cloneMessage(msg), runAt, nil)
 }
 
 func (m *memoryTransport) scheduleLocked(topology transport.Topology, groups []string, msg transport.Message, runAt time.Time, source *memoryDelivery) error {
@@ -351,7 +357,7 @@ func (m *memoryTransport) dispatchDue(ctx context.Context, now time.Time) (int64
 	}
 	m.schedulerStatus.LastRun = now
 	var moved int64
-	for len(m.delayed) > 0 && !m.delayed[0].runAt.After(now) {
+	for len(m.delayed) > 0 && !m.delayed[0].runAt.After(now) && moved < memoryDelayDispatchBatch {
 		item := m.delayed[0]
 		topo := m.ensureTopologyLocked(item.topology)
 		if err := m.enqueueLocked(topo, item.groups, item.message, item.runAt, "ready", nil); err != nil {
@@ -360,6 +366,9 @@ func (m *memoryTransport) dispatchDue(ctx context.Context, now time.Time) (int64
 		heap.Pop(&m.delayed)
 		m.delayedCounts[item.topology.Name()]--
 		moved++
+	}
+	if len(m.delayed) > 0 && !m.delayed[0].runAt.After(now) {
+		m.signalSchedulerLocked()
 	}
 	m.schedulerStatus.LastSuccess = now
 	m.schedulerStatus.LastError = ""
@@ -404,7 +413,7 @@ func (m *memoryTransport) enqueueLocked(topo *memoryTopology, groups []string, m
 	}
 	for _, name := range groups {
 		group := topo.groups[name]
-		group.ready = append(group.ready, memoryQueued{message: cloneMessage(msg), readyAt: readyAt})
+		group.ready = append(group.ready, memoryQueued{message: msg, readyAt: readyAt})
 		signal(group.notify)
 	}
 	if source != nil {
@@ -438,13 +447,17 @@ func (m *memoryTransport) Consume(ctx context.Context, sub transport.Subscriptio
 		if len(group.ready) > 0 {
 			queued := group.ready[0]
 			group.ready[0] = memoryQueued{}
-			group.ready = group.ready[1:]
+			if len(group.ready) == 1 {
+				group.ready = group.ready[:0]
+			} else {
+				group.ready = group.ready[1:]
+			}
 			queued.attempts++
 			m.deliverySeq++
 			id := m.deliverySeq
 			group.inFlight[id] = memoryInFlight{queued: queued, session: session}
 			delivery := &memoryDelivery{
-				transport: m, msg: cloneMessage(queued.message), topo: sub.Topology,
+				transport: m, msg: queued.message, topo: sub.Topology,
 				topologyName: sub.Topology.Name(), group: sub.Group, id: id, count: queued.attempts,
 			}
 			m.mu.Unlock()
@@ -616,13 +629,18 @@ func (m *memoryTransport) List(ctx context.Context, topology transport.Topology,
 		return nil, fmt.Errorf("memory: invalid DLQ page")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	dlq := m.dlqs[topology.Name()]
 	if offset >= len(dlq) {
+		m.mu.Unlock()
 		return nil, nil
 	}
 	end := min(len(dlq), offset+limit)
-	return append([]transport.DeadLetter(nil), dlq[offset:end]...), nil
+	result := append([]transport.DeadLetter(nil), dlq[offset:end]...)
+	m.mu.Unlock()
+	for index := range result {
+		result[index].Message = cloneMessage(result[index].Message)
+	}
+	return result, nil
 }
 
 func (m *memoryTransport) Requeue(ctx context.Context, topology transport.Topology, messageIDs []string) error {
@@ -650,7 +668,7 @@ func (m *memoryTransport) Requeue(ctx context.Context, topology transport.Topolo
 		_, byAdminID := selected[record.ID]
 		_, byLegacyID := selected[record.Message.ID]
 		if byAdminID || byLegacyID {
-			groups := groupNames(topo.groups)
+			groups := topo.orderedGroups
 			if topology.Kind == transport.EventTopology && record.SourceGroup != "" {
 				groups = []string{record.SourceGroup}
 			}
@@ -686,7 +704,7 @@ func (m *memoryTransport) Requeue(ctx context.Context, topology transport.Topolo
 	for _, record := range requeue {
 		for _, groupName := range record.groups {
 			group := topo.groups[groupName]
-			group.ready = append(group.ready, memoryQueued{message: cloneMessage(record.message), readyAt: time.Now()})
+			group.ready = append(group.ready, memoryQueued{message: record.message, readyAt: time.Now()})
 			signal(group.notify)
 		}
 	}
@@ -839,11 +857,12 @@ func (d *memoryDelivery) Settle(ctx context.Context, decision transport.Decision
 			if len(decision.Next.Payload) == 0 || decision.RetryAt.IsZero() {
 				return fmt.Errorf("memory: retry payload and deadline required")
 			}
+			next := cloneMessage(decision.Next)
 			if decision.RetryAt.After(time.Now()) {
-				return m.scheduleLocked(d.topo, []string{d.group}, decision.Next, decision.RetryAt, d)
+				return m.scheduleLocked(d.topo, []string{d.group}, next, decision.RetryAt, d)
 			}
 			topo := m.ensureTopologyLocked(d.topo)
-			return m.enqueueLocked(topo, []string{d.group}, decision.Next, time.Now(), "ready", d)
+			return m.enqueueLocked(topo, []string{d.group}, next, time.Now(), "ready", d)
 		case transport.DecisionDeadLetter:
 			name := d.topologyName
 			limit := memoryOption(d.topo, "memory.max_dlq_entries", defaultMaxDLQEntries)
@@ -852,7 +871,7 @@ func (d *memoryDelivery) Settle(ctx context.Context, decision transport.Decision
 			}
 			msg := d.msg
 			if decision.Source != nil {
-				msg = *decision.Source
+				msg = cloneMessage(*decision.Source)
 			}
 			failedAt := decision.FailedAt
 			if failedAt.IsZero() {
@@ -864,7 +883,7 @@ func (d *memoryDelivery) Settle(ctx context.Context, decision transport.Decision
 			}
 			m.dlqSeq++
 			m.dlqs[name] = append(m.dlqs[name], transport.DeadLetter{
-				ID: strconv.FormatUint(m.dlqSeq, 10), Message: cloneMessage(msg),
+				ID: strconv.FormatUint(m.dlqSeq, 10), Message: msg,
 				Reason: reason, LastError: lastError, Attempts: decision.Attempts, FailedAt: failedAt,
 				Source: d.topologyName, SourceGroup: d.group, SourcePosition: strconv.FormatUint(d.id, 10),
 			})
@@ -907,14 +926,6 @@ func memoryCapacityError(topology transport.Topology, resource string, current, 
 		Transport: "memory", Topology: topology.Name(), Resource: resource,
 		Current: int64(current), Limit: int64(limit),
 	}
-}
-
-func groupNames(groups map[string]*memoryGroup) []string {
-	names := make([]string, 0, len(groups))
-	for name := range groups {
-		names = append(names, name)
-	}
-	return names
 }
 
 func cloneMessage(message transport.Message) transport.Message {

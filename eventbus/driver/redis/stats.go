@@ -13,6 +13,8 @@ import (
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
+const redisStatsPipelineBatch = 100
+
 // Stats returns a near-point-in-time view assembled from Redis stream, group,
 // sorted-set, and DLQ primitives. Lag counts ready plus in-flight delivery
 // obligations; delayed and dead-letter records are reported separately.
@@ -37,6 +39,7 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 	delayedCmd := pipe.ZCard(ctx, t.delayedKey(topology))
 	dlqCmd := pipe.XLen(ctx, t.dlqKey(topology))
 	streamLenCmd := pipe.XLen(ctx, stream)
+	capacityCmd := pipe.HMGet(ctx, t.metadataKey(topology), "capacity_state", "delayed_entries")
 	if _, err := pipe.Exec(ctx); err != nil {
 		return transport.TopologyStats{}, fmt.Errorf("redis: stats counts: %w", err)
 	}
@@ -45,18 +48,37 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 		DLQ:      dlqCmd.Val(),
 		LagKnown: true,
 	}
+	capacityValues := capacityCmd.Val()
+	useAggregateDelayed := len(capacityValues) == 2 && capacityValues[0] == "ready" && capacityValues[1] != nil
+	if useAggregateDelayed {
+		value, parseErr := strconv.ParseInt(fmt.Sprint(capacityValues[1]), 10, 64)
+		if parseErr != nil || value < 0 {
+			return transport.TopologyStats{}, fmt.Errorf("redis: invalid delayed capacity counter")
+		}
+		stats.Delayed = value
+	}
+	var manifest []string
 	if topology.Kind == transport.EventTopology {
-		manifest, err := t.rc.HKeys(ctx, t.groupManifestKey(topology)).Result()
+		manifest, err = t.rc.HKeys(ctx, t.groupManifestKey(topology)).Result()
 		if err != nil {
 			return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber manifest: %w", err)
 		}
-		for _, group := range manifest {
-			count, err := t.rc.ZCard(ctx, t.subscriberRetryDelayedKey(topology, group)).Result()
-			if err != nil {
-				return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber delayed: %w", err)
-			}
-			if err := addStatCount(&stats.Delayed, count); err != nil {
-				return transport.TopologyStats{}, err
+		if !useAggregateDelayed {
+			for start := 0; start < len(manifest); start += redisStatsPipelineBatch {
+				end := min(start+redisStatsPipelineBatch, len(manifest))
+				lanePipe := t.rc.Pipeline()
+				commands := make([]*goredis.IntCmd, 0, end-start)
+				for _, group := range manifest[start:end] {
+					commands = append(commands, lanePipe.ZCard(ctx, t.subscriberRetryDelayedKey(topology, group)))
+				}
+				if _, err := lanePipe.Exec(ctx); err != nil {
+					return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber delayed: %w", err)
+				}
+				for _, command := range commands {
+					if err := addStatCount(&stats.Delayed, command.Val()); err != nil {
+						return transport.TopologyStats{}, err
+					}
+				}
 			}
 		}
 	}
@@ -128,10 +150,6 @@ func (t *redisTransport) Stats(ctx context.Context, topology transport.Topology)
 		}
 	}
 	if topology.Kind == transport.EventTopology {
-		manifest, err := t.rc.HKeys(ctx, t.groupManifestKey(topology)).Result()
-		if err != nil {
-			return transport.TopologyStats{}, fmt.Errorf("redis: stats subscriber manifest: %w", err)
-		}
 		for _, group := range manifest {
 			lane, err := t.streamGroupStats(ctx, t.subscriberRetryStreamKey(topology, group), group)
 			if err != nil {

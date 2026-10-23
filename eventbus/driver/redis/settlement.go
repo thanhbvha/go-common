@@ -112,6 +112,7 @@ func (d *redisDelivery) transfer(ctx context.Context, decision transport.Decisio
 		decision.RetryAt.UnixMilli(), reason, errorCode,
 		decision.Attempts, failedAt.UnixMilli(), d.consumer, capacity, boolInt(private), boolInt(d.topo.Kind == transport.EventTopology)).Int64()
 	if err != nil {
+		d.transport.invalidateCapacityOnScriptError(d.topo, err)
 		return fmt.Errorf("redis: atomic %s settlement: %w", decision.Kind, err)
 	}
 	if result == 0 {

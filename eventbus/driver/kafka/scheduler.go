@@ -21,6 +21,9 @@ const (
 	maxDelayBatchSize      = 1000
 	delayPollTimeout       = time.Second
 	delaySchedulerInterval = 5 * time.Second
+	delayActiveInterval    = 25 * time.Millisecond
+	delayActiveYield       = 250 * time.Millisecond
+	maxDelayActivePasses   = 20
 )
 
 type delaySchedulerHandle struct {
@@ -148,13 +151,14 @@ func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySch
 
 func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient) {
 	defer client.CloseAllowingRebalance()
-	ticker := time.NewTicker(delaySchedulerInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(delaySchedulerInterval)
+	defer timer.Stop()
+	activePasses := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			t.recordSchedulerPoll(topo, schedulerWorker(tier, targeted), time.Now())
 			pollCtx, cancel := context.WithTimeout(ctx, delayPollTimeout)
 			fetches := client.PollRecords(pollCtx, delayBatchSize(topo))
@@ -165,14 +169,30 @@ func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topolo
 			if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 				t.recordSchedulerError(topo, schedulerWorker(tier, targeted), "poll", err, time.Now())
 				client.AllowRebalance()
+				activePasses = 0
+				timer.Reset(delaySchedulerInterval)
 				continue
 			}
+			active := false
 			if len(fetches.Records()) > 0 {
-				_ = t.processDelayBatchFor(ctx, topo, tier, targeted, client, fetches.Records(), time.Now())
+				outcome, err := t.processDelayBatchForResult(ctx, topo, tier, targeted, client, fetches.Records(), time.Now())
+				active = err == nil && (outcome.moved > 0 || len(fetches.Records()) == delayBatchSize(topo))
 			} else {
 				t.recordSchedulerSuccess(topo, schedulerWorker(tier, targeted), 0, time.Now())
 			}
 			client.AllowRebalance()
+			next := delaySchedulerInterval
+			if active {
+				activePasses++
+				next = delayActiveInterval
+				if activePasses >= maxDelayActivePasses {
+					activePasses = 0
+					next = delayActiveYield
+				}
+			} else {
+				activePasses = 0
+			}
+			timer.Reset(next)
 		}
 	}
 }
@@ -186,6 +206,27 @@ func (t *kafkaTransport) processDelayBatch(ctx context.Context, topo transport.T
 }
 
 func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient, records []*kgo.Record, now time.Time) error {
+	_, err := t.processDelayBatchForResult(ctx, topo, tier, targeted, client, records, now)
+	return err
+}
+
+type delayBatchOutcome struct {
+	moved int
+}
+
+type delayTransfer struct {
+	source      *kgo.Record
+	destination *kgo.Record
+	key         partitionKey
+	index       int
+}
+
+type delayPartitionBatch struct {
+	transfers []*delayTransfer
+	prefix    int
+}
+
+func (t *kafkaTransport) processDelayBatchForResult(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient, records []*kgo.Record, now time.Time) (delayBatchOutcome, error) {
 	queues := make(map[partitionKey][]*kgo.Record)
 	keys := make([]partitionKey, 0)
 	for _, record := range records {
@@ -197,13 +238,18 @@ func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transpor
 	}
 	rewind := make(map[string]map[int32]kgo.EpochOffset)
 	var failures []error
-	transfers, commits := 0, 0
+	expectedTopic := t.delayTopic(topo, tier)
+	if targeted {
+		expectedTopic = t.targetedDelayTopic(topo, tier)
+	}
+	prepared := make([]*delayTransfer, 0, len(records))
+	partitions := make(map[partitionKey]*delayPartitionBatch, len(keys))
+	validatedGroups := make(map[string]error)
+	outcome := delayBatchOutcome{}
 	for _, key := range keys {
+		batch := &delayPartitionBatch{}
+		partitions[key] = batch
 		for _, record := range queues[key] {
-			expectedTopic := t.delayTopic(topo, tier)
-			if targeted {
-				expectedTopic = t.targetedDelayTopic(topo, tier)
-			}
 			if record.Topic != expectedTopic {
 				setDelayRewind(rewind, record)
 				failures = append(failures, fmt.Errorf("kafka: delay tier %s received unexpected topic %q", tier, record.Topic))
@@ -224,9 +270,14 @@ func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transpor
 					failures = append(failures, fmt.Errorf("kafka: targeted delayed record %s[%d]@%d has no target group", record.Topic, record.Partition, record.Offset))
 					break
 				}
-				if err := t.validateProvisionedSubscriber(ctx, topo, group); err != nil {
+				validationErr, validated := validatedGroups[group]
+				if !validated {
+					validationErr = t.validateProvisionedSubscriber(ctx, topo, group)
+					validatedGroups[group] = validationErr
+				}
+				if validationErr != nil {
 					setDelayRewind(rewind, record)
-					failures = append(failures, fmt.Errorf("kafka: targeted delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
+					failures = append(failures, fmt.Errorf("kafka: targeted delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, validationErr))
 					break
 				}
 				target = t.targetedDelayDestination(topo, group, runAt, now)
@@ -240,18 +291,85 @@ func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transpor
 			if target == t.mainTopic(topo) || targeted && !strings.Contains(target, ".target-delay-") {
 				removeMessageHeader(&message, kafkaRunAtHeader)
 			}
-			if err := t.produceConfirmed(ctx, messageRecord(target, message)); err != nil {
-				setDelayRewind(rewind, record)
-				failures = append(failures, fmt.Errorf("kafka: forward delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
-				break
+			if target != expectedTopic {
+				outcome.moved++
 			}
-			transfers++
-			if err := client.CommitRecords(ctx, record); err != nil {
-				setDelayRewind(rewind, record)
-				failures = append(failures, fmt.Errorf("kafka: commit delayed record %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err))
-				break
+			transfer := &delayTransfer{source: record, destination: messageRecord(target, message), key: key, index: len(batch.transfers)}
+			batch.transfers = append(batch.transfers, transfer)
+			prepared = append(prepared, transfer)
+		}
+	}
+
+	transfers, commits := 0, 0
+	if len(prepared) > 0 {
+		if err := ctx.Err(); err != nil {
+			for _, batch := range partitions {
+				if len(batch.transfers) > 0 {
+					setDelayRewind(rewind, batch.transfers[0].source)
+				}
 			}
-			commits++
+			failures = append(failures, err)
+		} else if t.producerErr != nil {
+			for _, batch := range partitions {
+				if len(batch.transfers) > 0 {
+					setDelayRewind(rewind, batch.transfers[0].source)
+				}
+			}
+			failures = append(failures, t.producerErr)
+		} else if t.producer == nil {
+			for _, batch := range partitions {
+				if len(batch.transfers) > 0 {
+					setDelayRewind(rewind, batch.transfers[0].source)
+				}
+			}
+			failures = append(failures, fmt.Errorf("kafka: producer is unavailable"))
+		} else {
+			destinations := make([]*kgo.Record, len(prepared))
+			for i, transfer := range prepared {
+				destinations[i] = transfer.destination
+			}
+			results := t.producer.ProduceSync(ctx, destinations...)
+			for i, transfer := range prepared {
+				batch := partitions[transfer.key]
+				var produceErr error
+				if i >= len(results) {
+					produceErr = fmt.Errorf("missing produce result")
+				} else {
+					produceErr = results[i].Err
+				}
+				if produceErr == nil {
+					transfers++
+					if batch.prefix == transfer.index {
+						batch.prefix++
+					}
+					continue
+				}
+				setDelayRewind(rewind, transfer.source)
+				failures = append(failures, fmt.Errorf("kafka: forward delayed record %s[%d]@%d: %w", transfer.source.Topic, transfer.source.Partition, transfer.source.Offset, produceErr))
+			}
+
+			commitRecords := make([]*kgo.Record, 0, len(keys))
+			commitBatches := make([]*delayPartitionBatch, 0, len(keys))
+			for _, key := range keys {
+				batch := partitions[key]
+				if batch.prefix == 0 {
+					continue
+				}
+				commitRecords = append(commitRecords, batch.transfers[batch.prefix-1].source)
+				commitBatches = append(commitBatches, batch)
+			}
+			if len(commitRecords) > 0 {
+				if err := client.CommitRecords(ctx, commitRecords...); err != nil {
+					for _, batch := range commitBatches {
+						setDelayRewind(rewind, batch.transfers[0].source)
+					}
+					failures = append(failures, fmt.Errorf("kafka: commit delayed batch: %w", err))
+				} else {
+					for _, batch := range commitBatches {
+						commits += batch.prefix
+					}
+				}
+			}
 		}
 	}
 	if len(rewind) > 0 {
@@ -264,7 +382,7 @@ func (t *kafkaTransport) processDelayBatchFor(ctx context.Context, topo transpor
 	} else {
 		t.recordSchedulerError(topo, schedulerWorker(tier, targeted), kafkaSchedulerOperation(err), err, now)
 	}
-	return err
+	return outcome, err
 }
 
 func (t *kafkaTransport) recordSchedulerProgress(topo transport.Topology, worker string, transfers, commits int) {
@@ -363,7 +481,7 @@ func kafkaSchedulerOperation(err error) string {
 	if strings.Contains(text, "forward delayed record") {
 		return "transfer"
 	}
-	if strings.Contains(text, "commit delayed record") {
+	if strings.Contains(text, "commit delayed") {
 		return "commit"
 	}
 	return "dispatch"
