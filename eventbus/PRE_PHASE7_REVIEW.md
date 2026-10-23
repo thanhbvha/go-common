@@ -7,6 +7,25 @@
   be silently lost.
 - Worktree state at review start: clean.
 
+## Closure update
+
+All EB-01 through EB-20 findings were closed by P6.7.1 through P6.7.7 and the
+Phase 6.7 exit review on 2026-10-23. The original findings and evidence below are
+retained as the historical review that defined the hardening work.
+
+P0/P1 findings have regression, contract, fault, or production-scale evidence.
+P2 findings have implemented API/scalability changes plus explicit compatibility
+decisions: implicit event declaration, legacy dual-purpose ordering keys,
+error-only publication methods, and legacy capability mirrors remain only for
+the Phase 7 migration/rollback window. New Phase 7 code must use explicit event
+declaration, result-returning publication, separate concurrency/broker keys, and
+structured capabilities. Legacy resource naming is migration-only and requires
+an operator collision audit; it is not permitted for new Phase 7 resources.
+
+Phase 7 adapter and verification work may begin. Production readiness remains
+separate and requires the Phase 7 soak, rollback, backlog-drain, and deprecation
+exit criteria.
+
 ## Executive conclusion
 
 Phases 0-6 created a substantially safer implementation, and the current

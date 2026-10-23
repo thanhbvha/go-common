@@ -1,6 +1,6 @@
 # EventBus Refactor Execution Plan
 
-> Status: Phase 6 verified complete; Phase 6.7 hardening planned; Phase 7 not started
+> Status: Phase 6.7 verified complete; Phase 7 not started
 > Scope: `eventbus`, `redis`, `kafka`, `nats`, `queue`, `queue_kafka`, `queue_nats`  
 > Primary goal: turn `eventbus` into a production-grade, transport-agnostic task queue with explicit event fan-out support.  
 > Delivery guarantee: at-least-once. Exactly-once is not promised.
@@ -1429,28 +1429,58 @@ otherwise; Phase 7 depends on the complete Phase 6.7 exit criteria.
 
 ### Phase 6.7 exit criteria
 
-- [ ] All P0 and P1 findings in `PRE_PHASE7_REVIEW.md` are closed with
+- [x] All P0 and P1 findings in `PRE_PHASE7_REVIEW.md` are closed with
   regression tests; any deferred P2 finding has an explicit compatibility and
   release decision.
-- [ ] Successful publication on a durable driver cannot be reproduced without
+- [x] Successful publication on a durable driver cannot be reproduced without
   durable acceptance, and all physical topology/group names are collision-free
   under supported inputs.
-- [ ] Memory has no silent-success loss path, uses bounded queues and delayed
+- [x] Memory has no silent-success loss path, uses bounded queues and delayed
   scheduling, provisions event groups before publish, and passes every shared
   contract scenario applicable to its declared process-local capabilities.
-- [ ] Durable schedulers meet their documented deadline/lifecycle guarantees and
+- [x] Durable schedulers meet their documented deadline/lifecycle guarantees and
   expose actionable failures.
-- [ ] Public task/event stats and DLQ administration work without concrete
+- [x] Public task/event stats and DLQ administration work without concrete
   transport access.
-- [ ] Redis provisions intended groups before compaction, reclaims only below a
+- [x] Redis provisions intended groups before compaction, reclaims only below a
   group-safe watermark, applies observable admission backpressure when an
   offline group blocks retention, and demonstrates bounded memory after ACK.
-- [ ] Every applicable shared transport contract row maps to passing tests for
+- [x] Every applicable shared transport contract row maps to passing tests for
   Memory, Redis, NATS, and Kafka, capability-gating durable-only behavior.
-- [ ] Disposable 100k/1m backlog runs and a sustained pre-production soak are
+- [x] Disposable 100k/1m backlog runs and a sustained pre-production soak are
   recorded with no unexplained loss and bounded resources.
-- [ ] Phase 7-facing publication identities, options, capabilities, and
+- [x] Phase 7-facing publication identities, options, capabilities, and
   lifecycle semantics are finalized and documented.
+
+Phase 6.7 exit review completed on 2026-10-23:
+
+- P6.7.1 through P6.7.7 are complete. EB-01 through EB-20 map to deterministic
+  regressions, shared contracts, live/embedded broker tests, or the canonical
+  production evidence recorded in the corresponding task notes.
+- Durable publication ambiguity is fail-closed through confirmed publication
+  state and `ErrDedupeAmbiguous`. Default physical resources use injective
+  versioned names. `WithLegacyResourceNames` remains a supervised migration-only
+  exception: operators must prove their existing tuple set is collision-free,
+  and Phase 7 adapters must not select it for new resources.
+- Memory is explicitly process-local and bounded. Redis retention uses durable
+  group manifests, epoch fencing, conservative watermarks, bounded compaction,
+  and typed capacity backpressure. Durable scheduler health and joined shutdown
+  are covered for Redis, NATS, and Kafka.
+- `CONTRACT_TESTS.md` maps every shared row to executable coverage. The accepted
+  24-cell 100k/1m matrix, broker restart cells, Kafka rebalance evidence, and the
+  two-hour sustained soak are reviewed in `P6.7.6_MATRIX_REVIEW.md`,
+  `BENCHMARKS.md`, and `PRODUCTION_SCALE.md`.
+- P2 compatibility decisions are explicit: error-only publication methods,
+  implicit event declaration, legacy dual-purpose `WithOrderingKey`, and legacy
+  capability mirrors remain adapters for the Phase 7 migration window. New code
+  uses result-returning publication, explicit event declaration,
+  `WithConcurrencyKey`/`WithBrokerOrderingKey`, and structured capabilities.
+  Implicit declaration and legacy dual-key semantics are scheduled for removal
+  only after P7 adapters, migration verification, and at least one release-long
+  rollback window. This does not weaken the new API contract.
+- Phase 6.7 completion permits P7.1-P7.3 implementation. It does not declare a
+  production migration complete: Phase 7 soak, rollback exercise, legacy backlog
+  drain, and deprecation gates remain open.
 
 ## 14. Phase 7 - Migration and legacy deprecation
 
@@ -1547,19 +1577,19 @@ Before completing a transport phase, also run its integration suite using the bu
 
 All gates are mandatory:
 
-- [ ] Phase 6.7 exit criteria are complete.
-- [ ] No unresolved P0 defect.
-- [ ] Core and all enabled driver contract tests pass.
-- [ ] Default tests are hermetic.
+- [x] Phase 6.7 exit criteria are complete.
+- [x] No unresolved P0 defect.
+- [x] Core and all enabled driver contract tests pass.
+- [x] Default tests are hermetic.
 - [x] Race tests pass for core and memory transport.
-- [ ] Crash-window tests demonstrate no silent loss.
-- [ ] Kafka never commits beyond unsettled offsets.
-- [ ] Redis does not reclaim an actively leased job contrary to policy.
-- [ ] NATS delayed backlog does not exhaust main-consumer capacity.
-- [ ] DLQ and stats return real, verified data.
-- [ ] TLS/SASL production configuration is covered.
-- [ ] Metrics and tracing expose settlement failures and saturation.
-- [ ] Benchmarks and soak-test results are recorded.
+- [x] Crash-window tests demonstrate no silent loss.
+- [x] Kafka never commits beyond unsettled offsets.
+- [x] Redis does not reclaim an actively leased job contrary to policy.
+- [x] NATS delayed backlog does not exhaust main-consumer capacity.
+- [x] DLQ and stats return real, verified data.
+- [x] TLS/SASL production configuration is covered.
+- [x] Metrics and tracing expose settlement failures and saturation.
+- [x] Benchmarks and soak-test results are recorded.
 - [ ] Migration rollback procedure has been exercised.
 
 ## 18. Current verification snapshot
@@ -1661,3 +1691,27 @@ Update this snapshot only after completing a phase; do not erase historical fail
 - Kafka passes every applicable shared transport contract scenario against the
   live broker. Unit repetition, the complete tagged Kafka suite, integration-tag
   compilation, focused race tests, and default/full-repository tests and vet pass.
+
+### Phase 6.7 completion snapshot (2026-10-23)
+
+- P6.7.1 through P6.7.7 and every Phase 6.7 exit criterion are complete.
+  EB-01 through EB-20 are closed with regression, shared-contract, fault, live
+  broker, or production-scale evidence.
+- Durable publication ambiguity is visible, topology naming is injective by
+  default, Memory is bounded and process-local, Redis retention is group-safe,
+  and Redis/NATS/Kafka schedulers expose health and joined lifecycle behavior.
+- Public task/event/subscriber statistics and DLQ administration require no
+  concrete transport access. Every shared contract row maps to passing tests for
+  all applicable built-in drivers.
+- The canonical 24-cell 100k/1m matrix, selected broker-restart cells, Kafka
+  rebalance evidence, profiles/resource review, immutable broker fixtures, and a
+  two-hour sustained soak are recorded and reviewed.
+- Phase 7-facing stable IDs, durable-prefix publication results, scoped options,
+  separate local/broker keys, portable delay policy, capacity bounds,
+  deterministic lifecycle errors, and structured capabilities are implemented
+  and documented with compatibility adapters.
+- `go test ./...`, `go vet ./...`, EventBus/driver race suites,
+  integration-tag compilation, the full embedded JetStream suite, benchmark
+  script validation, and `git diff --check` passed. Phase 7 may begin, but the
+  production migration remains incomplete until rollback is exercised and all
+  Phase 7 exit criteria pass.

@@ -1,8 +1,9 @@
 # EventBus transport capability matrix
 
-Status: baseline audit for Phase P0.4. Update this document whenever a driver
+Status: Phase 6.7 capability contract. Update this document whenever a driver
 capability changes. A capability may be advertised by code only after its
-contract tests pass.
+contract tests pass. The production-readiness row remains `No` until Phase 7
+migration, rollback, soak, and deprecation gates pass.
 
 Legend:
 
@@ -16,9 +17,9 @@ Legend:
 | Capability | Memory | Redis | NATS JetStream | Kafka |
 |---|---|---|---|---|
 | Durable acceptance | No | Yes | Yes | Yes |
-| Work-queue delivery | Test only | Yes | Yes | Partial |
-| Event fan-out groups | Test only | Yes | Yes | Partial |
-| Delayed delivery | Test only, bounded process-local scheduler | Partial, ZSET sweeper | Partial, KV sweeper | Partial, durable bounded tier sweeps (P5.6) |
+| Work-queue delivery | Test only | Yes | Yes | Yes |
+| Event fan-out groups | Test only | Yes | Yes | Yes |
+| Delayed delivery | Test only, bounded process-local scheduler | Yes, bounded ZSET scheduler | Yes, bounded KV scheduler | Yes, durable bounded tier sweeps |
 | Reported delay precision | 1 ms | 1 s | 1 s | 5 s |
 | Scheduler health | Process-local snapshot | Yes | Yes | Yes, per tier |
 | Ordering | No | No | No | Yes, within a source partition |
@@ -31,7 +32,7 @@ Legend:
 | DLQ write | Test only | Yes | Yes | Yes |
 | DLQ list/requeue/purge/count | Test only | Yes, cursor + atomic requeue (P3.6) | Yes, cursor + publish-before-delete requeue (P4.5) | Yes, logical append-only cursor (P5.7) |
 | Queue stats | Test only | Yes | Yes | Yes |
-| Pause/resume | No | No | No | No |
+| Pause/resume | Process-local Bus control | Process-local Bus control | Process-local Bus control | Process-local Bus control |
 | Payload size enforcement | Yes, core | Yes, core | Yes, core | Yes, core |
 | Production readiness | No | No | No | No |
 

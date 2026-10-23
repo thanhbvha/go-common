@@ -28,6 +28,24 @@ delay scheduler resources. Future publication/retry is rejected before broker
 I/O. `Config.MaxTopologies` and `Config.MaxSubscribers` are optional startup
 planning bounds; zero leaves them unlimited.
 
+### Compatibility-window decisions
+
+The following adapters remain during Phase 7 migration and rollback:
+
+- error-only `Enqueue`, `EnqueueBatch`, and `Publish`;
+- implicit event declaration through `Subscribe`;
+- legacy `WithOrderingKey`, which temporarily sets broker and local keys;
+- legacy `Capabilities.DelayPrecision` and `Capabilities.Ordering` mirrors;
+- explicitly selected `WithLegacyResourceNames` for existing broker resources.
+
+New adapters and applications must use the result-returning APIs, explicit
+`DeclareEvent`, separate `WithConcurrencyKey`/`WithBrokerOrderingKey`, structured
+capabilities, and the default injective resource-name layout. Implicit declaration
+and legacy dual-key behavior may be removed only after migration verification and
+at least one release-long rollback window. Legacy resource naming is not valid
+for new resources and requires an operator audit proving the deployed tuple set
+does not collide.
+
 This guide covers migration from `queue`, `queue_kafka`, and `queue_nats`, and
 from the pre-refactor EventBus API. EventBus provides at-least-once delivery:
 handlers must be idempotent and may receive a message more than once.
