@@ -157,14 +157,21 @@ func SetDefault(c *Client) {
 	globalMu.Unlock()
 }
 
+// LookupDefault returns the process-wide default Client and whether it has
+// been configured. It is the non-panicking alternative to Default.
+func LookupDefault() (*Client, bool) {
+	globalMu.RLock()
+	c := globalClient
+	globalMu.RUnlock()
+	return c, c != nil
+}
+
 // Default returns the process-wide default Client registered via SetDefault.
 // It panics if SetDefault has not been called, because proceeding without a
 // configured client would produce confusing errors further down the call stack.
 func Default() *Client {
-	globalMu.RLock()
-	c := globalClient
-	globalMu.RUnlock()
-	if c == nil {
+	c, ok := LookupDefault()
+	if !ok {
 		panic("redis: default client not set — call redis.SetDefault before use")
 	}
 	return c

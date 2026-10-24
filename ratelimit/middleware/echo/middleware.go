@@ -1,3 +1,4 @@
+// Package echolimit provides rate limiting middleware for Echo.
 package echolimit
 
 import (
@@ -7,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/ratelimit"
+	echoresp "github.com/thanhbvha/go-common/web/response/echo"
 )
 
 // KeyGenerator is a function that extracts a unique key from the Echo context.
@@ -31,7 +33,7 @@ func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGener
 			}
 
 			res, err := limiter.Allow(c.Request().Context(), key, cfg)
-			if err != nil {
+			if err != nil || res == nil {
 				// Bypass if Redis is down
 				return next(c)
 			}
@@ -42,9 +44,7 @@ func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGener
 			c.Response().Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
 
 			if !res.Allowed {
-				return c.JSON(http.StatusTooManyRequests, map[string]string{
-					"error": "Too many requests, please try again later.",
-				})
+				return echoresp.Error(c, http.StatusTooManyRequests, "Too many requests, please try again later.")
 			}
 
 			return next(c)

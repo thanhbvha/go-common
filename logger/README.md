@@ -1,6 +1,8 @@
 # logger
 
-Zero-dependency async logger. Fiber (or any HTTP framework) adapter lives in a separate repo — no framework lock-in.
+Async structured logger with request middleware for standard `net/http`, Fiber,
+Gin, and Echo. Framework adapters live in isolated subpackages so applications
+only import the stack they use.
 
 ```go
 import "github.com/thanhbvha/go-common/logger"
@@ -32,9 +34,16 @@ log := logger.New(logger.Options{
 })
 
 // Attach request-id via context
-ctx = context.WithValue(ctx, logger.ContextKeyRequestID, requestID)
+ctx = ctxkey.SetRequestID(ctx, requestID)
 log.InfoWithContext(ctx, "request received", "method", r.Method)
 ```
+
+HTTP middleware import paths:
+
+- `logger/middleware/nethttp`
+- `logger/middleware/fiber`
+- `logger/middleware/gin`
+- `logger/middleware/echo`
 
 ### Key types
 

@@ -1,4 +1,5 @@
-package echo_adapter
+// Package echoadapter adapts the GraphQL core HTTP handler to Echo.
+package echoadapter
 
 import (
 	"context"

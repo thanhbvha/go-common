@@ -12,30 +12,30 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
 | `config` | Environment variable and configuration file loader (Viper wrapper) |
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
-| `recovery` | Framework-independent structured panic capture with Fiber / Gin / Echo middleware adapters |
+| `recovery` | Framework-independent structured panic capture with net/http / Fiber / Gin / Echo middleware adapters |
 | `redis` | Redis client wrapper (single / cluster / sentinel) with health-check |
 | `nats` | NATS client wrapper — Core Pub/Sub, JetStream streams/consumers, KV Store |
 | `kafka` | Apache Kafka client wrapper (franz-go) — Producer, Consumer, Admin, TLS/SASL |
 | `queue` | Durable Redis Streams job queue — delays, retries, DLQ, reclaim |
 | `queue_nats` | NATS JetStream job queue — feature parity with Redis queue |
 | `queue_kafka` | Kafka job queue — feature parity with Redis queue, partition key routing |
-| `websocket` | Clustered, framework-agnostic real-time WebSocket server (Fiber / Gin / Echo) |
+| `websocket` | Clustered, framework-agnostic real-time WebSocket server (net/http / Fiber / Gin / Echo) |
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
-| `web` | Web core utilities (standard response, validator, Fiber / Gin / Echo middleware adapters) |
-| `graphql` | Framework-agnostic GraphQL engine with Go 1.22+ Generic DataLoader & Telemetry |
+| `web` | Web core utilities (standard response, validator, net/http / Fiber / Gin / Echo middleware adapters) |
+| `graphql` | Framework-agnostic GraphQL engine with Generic DataLoader & Telemetry |
 | `utils` | Go Generics toolset (slice, maps, str), Cryptography (AES, ChaCha20, Argon2id, Hashing), and Graceful Shutdown |
 | `cache` | Multi-tier Caching (Ristretto Local + Redis Remote) & Redis Distributed Lock |
 | `auth` | Enterprise Authentication with Encrypted JWT (AES-GCM) and Dynamic Token Binding |
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
 | `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
 | `cron` | Distributed Job Scheduler with Redis-backed Leader Election |
-| `health` | Kubernetes-ready health checks (`/live`, `/ready`) with concurrent Checkers and Framework adapters |
+| `health` | Kubernetes-ready health checks (`/live`, `/ready`) with concurrent Checkers and HTTP adapters |
 | `grpc` | Pre-configured gRPC server with unified Interceptors (Recovery, Logging, Auth) |
 
 ## Requirements
 
-- Go 1.22+
+- Go 1.26+
 - Redis 6.x+ (Redis 6.2+ recommended for `XAUTOCLAIM` support)
 - NATS Server 2.10+ with JetStream enabled (`-js` flag or `jetstream: enabled` in config)
 - Apache Kafka 2.8+ (or compatible brokers like Redpanda)
@@ -78,6 +78,18 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`cron`](./cron/README.md)
 - [`health`](./health/README.md)
 - [`grpc`](./grpc/README.md)
+
+## HTTP support matrix
+
+| Capability | Core | `net/http` | Fiber | Gin | Echo |
+|---|---|---|---|---|---|
+| Authentication | `auth` managers | Middleware | Middleware | Middleware | Middleware |
+| Request logging / ID | `logger`, `ctxkey` | Middleware | Middleware | Middleware | Middleware |
+| Health probes | `health.Checker` | Handler | Handler | Handler | Handler |
+| Rate limiting | `ratelimit.Limiter` | Middleware | Middleware | Middleware | Middleware |
+| Responses / recovery / telemetry | `web` primitives | Adapter | Adapter | Adapter | Adapter |
+| GraphQL | `http.Handler` | Direct | Adapter | Adapter | Adapter |
+| WebSocket | `core.Conn` | Adapter | Adapter | Adapter | Adapter |
 
 ---
 

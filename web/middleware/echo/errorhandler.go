@@ -1,10 +1,11 @@
 package echomw
 
 import (
-	"net/http"
+	"fmt"
 
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/web/response"
 )
 
 // ErrorHandler is a custom global error handler for Echo
@@ -13,35 +14,22 @@ func ErrorHandler(err error, c echo.Context) {
 		return
 	}
 
-	code := http.StatusInternalServerError
-	stringCode := "INTERNAL_ERROR"
-	message := "An unexpected internal error occurred"
-
-	if he, ok := err.(*echo.HTTPError); ok {
-		code = he.Code
-		message = he.Message.(string)
-		stringCode = "ECHO_ERROR"
-	} else {
-		code = xerrors.HTTPStatusCode(err)
-		stringCode = xerrors.GetCode(err)
-		message = err.Error()
-
-		if code == http.StatusInternalServerError {
-			message = "An unexpected internal error occurred"
-		}
-	}
-
 	requestID := ""
 	if reqID := c.Get("request_id"); reqID != nil {
 		if str, ok := reqID.(string); ok {
 			requestID = str
 		}
 	}
+	if requestID == "" {
+		requestID, _ = ctxkey.GetRequestID(c.Request().Context())
+	}
 
-	c.JSON(code, map[string]interface{}{
-		"code":       code,
-		"status":     stringCode,
-		"message":    message,
-		"request_id": requestID,
-	})
+	var payload response.ErrorResponse
+	if he, ok := err.(*echo.HTTPError); ok {
+		payload = response.NewHTTPError(he.Code, "ECHO_ERROR", fmt.Sprint(he.Message), requestID)
+	} else {
+		payload = response.FromError(err, requestID)
+	}
+
+	_ = c.JSON(payload.Code, payload)
 }

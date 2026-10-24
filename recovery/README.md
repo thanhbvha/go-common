@@ -55,8 +55,10 @@ defer recovery.Catch(nil)
 
 ## HTTP middleware
 
-Install recovery before middleware and routes that it must protect. The adapters
-log the server-side report synchronously and return only a generic HTTP 500 body:
+Install request ID and access logging outside recovery, then place recovery
+before telemetry, authentication, rate limiting, and routes that it must
+protect. The adapters log the server-side report synchronously and return only
+a generic HTTP 500 body:
 
 ```json
 {
@@ -73,24 +75,27 @@ The panic message, stack, source file, and line are never returned to the client
 
 ```go
 app := fiber.New()
-app.Use(fibermw.Recover())
 app.Use(fiberlog.RequestIDMiddleware())
+app.Use(fiberlog.Middleware())
+app.Use(fibermw.Recover())
 ```
 
 ### Gin
 
 ```go
 router := gin.New()
-router.Use(ginmw.Recover())
 router.Use(ginlog.RequestIDMiddleware())
+router.Use(ginlog.Middleware())
+router.Use(ginmw.Recover())
 ```
 
 ### Echo
 
 ```go
 server := echo.New()
-server.Use(echomw.Recover())
 server.Use(echolog.RequestIDMiddleware())
+server.Use(echolog.Middleware())
+server.Use(echomw.Recover())
 ```
 
 ## Goroutine boundary
@@ -113,7 +118,7 @@ do not retain Fiber, Gin, or Echo request-context objects after the request.
 
 - [`examples/recovery`](../examples/recovery) demonstrates HTTP recovery and a
   separate background-goroutine boundary.
-- [`examples/web`](../examples/web) shows Fiber, Gin, and Echo application
+- [`examples/web`](../examples/web) shows net/http, Fiber, Gin, and Echo application
   composition with their respective recovery adapters.
 
 Run the dedicated example from the module root:

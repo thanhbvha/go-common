@@ -1,7 +1,7 @@
 // Package ctxkey provides a strongly-typed mechanism for managing context keys.
 //
-// It prevents key collisions when storing values in context.Context by using
-// custom unexported types for keys, which is the recommended Go practice.
+// Accessor functions provide one consistent location for request metadata.
+// The exported legacy keys remain available for framework-local compatibility.
 package ctxkey
 
 import (
@@ -59,6 +59,17 @@ func SetRequestID(ctx context.Context, reqID string) context.Context {
 func GetRequestID(ctx context.Context) (string, bool) {
 	val, ok := ctx.Value(RequestIDKey).(string)
 	return val, ok
+}
+
+// SetUserInfo stores authenticated user information in the context.
+func SetUserInfo(ctx context.Context, userInfo any) context.Context {
+	return context.WithValue(ctx, UserInfo, userInfo)
+}
+
+// GetUserInfo retrieves authenticated user information from the context.
+func GetUserInfo(ctx context.Context) (any, bool) {
+	val := ctx.Value(UserInfo)
+	return val, val != nil
 }
 
 // SetDataLoader stores any DataLoader in the context

@@ -18,6 +18,12 @@ func StartSpan(ctx context.Context, spanName string) (context.Context, trace.Spa
 	return tracer.Start(ctx, spanName)
 }
 
+// StartServerSpan starts a span representing an inbound server request.
+func StartServerSpan(ctx context.Context, spanName string) (context.Context, trace.Span) {
+	tracer := otel.Tracer("go-common/telemetry")
+	return tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
+}
+
 // RecordError records an error on the span and sets the span status to Error.
 func RecordError(span trace.Span, err error) {
 	if err != nil {
@@ -42,4 +48,10 @@ func StartClientSpan(ctx context.Context, spanName string) (context.Context, tra
 func InjectHTTPHeaders(ctx context.Context, header http.Header) {
 	propagator := otel.GetTextMapPropagator()
 	propagator.Inject(ctx, propagation.HeaderCarrier(header))
+}
+
+// ExtractHTTPHeaders extracts an upstream trace context from HTTP headers.
+func ExtractHTTPHeaders(ctx context.Context, header http.Header) context.Context {
+	propagator := otel.GetTextMapPropagator()
+	return propagator.Extract(ctx, propagation.HeaderCarrier(header))
 }

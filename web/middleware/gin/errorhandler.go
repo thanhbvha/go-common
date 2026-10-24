@@ -1,10 +1,9 @@
 package ginmw
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/web/response"
 )
 
 // ErrorHandler is a custom global error handler middleware for Gin.
@@ -15,27 +14,18 @@ func ErrorHandler() gin.HandlerFunc {
 		if len(c.Errors) > 0 {
 			err := c.Errors.Last().Err
 
-			code := xerrors.HTTPStatusCode(err)
-			stringCode := xerrors.GetCode(err)
-			message := err.Error()
-
-			if code == http.StatusInternalServerError {
-				message = "An unexpected internal error occurred"
-			}
-
 			requestID := ""
 			if reqID, exists := c.Get("request_id"); exists {
 				if str, ok := reqID.(string); ok {
 					requestID = str
 				}
 			}
+			if requestID == "" {
+				requestID, _ = ctxkey.GetRequestID(c.Request.Context())
+			}
 
-			c.JSON(code, gin.H{
-				"code":       code,
-				"status":     stringCode,
-				"message":    message,
-				"request_id": requestID,
-			})
+			payload := response.FromError(err, requestID)
+			c.JSON(payload.Code, payload)
 		}
 	}
 }

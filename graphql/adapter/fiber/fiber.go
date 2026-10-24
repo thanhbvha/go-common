@@ -1,4 +1,5 @@
-package fiber_adapter
+// Package fiberadapter adapts the GraphQL core HTTP handler to Fiber.
+package fiberadapter
 
 import (
 	"context"
@@ -7,6 +8,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/adaptor"
 )
+
+type contextKey struct{}
 
 // Config contains specific configurations for the Fiber Adapter
 type Config struct {
@@ -19,7 +22,7 @@ func NewHandler(coreHandler http.Handler, cfg Config) fiber.Handler {
 	// net/http wrapper to intercept the Request and swap the Context
 	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Retrieve the custom context we injected into Locals
-		if customCtx, ok := r.Context().Value("fiber_custom_ctx").(context.Context); ok {
+		if customCtx, ok := r.Context().Value(contextKey{}).(context.Context); ok {
 			r = r.WithContext(customCtx)
 		}
 		coreHandler.ServeHTTP(w, r)
@@ -31,7 +34,7 @@ func NewHandler(coreHandler http.Handler, cfg Config) fiber.Handler {
 		if cfg.ContextSetup != nil {
 			newCtx := cfg.ContextSetup(c.UserContext(), c)
 			// Save newCtx to Locals so the net/http wrapper can retrieve and use it
-			c.Locals("fiber_custom_ctx", newCtx)
+			c.Locals(contextKey{}, newCtx)
 		}
 
 		return httpHandler(c)

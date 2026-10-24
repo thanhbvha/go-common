@@ -37,3 +37,19 @@ func TestHealthChecks(t *testing.T) {
 		t.Errorf("expected liveness ok, got %v", liveRes.Status)
 	}
 }
+
+func TestHealthChecksHideErrorDetailsByDefault(t *testing.T) {
+	c := health.New().AddReadinessCheck("database", func(context.Context) error {
+		return errors.New("postgres://user:secret@internal-db/service")
+	})
+
+	res := c.CheckReadiness(context.Background())
+	if got := res.Checks["database"].Error; got != "" {
+		t.Fatalf("expected dependency error to be hidden, got %q", got)
+	}
+
+	res = c.WithErrorDetails(true).CheckReadiness(context.Background())
+	if got := res.Checks["database"].Error; got == "" {
+		t.Fatal("expected dependency error when diagnostic details are enabled")
+	}
+}

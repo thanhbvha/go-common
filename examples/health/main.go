@@ -3,111 +3,113 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
+	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/health"
-	"github.com/thanhbvha/go-common/health/handler/fiber"
+	echohealth "github.com/thanhbvha/go-common/health/handler/echo"
+	fiberhealth "github.com/thanhbvha/go-common/health/handler/fiber"
+	ginhealth "github.com/thanhbvha/go-common/health/handler/gin"
+	nethttphealth "github.com/thanhbvha/go-common/health/handler/nethttp"
+	"github.com/thanhbvha/go-common/utils/graceful"
 )
 
+const address = ":3000"
+
 func main() {
-	fmt.Println("=== Health Module Example ===")
+	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	flag.Parse()
+	checker := newChecker()
 
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
-	})
-
-	// Create health checker
-	h := health.New().
-		WithVersion("v1.2.0").
-		WithTimeout(2 * time.Second)
-
-	// =====================================================================
-	// 1. PostgreSQL Check (GORM)
-	// =====================================================================
-	// In production, you would use the built-in GORMChecker and pass your *gorm.DB instance:
-	//   db, _ := gorm.Open(...)
-	//   h.AddReadinessCheck("postgresql", health.GORMChecker(db))
-	//
-	// Here we simulate the result:
-	h.AddReadinessCheck("postgresql", health.CustomChecker(func(ctx context.Context) error {
-		time.Sleep(100 * time.Millisecond) // Simulate DB latency
-		return nil                         // OK
-	}))
-
-	// =====================================================================
-	// 2. Redis Check (go-redis)
-	// =====================================================================
-	// In production, you would pass your redis.Client to the RedisChecker:
-	//   rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	//   h.AddReadinessCheck("redis", health.RedisChecker(rdb))
-	//
-	// Simulate a Redis failure (to see the /ready endpoint return 503):
-	h.AddReadinessCheck("redis", health.CustomChecker(func(ctx context.Context) error {
-		time.Sleep(50 * time.Millisecond) // Simulate Redis latency
-		return errors.New("dial tcp [::1]:6379: connect: connection refused")
-	}))
-
-	// =====================================================================
-	// 3. MongoDB Check (Using CustomChecker)
-	// =====================================================================
-	// Since there is no built-in MongoChecker, you can create one using CustomChecker:
-	//   client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
-	//   h.AddReadinessCheck("mongodb", health.CustomChecker(func(ctx context.Context) error {
-	//       return client.Ping(ctx, readpref.Primary())
-	//   }))
-	h.AddReadinessCheck("mongodb", health.CustomChecker(func(ctx context.Context) error {
-		time.Sleep(150 * time.Millisecond)
-		return nil // OK
-	}))
-
-	// =====================================================================
-	// 4. Liveness Check (Process/Memory)
-	// =====================================================================
-	// Liveness checks must be extremely fast (checking if the application is alive).
-	// If they fail, Kubernetes will restart the container.
-	h.AddLivenessCheck("memory", health.CustomChecker(func(ctx context.Context) error {
-		return nil
-	}))
-
-	// Register endpoints
-	app.Get("/health", fiberhealth.Handler(h))
-	app.Get("/ready", fiberhealth.ReadyHandler(h))
-	app.Get("/live", fiberhealth.LiveHandler(h))
-
-	// Start server in background
-	go func() {
-		if err := app.Listen(":3000"); err != nil {
-			log.Fatal(err)
-		}
-	}()
-
-	fmt.Println("Server running on :3000")
-	fmt.Println("Waiting for server to start...")
-	time.Sleep(1 * time.Second)
-
-	// Simulate requests
-	runRequest("GET", "http://localhost:3000/live")
-	runRequest("GET", "http://localhost:3000/ready")
-	runRequest("GET", "http://localhost:3000/health")
+	switch *stack {
+	case "nethttp":
+		runNetHTTP(checker)
+	case "fiber":
+		runFiber(checker)
+	case "gin":
+		runGin(checker)
+	case "echo":
+		runEcho(checker)
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
+		os.Exit(2)
+	}
 }
 
-func runRequest(method, url string) {
-	fmt.Printf("\n--- %s %s ---\n", method, url)
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		return
+func newChecker() *health.Checker {
+	checker := health.New().WithVersion("v1.2.0").WithTimeout(2 * time.Second)
+	checker.AddReadinessCheck("postgresql", delayedCheck(100*time.Millisecond, nil))
+	checker.AddReadinessCheck("redis", delayedCheck(50*time.Millisecond, errors.New("dependency unavailable")))
+	checker.AddReadinessCheck("mongodb", delayedCheck(150*time.Millisecond, nil))
+	checker.AddLivenessCheck("memory", func(context.Context) error { return nil })
+	return checker
+}
+
+func delayedCheck(delay time.Duration, result error) health.CheckFunc {
+	return func(ctx context.Context) error {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return result
+		}
 	}
-	defer resp.Body.Close()
+}
 
-	fmt.Printf("Status: %d %s\n", resp.StatusCode, resp.Status)
+func runNetHTTP(checker *health.Checker) {
+	mux := http.NewServeMux()
+	mux.Handle("/health", nethttphealth.Handler(checker))
+	mux.Handle("/ready", nethttphealth.ReadyHandler(checker))
+	mux.Handle("/live", nethttphealth.LiveHandler(checker))
+	runHTTPServer("net/http", &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second})
+}
 
-	// Print JSON body
-	var body = make([]byte, 1024)
-	n, _ := resp.Body.Read(body)
-	fmt.Printf("Body: %s\n", body[:n])
+func runFiber(checker *health.Checker) {
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/health", fiberhealth.Handler(checker))
+	app.Get("/ready", fiberhealth.ReadyHandler(checker))
+	app.Get("/live", fiberhealth.LiveHandler(checker))
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(context.Context) error { return app.Shutdown() })
+	go func() { _ = app.Listen(address) }()
+	fmt.Printf("Fiber health example listening on http://localhost%s\n", address)
+	shutdown.Wait()
+}
+
+func runGin(checker *health.Checker) {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.GET("/health", ginhealth.Handler(checker))
+	router.GET("/ready", ginhealth.ReadyHandler(checker))
+	router.GET("/live", ginhealth.LiveHandler(checker))
+	runHTTPServer("Gin", &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second})
+}
+
+func runEcho(checker *health.Checker) {
+	e := echo.New()
+	e.HideBanner = true
+	e.GET("/health", echohealth.Handler(checker))
+	e.GET("/ready", echohealth.ReadyHandler(checker))
+	e.GET("/live", echohealth.LiveHandler(checker))
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
+	go func() { _ = e.Start(address) }()
+	fmt.Printf("Echo health example listening on http://localhost%s\n", address)
+	shutdown.Wait()
+}
+
+func runHTTPServer(name string, server *http.Server) {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
+	go func() { _ = server.ListenAndServe() }()
+	fmt.Printf("%s health example listening on http://localhost%s\n", name, address)
+	shutdown.Wait()
 }

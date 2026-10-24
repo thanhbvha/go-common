@@ -1,11 +1,13 @@
+// Package fiberlog provides request ID and access logging middleware for Fiber.
 package fiberlog
 
 import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
+	"github.com/thanhbvha/go-common/internal/httpkit"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
 // Middleware creates a custom request logging middleware for Fiber
@@ -69,13 +71,11 @@ func Middleware() fiber.Handler {
 func RequestIDMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Get request id from header if exists
-		requestID := c.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = uuid.New().String()
-		}
+		requestID := httpkit.RequestID(c.Get("X-Request-ID"))
 
 		// Attach to context for use throughout the request lifecycle
 		c.Locals("request_id", requestID)
+		c.SetUserContext(ctxkey.SetRequestID(c.UserContext(), requestID))
 
 		// Set header in response for client
 		c.Set("X-Request-ID", requestID)

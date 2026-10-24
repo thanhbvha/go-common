@@ -12,9 +12,9 @@
 //	    AddReadinessCheck("database", health.GORMChecker(db)).
 //	    AddReadinessCheck("redis", health.RedisChecker(redisClient))
 //
-//	app.Get("/health", fiberhealth.Handler(h))
-//	app.Get("/ready",  fiberhealth.ReadyHandler(h))
-//	app.Get("/live",   fiberhealth.LiveHandler(h))
+//	mux.Handle("/health", nethttp.Handler(h))
+//	mux.Handle("/ready", nethttp.ReadyHandler(h))
+//	mux.Handle("/live", nethttp.LiveHandler(h))
 package health
 
 import (
@@ -62,6 +62,7 @@ type Checker struct {
 	livenessChecks  []checkEntry
 	version         string
 	timeout         time.Duration
+	includeErrors   bool
 }
 
 // New creates a new Checker with a default 5-second per-check timeout.
@@ -78,6 +79,14 @@ func (c *Checker) WithVersion(v string) *Checker {
 // WithTimeout sets the maximum duration for each individual check. Default: 5s.
 func (c *Checker) WithTimeout(d time.Duration) *Checker {
 	c.timeout = d
+	return c
+}
+
+// WithErrorDetails controls whether raw dependency errors are included in
+// health responses. It is disabled by default because health endpoints are
+// commonly exposed to load balancers and orchestrators.
+func (c *Checker) WithErrorDetails(enabled bool) *Checker {
+	c.includeErrors = enabled
 	return c
 }
 
@@ -148,7 +157,9 @@ func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
 			r := CheckResult{Status: StatusOK, DurationMs: durMs}
 			if err != nil {
 				r.Status = StatusDown
-				r.Error = err.Error()
+				if c.includeErrors {
+					r.Error = err.Error()
+				}
 			}
 			ch <- result{name: entry.name, res: r}
 		}(e)

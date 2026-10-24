@@ -1,3 +1,4 @@
+// Package ginlimit provides rate limiting middleware for Gin.
 package ginlimit
 
 import (
@@ -7,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/thanhbvha/go-common/ratelimit"
+	ginresp "github.com/thanhbvha/go-common/web/response/gin"
 )
 
 // KeyGenerator is a function that extracts a unique key from the Gin context.
@@ -31,7 +33,7 @@ func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGener
 		}
 
 		res, err := limiter.Allow(c.Request.Context(), key, cfg)
-		if err != nil {
+		if err != nil || res == nil {
 			// Bypass if Redis is down
 			c.Next()
 			return
@@ -43,9 +45,8 @@ func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGener
 		c.Header("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
 
 		if !res.Allowed {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests, please try again later.",
-			})
+			ginresp.Error(c, http.StatusTooManyRequests, "Too many requests, please try again later.")
+			c.Abort()
 			return
 		}
 

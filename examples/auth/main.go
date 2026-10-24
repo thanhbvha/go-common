@@ -2,355 +2,189 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/auth/middleware/echo"
-	"github.com/thanhbvha/go-common/auth/middleware/fiber"
-	"github.com/thanhbvha/go-common/auth/middleware/gin"
+	echoauth "github.com/thanhbvha/go-common/auth/middleware/echo"
+	fiberauth "github.com/thanhbvha/go-common/auth/middleware/fiber"
+	ginauth "github.com/thanhbvha/go-common/auth/middleware/gin"
+	nethttpauth "github.com/thanhbvha/go-common/auth/middleware/nethttp"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/utils/graceful"
 )
 
+const address = ":3000"
+
 func main() {
-	fmt.Println("=== Auth Module Examples ===")
-	fmt.Println("Uncomment one of the functions below to run a specific example.")
+	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	flag.Parse()
 
-	// RunEncryptedJWT_Fiber()
-	// RunStandardJWT_Gin()
-	// RunStandardJWT_Echo()
-	// RunGenericJWT_Fiber()
-	RunGenericEncryptedJWT_Example()
-}
-
-// =====================================================================
-// 1. Encrypted JWT with Fiber Framework (Highly Recommended for Security)
-// =====================================================================
-func RunEncryptedJWT_Fiber() {
-	fmt.Println("--- Starting Encrypted JWT (Fiber) ---")
-
-	// 1. Initialize the Encrypted JWT Manager
-	// CRITICAL: The AES key MUST be EXACTLY 32 bytes to ensure AES-256 GCM encryption.
-	// Never hardcode keys in production. Read them from environment variables or a Secret Manager.
-	jwtSecret := "super-secret-jwt-key"
-	aesKey := "12345678901234567890123456789012"
-
-	manager, err := auth.NewEncryptedManager(jwtSecret, aesKey)
+	manager, err := auth.NewManager(os.Getenv("AUTH_JWT_SECRET"))
 	if err != nil {
-		log.Fatalf("Failed to initialize auth manager: %v", err)
+		fmt.Fprintln(os.Stderr, "AUTH_JWT_SECRET must contain at least 32 characters")
+		os.Exit(1)
 	}
 
+	switch *stack {
+	case "nethttp":
+		runNetHTTP(manager)
+	case "fiber":
+		runFiber(manager)
+	case "gin":
+		runGin(manager)
+	case "echo":
+		runEcho(manager)
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
+		os.Exit(2)
+	}
+}
+
+func issueToken(manager *auth.Manager) (string, error) {
+	return manager.GenerateToken(auth.UserInfo{
+		ID:    "user-123",
+		Role:  "admin",
+		Email: "user@example.com",
+	}, time.Hour)
+}
+
+func userFromContext(ctx context.Context) (*auth.UserInfo, bool) {
+	value, ok := ctxkey.GetUserInfo(ctx)
+	if !ok {
+		return nil, false
+	}
+	user, ok := value.(*auth.UserInfo)
+	return user, ok && user != nil
+}
+
+func runNetHTTP(manager *auth.Manager) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /login", func(w http.ResponseWriter, _ *http.Request) {
+		token, err := issueToken(manager)
+		if err != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
+	})
+	mux.Handle("GET /api/profile", nethttpauth.Middleware(manager)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := userFromContext(r.Context())
+		if !ok {
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"user": user, "stack": "net/http"})
+	})))
+
+	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	runHTTPServer("net/http", server)
+}
+
+func runFiber(manager *auth.Manager) {
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-
-	// Login Endpoint
 	app.Post("/login", func(c *fiber.Ctx) error {
-		user := auth.UserInfo{ID: "user_777", Role: "admin"}
-		sessionID := "sess_" + fmt.Sprintf("%d", time.Now().UnixNano())
-
-		// AAD Binding: Set Session ID in Cookie
-		c.Cookie(&fiber.Cookie{
-			Name:     "session_id",
-			Value:    sessionID,
-			Expires:  time.Now().Add(24 * time.Hour),
-			HTTPOnly: true,
-		})
-
-		token, err := manager.GenerateToken(user, 24*time.Hour, []byte(sessionID))
+		token, err := issueToken(manager)
 		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "Failed to generate token"})
+			return c.SendStatus(fiber.StatusInternalServerError)
 		}
-
-		fmt.Println("Generated Encrypted Token:", token)
-		return c.JSON(fiber.Map{"access_token": token})
+		return c.JSON(fiber.Map{"access_token": token, "token_type": "Bearer"})
+	})
+	app.Get("/api/profile", fiberauth.Middleware(manager), func(c *fiber.Ctx) error {
+		user, ok := userFromContext(c.UserContext())
+		if !ok {
+			return c.SendStatus(fiber.StatusUnauthorized)
+		}
+		return c.JSON(fiber.Map{"user": user, "stack": "fiber"})
 	})
 
-	// Protected Route
-	api := app.Group("/api")
-	aadExtractor := func(c *fiber.Ctx) []byte {
-		sessionID := c.Cookies("session_id")
-		if sessionID == "" {
-			return nil
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(context.Context) error { return app.Shutdown() })
+	go func() {
+		fmt.Printf("Fiber auth example listening on http://localhost%s\n", address)
+		if err := app.Listen(address); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, err)
 		}
-		return []byte(sessionID)
-	}
-
-	api.Use(fiberauth.EncryptedMiddleware(manager, aadExtractor))
-	api.Get("/profile", func(c *fiber.Ctx) error {
-		userInfo := c.Locals(string(ctxkey.UserInfo)).(*auth.UserInfo)
-		return c.JSON(fiber.Map{"message": "Secure Fiber Profile", "user": userInfo})
-	})
-
-	log.Fatal(app.Listen(":3000"))
+	}()
+	shutdown.Wait()
 }
 
-// =====================================================================
-// 2. Standard JWT with Gin Framework
-// =====================================================================
-func RunStandardJWT_Gin() {
-	fmt.Println("--- Starting Standard JWT (Gin) ---")
-
-	jwtSecret := "super-secret-jwt-key-which-is-at-least-32-bytes"
-	manager, err := auth.NewManager(jwtSecret)
-	if err != nil {
-		log.Fatalf("Failed to initialize auth manager: %v", err)
-	}
-
-	r := gin.Default()
-
-	// Login Endpoint
-	r.POST("/login", func(c *gin.Context) {
-		user := auth.UserInfo{ID: "user_888", Role: "user"}
-		token, err := manager.GenerateToken(user, 24*time.Hour)
+func runGin(manager *auth.Manager) {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.POST("/login", func(c *gin.Context) {
+		token, err := issueToken(manager)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+			c.Status(http.StatusInternalServerError)
 			return
 		}
-
-		fmt.Println("Generated Standard Token:", token)
-		c.JSON(http.StatusOK, gin.H{"access_token": token})
+		c.JSON(http.StatusOK, gin.H{"access_token": token, "token_type": "Bearer"})
 	})
-
-	// Protected Route
-	api := r.Group("/api")
-
-	// Apply Standard Gin Middleware
-	api.Use(ginauth.Middleware(manager))
-
-	api.GET("/profile", func(c *gin.Context) {
-		val, exists := c.Get(string(ctxkey.UserInfo))
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+	router.GET("/api/profile", ginauth.Middleware(manager), func(c *gin.Context) {
+		user, ok := userFromContext(c.Request.Context())
+		if !ok {
+			c.Status(http.StatusUnauthorized)
 			return
 		}
-		userInfo := val.(*auth.UserInfo)
-		c.JSON(http.StatusOK, gin.H{"message": "Secure Gin Profile", "user": userInfo})
+		c.JSON(http.StatusOK, gin.H{"user": user, "stack": "gin"})
 	})
 
-	log.Fatal(r.Run(":3001"))
+	server := &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second}
+	runHTTPServer("Gin", server)
 }
 
-// =====================================================================
-// 3. Standard JWT with Echo Framework
-// =====================================================================
-func RunStandardJWT_Echo() {
-	fmt.Println("--- Starting Standard JWT (Echo) ---")
-
-	jwtSecret := "super-secret-jwt-key-which-is-at-least-32-bytes"
-	manager, err := auth.NewManager(jwtSecret)
-	if err != nil {
-		log.Fatalf("Failed to initialize auth manager: %v", err)
-	}
-
+func runEcho(manager *auth.Manager) {
 	e := echo.New()
-
-	// Login Endpoint
+	e.HideBanner = true
 	e.POST("/login", func(c echo.Context) error {
-		user := auth.UserInfo{ID: "user_999", Role: "editor"}
-		token, err := manager.GenerateToken(user, 24*time.Hour)
+		token, err := issueToken(manager)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to generate token"})
+			return c.NoContent(http.StatusInternalServerError)
 		}
-
-		fmt.Println("Generated Standard Token:", token)
-		return c.JSON(http.StatusOK, map[string]string{"access_token": token})
+		return c.JSON(http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
 	})
+	e.GET("/api/profile", func(c echo.Context) error {
+		user, ok := userFromContext(c.Request().Context())
+		if !ok {
+			return c.NoContent(http.StatusUnauthorized)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"user": user, "stack": "echo"})
+	}, echoauth.Middleware(manager))
 
-	// Protected Route
-	api := e.Group("/api")
-
-	// Apply Standard Echo Middleware
-	api.Use(echoauth.Middleware(manager))
-
-	api.GET("/profile", func(c echo.Context) error {
-		userInfo := c.Get(string(ctxkey.UserInfo)).(*auth.UserInfo)
-		return c.JSON(http.StatusOK, map[string]interface{}{"message": "Secure Echo Profile", "user": userInfo})
-	})
-
-	log.Fatal(e.Start(":3002"))
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
+	go func() {
+		fmt.Printf("Echo auth example listening on http://localhost%s\n", address)
+		if err := e.Start(address); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}()
+	shutdown.Wait()
 }
 
-// =====================================================================
-// 4. Generic JWT with Redis Refresh & Revocation (Fiber)
-// =====================================================================
-
-type CustomClaims struct {
-	TenantID string `json:"tenant_id"`
-	jwt.RegisteredClaims
+func runHTTPServer(name string, server *http.Server) {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
+	go func() {
+		fmt.Printf("%s auth example listening on http://localhost%s\n", name, address)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}()
+	shutdown.Wait()
 }
 
-func RunGenericJWT_Fiber() {
-	fmt.Println("--- Starting Generic JWT (Fiber) ---")
-
-	// 1. Initialize Redis Client
-	redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-
-	// 2. Initialize Generic Manager
-	manager, err := auth.NewGenericManager[*CustomClaims](auth.GenericOptions{
-		SecretKey: "super-secret-jwt-key-which-is-at-least-32-bytes",
-		Redis:     redisClient,
-	})
-	if err != nil {
-		log.Fatalf("Failed to initialize generic manager: %v", err)
-	}
-
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-
-	// Login Endpoint
-	app.Post("/login", func(c *fiber.Ctx) error {
-		jti := fmt.Sprintf("jti_%d", time.Now().UnixNano())
-		claims := &CustomClaims{
-			TenantID: "tenant-999",
-			RegisteredClaims: jwt.RegisteredClaims{
-				ID:        jti,
-				ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
-			},
-		}
-
-		token, err := manager.GenerateToken(claims)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "Failed to generate token"})
-		}
-
-		ctx := context.Background()
-		rt, _ := manager.GenerateRefreshToken(ctx, "user-1", 7*24*time.Hour)
-
-		fmt.Println("Generated Generic Token:", token)
-		return c.JSON(fiber.Map{
-			"access_token":  token,
-			"refresh_token": rt,
-			"jti":           jti, // Sent for testing revocation
-		})
-	})
-
-	// Logout / Revoke Endpoint
-	app.Post("/logout", func(c *fiber.Ctx) error {
-		jti := c.Query("jti")
-		if jti == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "Missing jti"})
-		}
-
-		ctx := context.Background()
-		err := manager.RevokeToken(ctx, jti, 15*time.Minute)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "Failed to revoke token"})
-		}
-		return c.JSON(fiber.Map{"message": "Token revoked via Redis Blacklist!"})
-	})
-
-	// Check Revocation Status Endpoint
-	app.Get("/check", func(c *fiber.Ctx) error {
-		jti := c.Query("jti")
-		ctx := context.Background()
-		revoked, _ := manager.IsRevoked(ctx, jti)
-
-		return c.JSON(fiber.Map{"jti": jti, "revoked": revoked})
-	})
-
-	// Verify Token Endpoint
-	app.Post("/verify", func(c *fiber.Ctx) error {
-		tokenStr := c.Query("token")
-		if tokenStr == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "Missing token query parameter"})
-		}
-
-		var claims CustomClaims
-		if err := manager.VerifyToken(tokenStr, &claims); err != nil {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid or expired token", "details": err.Error()})
-		}
-
-		// Always check if the token was blacklisted
-		ctx := context.Background()
-		revoked, _ := manager.IsRevoked(ctx, claims.ID)
-		if revoked {
-			return c.Status(401).JSON(fiber.Map{"error": "Token has been revoked"})
-		}
-
-		return c.JSON(fiber.Map{
-			"message": "Token is valid!",
-			"claims":  claims,
-		})
-	})
-
-	// Verify Refresh Token Endpoint
-	app.Post("/verify-refresh", func(c *fiber.Ctx) error {
-		rt := c.Query("refresh_token")
-		userID := c.Query("user_id")
-
-		if rt == "" || userID == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "Missing refresh_token or user_id query parameter"})
-		}
-
-		ctx := context.Background()
-		isValid, err := manager.VerifyRefreshToken(ctx, userID, rt)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "Failed to verify refresh token", "details": err.Error()})
-		}
-
-		if !isValid {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid refresh token"})
-		}
-
-		return c.JSON(fiber.Map{"message": "Refresh token is valid!"})
-	})
-
-	log.Fatal(app.Listen(":3003"))
-}
-
-// =====================================================================
-// 5. Generic Encrypted JWT (AES-256 GCM) with Redis
-// =====================================================================
-
-type TenantClaims struct {
-	TenantID string `json:"tenant_id"`
-	Role     string `json:"role"`
-	Quota    int    `json:"quota"`
-}
-
-func RunGenericEncryptedJWT_Example() {
-	fmt.Println("--- Starting Generic Encrypted JWT (AES-256 GCM) ---")
-
-	// 1. Initialize Redis Client
-	redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-
-	// 2. AES Key MUST be exactly 32 bytes for AES-256 GCM
-	aesKey := "01234567890123456789012345678901"
-
-	mgr, err := auth.NewGenericEncryptedManager[TenantClaims](auth.GenericEncryptedOptions{
-		SecretKey: "super-secret-jwt-key-must-be-long",
-		AESKey:    aesKey,
-		Redis:     redisClient,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create manager: %v", err)
-	}
-
-	payload := TenantClaims{
-		TenantID: "tenant-777",
-		Role:     "admin",
-		Quota:    5000,
-	}
-	
-	aad := []byte("device-id-12345") // Bind token to a specific device/context
-
-	token, err := mgr.GenerateToken(payload, 1*time.Hour, aad)
-	if err != nil {
-		log.Fatalf("GenerateToken failed: %v", err)
-	}
-	fmt.Printf("Generated Encrypted Token: %s\n\n", token)
-
-	// Validate token
-	var decodedPayload TenantClaims
-	if err := mgr.VerifyToken(token, &decodedPayload, aad); err != nil {
-		log.Fatalf("VerifyToken failed: %v", err)
-	}
-
-	fmt.Printf("Decrypted Payload Successfully:\n%+v\n", decodedPayload)
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }

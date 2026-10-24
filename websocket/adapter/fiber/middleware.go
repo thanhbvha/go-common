@@ -9,9 +9,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/helmet"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/gofiber/websocket/v2"
+	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
 )
 
 // MiddlewareManager handles standard HTTP middlewares for securing and throttling WebSocket endpoints.
@@ -37,7 +36,7 @@ func NewMiddlewareManager(app *fiber.App, rateLimitMax int, rateLimitDuration ti
 	}
 }
 
-// SetupMiddlewares registers recovery, CORS, helmet, request ID, logger, and rate limiters on the Fiber application.
+// SetupMiddlewares registers recovery, CORS, helmet, logger, and rate limiters on the Fiber application.
 func (m *MiddlewareManager) SetupMiddlewares() {
 	// Standard upgrade verification on WebSocket entry path
 	m.app.Use("/ws", func(c *fiber.Ctx) error {
@@ -57,8 +56,7 @@ func (m *MiddlewareManager) SetupMiddlewares() {
 		MaxAge:           86400,
 	}))
 
-	m.app.Use(recover.New())
-	m.app.Use(requestid.New())
+	m.app.Use(fibermw.Recover())
 	m.app.Use(logger.New())
 
 	m.app.Use(limiter.New(limiter.Config{

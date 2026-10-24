@@ -35,7 +35,6 @@ func (t TelemetryInterceptor) InterceptResponse(ctx context.Context, next graphq
 
 	telemetry.SetAttributes(span,
 		attribute.String("graphql.operation", rc.OperationName),
-		attribute.String("graphql.query", rc.RawQuery),
 	)
 
 	// Process next request

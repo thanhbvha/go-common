@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
 func main() {
@@ -81,7 +82,7 @@ func RunContextAwareLoggerExample() {
 	// the logger can automatically extract and append it to the log fields.
 
 	// Simulate a context with a request ID
-	ctx := context.WithValue(context.Background(), logger.ContextKeyRequestID, "REQ-9999")
+	ctx := ctxkey.SetRequestID(context.Background(), "REQ-9999")
 
 	// Use the *WithContext variants
 	logger.InfoWithContext(ctx, "Processing payment request", "amount", 500)

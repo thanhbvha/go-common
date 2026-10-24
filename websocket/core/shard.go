@@ -3,12 +3,14 @@ package core
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
@@ -215,13 +217,16 @@ func (s *Shard) Run() {
 	go s.cleanupRoutine()
 
 	for {
+		operation := "select"
 		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.ErrorAsync("Panic in Shard.Run, restarting", "error", r, "shard", s.name)
-				}
-			}()
-			s.runLoop()
+			defer panicrecovery.Catch(func(report panicrecovery.Report) {
+				wsrecovery.Handler(wsrecovery.Metadata{
+					Component: "core.shard_run_loop",
+					Operation: operation,
+					ShardID:   s.name,
+				})(report)
+			})
+			s.runLoop(&operation)
 		}()
 
 		select {
@@ -234,25 +239,34 @@ func (s *Shard) Run() {
 }
 
 // runLoop is the inner select loop, extracted so Run() can recover and restart it after a panic.
-func (s *Shard) runLoop() {
+func (s *Shard) runLoop(operation *string) {
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case conn := <-s.register:
+			*operation = "register"
 			s.handleRegister(conn)
 		case conn := <-s.unregister:
+			*operation = "unregister"
 			s.handleUnregister(conn)
 		case message := <-s.broadcast:
+			*operation = "broadcast"
 			s.handleBroadcast(message)
 		case ev := <-s.incomingMessage:
+			*operation = "incoming_event"
 			s.handleIncomingMessageEvent(ev)
 		}
+		*operation = "select"
 	}
 }
 
 // handleRegister registers a validated connection in the shard structure maps.
 func (s *Shard) handleRegister(conn *Connection) {
+	if conn == nil {
+		logger.ErrorAsync("Cannot register nil connection", "shard", s.name)
+		return
+	}
 	if !s.CanAcceptConnection() {
 		logger.ErrorAsync("Shard at max capacity, rejecting connection", "shard", s.name, "count", s.GetConnectionCount())
 		conn.Close("Shard at max capacity")
@@ -260,6 +274,7 @@ func (s *Shard) handleRegister(conn *Connection) {
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.activeConns[conn] = true
 
 	if _, exists := s.userSessions[conn.userID]; !exists {
@@ -268,7 +283,6 @@ func (s *Shard) handleRegister(conn *Connection) {
 	s.userSessions[conn.userID][conn] = true
 
 	atomic.AddInt64(&s.connectionCount, 1)
-	s.mu.Unlock()
 
 	logger.InfoAsync("Connection registered to Shard", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
 }
@@ -354,7 +368,14 @@ func (s *Shard) cleanupRoutine() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.cleanup()
+			func() {
+				defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+					Component: "core.shard_cleanup",
+					Operation: "cleanup",
+					ShardID:   s.name,
+				}))
+				s.cleanup()
+			}()
 		}
 	}
 }
@@ -396,7 +417,9 @@ func (s *Shard) shutdown() {
 	logger.InfoAsync("Shutting down Shard", "shard", s.name, "connections", len(s.activeConns))
 
 	for conn := range s.activeConns {
-		conn.Close("Shard shutdown")
+		if conn != nil {
+			conn.Close("Shard shutdown")
+		}
 	}
 
 	s.activeConns = make(map[*Connection]bool)

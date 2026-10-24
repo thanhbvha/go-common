@@ -1,6 +1,6 @@
 // Package main implements a premium interactive command-line client to test and verify
 // the high-performance clustered WebSocket service. It works seamlessly with any of the
-// three adapters (Fiber, Echo, Gin) running on the local workspace.
+// supported adapters (net/http, Fiber, Echo, Gin) running on the local workspace.
 package main
 
 import (
@@ -46,6 +46,7 @@ func main() {
 	hostFlag := flag.String("host", "localhost", "WebSocket server hostname")
 	portFlag := flag.Int("port", 8080, "WebSocket server port")
 	userFlag := flag.String("user", "", "User ID for authentication (defaults to randomized ID)")
+	tokenFlag := flag.String("token", os.Getenv("WS_DEMO_TOKEN"), "Bearer token (defaults to WS_DEMO_TOKEN)")
 	interactiveFlag := flag.Bool("interactive", true, "Enable interactive mode to type messages in real time")
 	probeFlag := flag.Bool("probe", true, "Perform HTTP health & stats pre-flight checks")
 	flag.Parse()
@@ -56,11 +57,15 @@ func main() {
 	if userID == "" {
 		userID = fmt.Sprintf("client_%d", rand.Intn(9000)+1000)
 	}
+	if *tokenFlag == "" {
+		fmt.Println("[CONFIG ERROR] Set WS_DEMO_TOKEN or pass -token")
+		os.Exit(2)
+	}
 
 	fmt.Printf("=== CLUSTERED WEBSOCKET INTEGRATION TEST CLIENT ===\n")
 	fmt.Printf("Target Host: %s\n", *hostFlag)
 	fmt.Printf("Target Port: %d\n", *portFlag)
-	fmt.Printf("User ID:    %s (Authenticated via Query Parameter)\n", userID)
+	fmt.Printf("User ID:    %s\n", userID)
 	fmt.Println(strings.Repeat("-", 60))
 
 	// 1. Pre-flight checks (HTTP endpoints)
@@ -80,7 +85,9 @@ func main() {
 	}
 
 	fmt.Printf("\n[CONNECTING] Handshaking with %s...\n", u.String())
-	c, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	requestHeader := make(http.Header)
+	requestHeader.Set("Authorization", "Bearer "+*tokenFlag)
+	c, resp, err := websocket.DefaultDialer.Dial(u.String(), requestHeader)
 	if err != nil {
 		fmt.Printf("[CONNECTION ERROR] Upgrade failed: %v\n", err)
 		if resp != nil {

@@ -4,13 +4,15 @@ package redispubsub
 import (
 	"context"
 	"fmt"
-	"github.com/goccy/go-json"
 	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
@@ -43,13 +45,7 @@ func GetGlobalManager() *Manager {
 func NewManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var client *redis.Client
-	func() {
-		defer func() {
-			_ = recover() // Catch panic if redis.Default is not set
-		}()
-		client = redis.Default()
-	}()
+	client, _ := redis.LookupDefault()
 
 	if client == nil {
 		logger.WarnAsync("Redis default client not set. WebSocket PubSub will run in standalone loopback mode.")
@@ -148,11 +144,13 @@ func (psm *Manager) Unsubscribe(channels ...string) error {
 
 // handleChannelMessages listens to the channel payload and dispatches events.
 func (psm *Manager) handleChannelMessages(channel string, pubsub *goredis.PubSub) {
-	defer func() {
-		if r := recover(); r != nil {
-			logger.ErrorAsync("Panic in channel message handler", "error", r, "channel", channel, "node_id", psm.nodeID)
-		}
-	}()
+	defer psm.cleanupSubscription(channel, pubsub)
+	defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+		Component: "pubsub.redis_listener",
+		Operation: "listen",
+		Channel:   channel,
+		NodeID:    psm.nodeID,
+	}))
 
 	ch := pubsub.Channel()
 
@@ -171,11 +169,20 @@ func (psm *Manager) handleChannelMessages(channel string, pubsub *goredis.PubSub
 	}
 }
 
+func (psm *Manager) cleanupSubscription(channel string, subscription *goredis.PubSub) {
+	psm.mu.Lock()
+	if current, ok := psm.subscribers[channel]; ok && current == subscription {
+		delete(psm.subscribers, channel)
+	}
+	psm.mu.Unlock()
+	_ = subscription.Close()
+}
+
 // processMessage decodes and directs a single payload to its corresponding handler.
 func (psm *Manager) processMessage(channel, payload string) {
 	var message pubsub.CrossNodeMessage
 	if err := json.Unmarshal([]byte(payload), &message); err != nil {
-		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "payload", payload)
+		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "channel", channel, "payloadBytes", len(payload))
 		return
 	}
 
@@ -194,11 +201,7 @@ func (psm *Manager) processMessage(channel, payload string) {
 	}
 
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorAsync("Panic in message handler", "error", r, "type", message.Type, "node_id", psm.nodeID)
-			}
-		}()
+		defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.redis_message_handler", channel, &message)))
 
 		handler(&message)
 	}()
@@ -216,11 +219,7 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 		psm.mu.RUnlock()
 		if exists {
 			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.ErrorAsync("Panic in loopback handler", "error", r)
-					}
-				}()
+				defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.redis_loopback_handler", channel, message)))
 				handler(message)
 			}()
 		}
@@ -233,6 +232,22 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 	}
 
 	return psm.redisClient.Publish(psm.ctx, channel, data)
+}
+
+func (psm *Manager) recoveryMetadata(component, channel string, message *pubsub.CrossNodeMessage) wsrecovery.Metadata {
+	metadata := wsrecovery.Metadata{
+		Component: component,
+		Operation: "dispatch",
+		Channel:   channel,
+		NodeID:    psm.nodeID,
+	}
+	if message != nil {
+		metadata.MessageType = message.Type
+		metadata.UserID = message.UserID
+		metadata.ShardID = message.ShardID
+		metadata.RoomID = message.RoomID
+	}
+	return metadata
 }
 
 // BroadcastMessage sends a broadcast event to all subscribers of a specific shard ID.

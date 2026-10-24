@@ -2,6 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
@@ -12,20 +17,26 @@ import (
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
 	common_graphql "github.com/thanhbvha/go-common/graphql"
-	echo_adapter "github.com/thanhbvha/go-common/graphql/adapter/echo"
-	fiber_adapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
-	gin_adapter "github.com/thanhbvha/go-common/graphql/adapter/gin"
+	echoadapter "github.com/thanhbvha/go-common/graphql/adapter/echo"
+	fiberadapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
+	ginadapter "github.com/thanhbvha/go-common/graphql/adapter/gin"
 	common_logger "github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/logger/middleware/echo"
-	"github.com/thanhbvha/go-common/logger/middleware/fiber"
-	"github.com/thanhbvha/go-common/logger/middleware/gin"
+	echolog "github.com/thanhbvha/go-common/logger/middleware/echo"
+	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
+	ginlog "github.com/thanhbvha/go-common/logger/middleware/gin"
+	nethttplog "github.com/thanhbvha/go-common/logger/middleware/nethttp"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/utils/graceful"
+	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
 	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
-	"net/http"
+	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
+	nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
 )
 
 func main() {
+	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	flag.Parse()
+
 	// Initialize standard logger from go-common
 	l := common_logger.New(common_logger.Options{
 		StdOut: true,
@@ -34,56 +45,101 @@ func main() {
 	defer common_logger.Close()
 
 	common_logger.Info("=== GraphQL Web Module Examples ===")
-	common_logger.Info("Uncomment one of the functions below to run a specific example.")
-
-	RunFiberExample()
-	// RunGinExample()
-	// RunEchoExample()
+	switch *stack {
+	case "nethttp":
+		RunNetHTTPExample()
+	case "fiber":
+		RunFiberExample()
+	case "gin":
+		RunGinExample()
+	case "echo":
+		RunEchoExample()
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
+		os.Exit(2)
+	}
 }
 
 // ---------------------------------------------------------
-// Helper: Setup core GraphQL Server and DataLoader
+// Helper: Setup core GraphQL Server
 // ---------------------------------------------------------
-func setupCoreGraphQL() (*handler.Server, *common_graphql.DataLoader[int, *model.User]) {
+func setupCoreGraphQL() *handler.Server {
 	// 1. Initialize ExecutableSchema from gqlgen
 	es := graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{}})
 
-	// 2. Initialize DataLoaders (using batch fetcher function from service)
-	userLoader := common_graphql.NewDataLoader(service.FetchUsersBatch, common_graphql.ConfigDL{
-		MaxBatch: 100,
-	})
-
-	// 3. Initialize core GraphQL Server (standard net/http)
+	// 2. Initialize core GraphQL Server (standard net/http)
 	coreSrv := common_graphql.NewServer(es, common_graphql.Config{
 		EnableTelemetry: true,
 	})
 
-	return coreSrv, userLoader
+	return coreSrv
+}
+
+func newUserLoader() *common_graphql.DataLoader[int, *model.User] {
+	return common_graphql.NewDataLoader(service.FetchUsersBatch, common_graphql.ConfigDL{MaxBatch: 100})
 }
 
 // =====================================================================
-// 1. FIBER FRAMEWORK
+// 1. STANDARD LIBRARY NET/HTTP
+// =====================================================================
+func RunNetHTTPExample() {
+	srv := &http.Server{
+		Addr:              ":3000",
+		Handler:           newNetHTTPHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		common_logger.Info("[net/http] GraphQL Server is running at http://localhost:3000")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			common_logger.Error("Server error", "err", err)
+		}
+	}()
+
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error {
+		common_logger.Info("Shutting down net/http server...")
+		return srv.Shutdown(ctx)
+	})
+	shutdown.Wait()
+}
+
+func newNetHTTPHandler() http.Handler {
+	coreSrv := setupCoreGraphQL()
+	withDataLoader := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := ctxkey.SetDataLoader(r.Context(), newUserLoader())
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/query", withDataLoader(coreSrv))
+	mux.Handle("/", common_graphql.PlaygroundHandler("GraphQL API", "/query"))
+	return nethttplog.RequestIDMiddleware(nethttplog.Middleware(nethttpmw.Recover(nethttpmw.Telemetry("GraphQL HTTP")(mux))))
+}
+
+// =====================================================================
+// 2. FIBER FRAMEWORK
 // =====================================================================
 func RunFiberExample() {
-	coreSrv, userLoader := setupCoreGraphQL()
+	coreSrv := setupCoreGraphQL()
 
 	app := fiber.New(fiber.Config{
 		ErrorHandler: fibermw.ErrorHandler,
 	})
-	app.Use(fiberlog.RequestIDMiddleware())
-	app.Use(fiberlog.Middleware())
+	app.Use(fiberlog.RequestIDMiddleware(), fiberlog.Middleware(), fibermw.Recover(), fibermw.Telemetry("GraphQL HTTP"))
 
 	// 4. Wrap the Server with Fiber Adapter
-	gqlHandler := fiber_adapter.NewHandler(coreSrv, fiber_adapter.Config{
+	gqlHandler := fiberadapter.NewHandler(coreSrv, fiberadapter.Config{
 		ContextSetup: func(ctx context.Context, c *fiber.Ctx) context.Context {
 			// Inject userLoader into the context of each Request using typed key
-			return ctxkey.SetDataLoader(ctx, userLoader)
+			return ctxkey.SetDataLoader(ctx, newUserLoader())
 		},
 	})
 
 	// 5. Initialize Playground (also wrapped via Fiber Adapter)
 	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := fiber_adapter.PlaygroundHandler(corePlayground)
+	playgroundHandler := fiberadapter.PlaygroundHandler(corePlayground)
 
 	// 6. Register Routes
 	app.All("/query", gqlHandler)
@@ -98,36 +154,36 @@ func RunFiberExample() {
 	}()
 
 	// 8. Graceful shutdown
-	graceful.Register(func(ctx context.Context) error {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error {
 		common_logger.Info("Shutting down Fiber server...")
 		return app.ShutdownWithContext(ctx)
 	})
 	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	graceful.Wait(10 * time.Second)
+	shutdown.Wait()
 }
 
 // =====================================================================
-// 2. GIN FRAMEWORK
+// 3. GIN FRAMEWORK
 // =====================================================================
 func RunGinExample() {
-	coreSrv, userLoader := setupCoreGraphQL()
+	coreSrv := setupCoreGraphQL()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(ginlog.RequestIDMiddleware())
-	r.Use(ginlog.Middleware())
+	r.Use(ginlog.RequestIDMiddleware(), ginlog.Middleware(), ginmw.Recover(), ginmw.Telemetry("GraphQL HTTP"))
 
 	// 4. Wrap the Server with Gin Adapter
-	gqlHandler := gin_adapter.NewHandler(coreSrv, gin_adapter.Config{
+	gqlHandler := ginadapter.NewHandler(coreSrv, ginadapter.Config{
 		ContextSetup: func(ctx context.Context, c *gin.Context) context.Context {
-			return ctxkey.SetDataLoader(ctx, userLoader)
+			return ctxkey.SetDataLoader(ctx, newUserLoader())
 		},
 	})
 
 	// 5. Initialize Playground
 	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := gin_adapter.PlaygroundHandler(corePlayground)
+	playgroundHandler := ginadapter.PlaygroundHandler(corePlayground)
 
 	// 6. Register Routes
 	r.Any("/query", gqlHandler)
@@ -146,36 +202,36 @@ func RunGinExample() {
 	}()
 
 	// 8. Graceful shutdown
-	graceful.Register(func(ctx context.Context) error {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error {
 		common_logger.Info("Shutting down Gin server...")
 		return srv.Shutdown(ctx)
 	})
 	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	graceful.Wait(10 * time.Second)
+	shutdown.Wait()
 }
 
 // =====================================================================
-// 3. ECHO FRAMEWORK
+// 4. ECHO FRAMEWORK
 // =====================================================================
 func RunEchoExample() {
-	coreSrv, userLoader := setupCoreGraphQL()
+	coreSrv := setupCoreGraphQL()
 
 	e := echo.New()
 	e.HideBanner = true
-	e.Use(echolog.RequestIDMiddleware())
-	e.Use(echolog.Middleware())
+	e.Use(echolog.RequestIDMiddleware(), echolog.Middleware(), echomw.Recover(), echomw.Telemetry("GraphQL HTTP"))
 
 	// 4. Wrap the Server with Echo Adapter
-	gqlHandler := echo_adapter.NewHandler(coreSrv, echo_adapter.Config{
+	gqlHandler := echoadapter.NewHandler(coreSrv, echoadapter.Config{
 		ContextSetup: func(ctx context.Context, c echo.Context) context.Context {
-			return ctxkey.SetDataLoader(ctx, userLoader)
+			return ctxkey.SetDataLoader(ctx, newUserLoader())
 		},
 	})
 
 	// 5. Initialize Playground
 	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := echo_adapter.PlaygroundHandler(corePlayground)
+	playgroundHandler := echoadapter.PlaygroundHandler(corePlayground)
 
 	// 6. Register Routes
 	e.Any("/query", gqlHandler)
@@ -184,17 +240,18 @@ func RunEchoExample() {
 	// 7. Start the server
 	go func() {
 		common_logger.Info("[Echo] GraphQL Server is running at http://localhost:3000")
-		if err := e.Start(":3000"); err != nil {
+		if err := e.Start(":3000"); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			common_logger.Error("Server error", "err", err)
 		}
 	}()
 
 	// 8. Graceful shutdown
-	graceful.Register(func(ctx context.Context) error {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error {
 		common_logger.Info("Shutting down Echo server...")
 		return e.Shutdown(ctx)
 	})
 	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	graceful.Wait(10 * time.Second)
+	shutdown.Wait()
 }

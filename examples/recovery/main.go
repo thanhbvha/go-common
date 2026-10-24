@@ -9,6 +9,7 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/utils/graceful"
 	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
 )
@@ -39,7 +40,7 @@ func main() {
 		requestID, _ := c.Locals("request_id").(string)
 		ctx := context.Background()
 		if requestID != "" {
-			ctx = context.WithValue(ctx, logger.ContextKeyRequestID, requestID)
+			ctx = ctxkey.SetRequestID(ctx, requestID)
 		}
 		go runBackgroundJob(ctx)
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{

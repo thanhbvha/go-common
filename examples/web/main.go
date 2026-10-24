@@ -2,28 +2,37 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-
 	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/logger/middleware/fiber"
+	echolog "github.com/thanhbvha/go-common/logger/middleware/echo"
+	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
+	ginlog "github.com/thanhbvha/go-common/logger/middleware/gin"
+	nethttplog "github.com/thanhbvha/go-common/logger/middleware/nethttp"
 	"github.com/thanhbvha/go-common/telemetry"
 	"github.com/thanhbvha/go-common/utils/graceful"
 	"github.com/thanhbvha/go-common/utils/str"
 	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
 	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
 	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
+	nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
 	echoresp "github.com/thanhbvha/go-common/web/response/echo"
 	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
 	ginresp "github.com/thanhbvha/go-common/web/response/gin"
+	nethttpresp "github.com/thanhbvha/go-common/web/response/nethttp"
 	"github.com/thanhbvha/go-common/web/validator"
 )
+
+const address = ":3000"
 
 type CreateUserRequest struct {
 	Name  string `json:"name" validate:"required,min=3"`
@@ -31,189 +40,119 @@ type CreateUserRequest struct {
 }
 
 func main() {
-	fmt.Println("=== Web API Module Examples ===")
+	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	flag.Parse()
 
-	// Initialize standard logger from go-common
 	l := logger.New(logger.Options{StdOut: true})
 	logger.SetDefault(l)
 	defer logger.Close()
 
-	// Initialize Telemetry
-	tel, _ := telemetry.Init(context.Background(), telemetry.Config{
-		ServiceName:   "demo-web-api",
-		EnableTracing: false,
-		Endpoint:      "localhost:4317",
-	})
-	graceful.Register(func(ctx context.Context) error {
-		log.Println("Shutting down telemetry...")
-		return tel.Shutdown(ctx)
-	})
+	tel, err := telemetry.Init(context.Background(), telemetry.Config{ServiceName: "demo-web-api", EnableTracing: false})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry initialization failed: %v\n", err)
+		os.Exit(1)
+	}
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return tel.Shutdown(ctx) })
 
-	// Uncomment the example you want to run:
-	RunFiberAPIExample()
-	// RunGinAPIExample()
-	// RunEchoAPIExample()
-
-	// Block and wait for OS signals (CTRL+C)
-	// CRITICAL: Always use graceful.Wait() in web APIs. It blocks the main thread
-	// until a SIGINT/SIGTERM is received, then gives active requests time to finish.
-	graceful.Wait(10 * time.Second)
+	switch *stack {
+	case "nethttp":
+		runNetHTTP(shutdown)
+	case "fiber":
+		runFiber(shutdown)
+	case "gin":
+		runGin(shutdown)
+	case "echo":
+		runEcho(shutdown)
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
+		os.Exit(2)
+	}
+	shutdown.Wait()
 }
 
-// =====================================================================
-// 1. Fiber REST API Example
-// =====================================================================
-func RunFiberAPIExample() {
-	fmt.Println("\n--- 1. Fiber REST API ---")
-	app := fiber.New(fiber.Config{
-		ErrorHandler: fibermw.ErrorHandler,
-	})
+func createdUser(req CreateUserRequest, stack string) map[string]any {
+	return map[string]any{"slug": str.Slugify(req.Name), "reference_id": str.Random(12), "email": req.Email, "stack": stack}
+}
 
-	// Setup Middlewares
-	app.Use(fibermw.Recover())
-	app.Use(fiberlog.RequestIDMiddleware())
-	app.Use(fiberlog.Middleware())
-	app.Use(fibermw.Telemetry("HTTP Request"))
+func runNetHTTP(shutdown *graceful.Shutdown) {
+	mux := http.NewServeMux()
+	mux.Handle("POST /users", nethttpmw.ErrorHandler(func(w http.ResponseWriter, r *http.Request) error {
+		var req CreateUserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nethttpresp.Error(w, r, http.StatusBadRequest, "Invalid input data")
+		}
+		if validationErrors := validator.Struct(&req); validationErrors != nil {
+			return nethttpresp.ValidationError(w, r, validationErrors)
+		}
+		return nethttpresp.Created(w, r, createdUser(req, "net/http"))
+	}))
+	handler := nethttplog.RequestIDMiddleware(nethttplog.Middleware(nethttpmw.Recover(nethttpmw.Telemetry("HTTP Request")(mux))))
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
+	go listenHTTP("net/http", server)
+}
 
-	// Define Routes
+func runFiber(shutdown *graceful.Shutdown) {
+	app := fiber.New(fiber.Config{ErrorHandler: fibermw.ErrorHandler, DisableStartupMessage: true})
+	app.Use(fiberlog.RequestIDMiddleware(), fiberlog.Middleware(), fibermw.Recover(), fibermw.Telemetry("HTTP Request"))
 	app.Post("/users", func(c *fiber.Ctx) error {
 		var req CreateUserRequest
 		if err := c.BodyParser(&req); err != nil {
 			return fiberresp.Error(c, fiber.StatusBadRequest, "Invalid input data")
 		}
-
-		if errs := validator.Struct(&req); errs != nil {
-			return fiberresp.ValidationError(c, errs)
+		if validationErrors := validator.Struct(&req); validationErrors != nil {
+			return fiberresp.ValidationError(c, validationErrors)
 		}
-
-		slugName := str.Slugify(req.Name)
-		tempPassword := str.Random(8)
-
-		return fiberresp.Created(c, fiber.Map{
-			"slug":      slugName,
-			"password":  tempPassword,
-			"email":     req.Email,
-			"framework": "Fiber",
-		})
+		return fiberresp.Created(c, createdUser(req, "fiber"))
 	})
-
-	// Start Server in a goroutine
-	go func() {
-		port := ":3000"
-		logger.Info("Fiber Server is starting", "port", port)
-		if err := app.Listen(port); err != nil {
-			logger.Error("Fiber Server error", "err", err)
-		}
-	}()
-
-	// Register Fiber shutdown
-	graceful.Register(func(ctx context.Context) error {
-		logger.Info("Shutting down Fiber server...")
-		return app.ShutdownWithContext(ctx)
-	})
+	shutdown.Register(func(context.Context) error { return app.Shutdown() })
+	go func() { _ = app.Listen(address) }()
 }
 
-// =====================================================================
-// 2. Gin REST API Example
-// =====================================================================
-func RunGinAPIExample() {
-	fmt.Println("\n--- 2. Gin REST API ---")
+func runGin(shutdown *graceful.Shutdown) {
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-
-	// Setup Middlewares
-	r.Use(ginmw.Recover())
-	r.Use(ginmw.ErrorHandler())
-	r.Use(ginmw.Telemetry("HTTP Request"))
-
-	// Define Routes
-	r.POST("/users", func(c *gin.Context) {
+	router := gin.New()
+	router.Use(ginlog.RequestIDMiddleware(), ginlog.Middleware(), ginmw.Recover(), ginmw.ErrorHandler(), ginmw.Telemetry("HTTP Request"))
+	router.POST("/users", func(c *gin.Context) {
 		var req CreateUserRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			ginresp.Error(c, http.StatusBadRequest, "Invalid input data")
 			return
 		}
-
-		if errs := validator.Struct(&req); errs != nil {
-			ginresp.ValidationError(c, errs)
+		if validationErrors := validator.Struct(&req); validationErrors != nil {
+			ginresp.ValidationError(c, validationErrors)
 			return
 		}
-
-		slugName := str.Slugify(req.Name)
-		tempPassword := str.Random(8)
-
-		ginresp.Created(c, gin.H{
-			"slug":      slugName,
-			"password":  tempPassword,
-			"email":     req.Email,
-			"framework": "Gin",
-		})
+		ginresp.Created(c, createdUser(req, "gin"))
 	})
-
-	srv := &http.Server{Addr: ":3000", Handler: r}
-
-	// Start Server in a goroutine
-	go func() {
-		logger.Info("Gin Server is starting", "port", ":3000")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Gin Server error", "err", err)
-		}
-	}()
-
-	// Register Gin shutdown
-	graceful.Register(func(ctx context.Context) error {
-		logger.Info("Shutting down Gin server...")
-		return srv.Shutdown(ctx)
-	})
+	server := &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second}
+	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
+	go listenHTTP("Gin", server)
 }
 
-// =====================================================================
-// 3. Echo REST API Example
-// =====================================================================
-func RunEchoAPIExample() {
-	fmt.Println("\n--- 3. Echo REST API ---")
+func runEcho(shutdown *graceful.Shutdown) {
 	e := echo.New()
 	e.HideBanner = true
 	e.HTTPErrorHandler = echomw.ErrorHandler
-
-	// Setup Middlewares
-	e.Use(echomw.Recover())
-	e.Use(echomw.Telemetry("HTTP Request"))
-
-	// Define Routes
+	e.Use(echolog.RequestIDMiddleware(), echolog.Middleware(), echomw.Recover(), echomw.Telemetry("HTTP Request"))
 	e.POST("/users", func(c echo.Context) error {
 		var req CreateUserRequest
 		if err := c.Bind(&req); err != nil {
 			return echoresp.Error(c, http.StatusBadRequest, "Invalid input data")
 		}
-
-		if errs := validator.Struct(&req); errs != nil {
-			return echoresp.ValidationError(c, errs)
+		if validationErrors := validator.Struct(&req); validationErrors != nil {
+			return echoresp.ValidationError(c, validationErrors)
 		}
-
-		slugName := str.Slugify(req.Name)
-		tempPassword := str.Random(8)
-
-		return echoresp.Created(c, map[string]interface{}{
-			"slug":      slugName,
-			"password":  tempPassword,
-			"email":     req.Email,
-			"framework": "Echo",
-		})
+		return echoresp.Created(c, createdUser(req, "echo"))
 	})
+	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
+	go func() { _ = e.Start(address) }()
+}
 
-	// Start Server in a goroutine
-	go func() {
-		port := ":3000"
-		logger.Info("Echo Server is starting", "port", port)
-		if err := e.Start(port); err != nil && err != http.ErrServerClosed {
-			logger.Error("Echo Server error", "err", err)
-		}
-	}()
-
-	// Register Echo shutdown
-	graceful.Register(func(ctx context.Context) error {
-		logger.Info("Shutting down Echo server...")
-		return e.Shutdown(ctx)
-	})
+func listenHTTP(name string, server *http.Server) {
+	fmt.Printf("%s web example listening on http://localhost%s\n", name, address)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("server error", "stack", name, "error", err)
+	}
 }

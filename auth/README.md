@@ -1,207 +1,108 @@
-# Auth Module
+# Auth
 
-The `auth` module provides an enterprise-grade authentication and authorization toolkit for Go microservices. It supports **Standard JWTs** as well as an advanced **Encrypted Payload** mechanism (JWE-like) using AES-256 GCM.
+The `auth` module provides standard HS256 JWT managers, encrypted JWT payloads
+using AES-256 GCM, generic claims, Redis-backed refresh tokens, and token
+revocation. Framework middleware is isolated by import path:
 
-This module is designed to prevent Token Theft by implementing **Dynamic AAD (Additional Authenticated Data) / Token Binding**, allowing you to bind a token cryptographically to a specific Browser Session, Device ID, or Client IP.
+- `auth/middleware/nethttp`
+- `auth/middleware/fiber`
+- `auth/middleware/gin`
+- `auth/middleware/echo`
 
----
+All middleware validates a Bearer token and places `*auth.UserInfo` in standard
+`context.Context` through `ctxkey.SetUserInfo`.
 
-## 🌟 Key Features
+## Standard JWT
 
-1. **Standard JWT (`auth.Manager`)**: Standard HS256 signing via `golang-jwt`.
-2. **Encrypted JWT (`auth.EncryptedManager`)**: Encrypts the entire JWT payload using `AES-256 GCM` before signing it. The payload is completely hidden from attackers and cannot be decoded on sites like `jwt.io`.
-3. **Dynamic AAD / Token Binding**: Protect against XSS and Token Theft by binding the encrypted token to a `Session ID` (stored in an `HttpOnly` Cookie) or a `Device ID` (Custom Header).
-4. **Generic JWT & Session Control**: Use `GenericManager[T]` for custom payload structures, Refresh Token generation, and Redis-backed token revocation (Blacklisting).
-5. **Generic Encrypted JWT**: Use `GenericEncryptedManager[T]` to encrypt custom payload structures via AES-256 GCM while keeping full session control via Redis.
-6. **High Performance**: Uses `github.com/goccy/go-json` for ultra-fast JSON serialization/deserialization.
-7. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
-   - `github.com/thanhbvha/go-common/auth/middleware/fiber` (`fiberauth.Middleware()`)
-   - `github.com/thanhbvha/go-common/auth/middleware/gin` (`ginauth.Middleware()`)
-   - `github.com/thanhbvha/go-common/auth/middleware/echo` (`echoauth.Middleware()`)
-8. **Context Injection**: Automatically extracts the token, verifies/decrypts it, and injects the `UserInfo` struct into the framework's context.
-
----
-
-## 📦 Installation
-
-```bash
-go get github.com/thanhbvha/go-common/auth
-```
-
----
-
-## 🚀 Usage Guide
-
-### 1. Standard JWT (Unencrypted Payload)
-Use this if you just need standard JWTs.
+Load the signing key from a secret source. It must contain at least 32
+characters.
 
 ```go
-manager := auth.NewManager("my-jwt-secret-key")
-
-// Generate
-user := auth.UserInfo{ID: "user_1", Role: "admin"}
-token, err := manager.GenerateToken(user, 24*time.Hour)
-
-// Validate
-claims, err := manager.ValidateToken(token)
-```
-
-### 2. Encrypted JWT (No AAD)
-Use this to hide sensitive data inside the payload. The payload becomes an unreadable Base64 string.
-
-```go
-// AES Key MUST be exactly 32 bytes for AES-256 GCM
-manager, _ := auth.NewEncryptedManager("jwt-secret", "12345678901234567890123456789012")
-
-// Generate (Pass nil for AAD)
-user := auth.UserInfo{ID: "user_1", Role: "admin"}
-token, err := manager.GenerateToken(user, 24*time.Hour, nil)
-
-// Validate (Pass nil for AAD)
-userInfo, err := manager.ValidateToken(token, nil)
-```
-
-### 3. Generic JWT, Refresh Tokens & Revocation (Redis)
-If you need to store custom claims (beyond standard `UserInfo`), manage user sessions (Refresh Tokens), or implement logout capabilities (Token Blacklist), use the `GenericManager[T]`.
-
-```go
-import "github.com/golang-jwt/jwt/v5"
-
-// Define custom claims
-type CustomClaims struct {
-	TenantID string `json:"tenant_id"`
-	jwt.RegisteredClaims
+secret := os.Getenv("AUTH_JWT_SECRET")
+manager, err := auth.NewManager(secret)
+if err != nil {
+    return err
 }
 
-// Initialize GenericManager with Redis
-redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-manager, _ := auth.NewGenericManager[*CustomClaims](auth.GenericOptions{
-	SecretKey: "my-jwt-secret-key-must-be-32-bytes",
-	Redis:     redisClient,
-})
-
-// Generate Token
-claims := &CustomClaims{
-	TenantID: "tenant_1",
-	RegisteredClaims: jwt.RegisteredClaims{
-		ID:        "unique-token-id-jti", // Important for Revocation
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
-	},
-}
-token, _ := manager.GenerateToken(claims)
-
-// Revoke a Token (Logout)
-manager.RevokeToken(context.Background(), "unique-token-id-jti", 15*time.Minute)
-
-// Generate & Verify Refresh Tokens
-rt, _ := manager.GenerateRefreshToken(context.Background(), "user_1", 7*24*time.Hour)
-isValid, _ := manager.VerifyRefreshToken(context.Background(), "user_1", rt)
+token, err := manager.GenerateToken(auth.UserInfo{
+    ID:   "user-1",
+    Role: "admin",
+}, time.Hour)
 ```
 
-### 4. Generic Encrypted JWT (Custom Claims + AES-256 GCM)
-Combine the best of both worlds: define your own struct payload and let the Manager completely encrypt it, while keeping all Redis session control features.
+Standard `net/http` integration:
 
 ```go
-type TenantClaims struct {
-	TenantID string `json:"tenant_id"`
-	Role     string `json:"role"`
-	Quota    int    `json:"quota"`
-}
-
-mgr, _ := auth.NewGenericEncryptedManager[TenantClaims](auth.GenericEncryptedOptions{
-	SecretKey: "super-secret-jwt-key-must-be-long",
-	AESKey:    "01234567890123456789012345678901",
-	Redis:     redisClient,
-})
-
-payload := TenantClaims{TenantID: "tenant-777", Role: "admin"}
-
-// Generate Encrypted Token (Payload is fully hidden!)
-token, _ := mgr.GenerateToken(payload, 24*time.Hour, nil)
-
-// Decrypt and Verify
-var decoded TenantClaims
-err := mgr.VerifyToken(token, &decoded, nil)
+protected := nethttpauth.Middleware(manager)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    value, ok := ctxkey.GetUserInfo(r.Context())
+    user, valid := value.(*auth.UserInfo)
+    if !ok || !valid || user == nil {
+        http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+        return
+    }
+    // Use user.ID and user.Role.
+}))
 ```
 
-### 5. Extreme Security: Encrypted JWT + Dynamic AAD (Token Binding)
-Use this pattern for highly sensitive applications (e.g., Finance, Wallets). 
-It binds the JWT to a specific browser session using a randomly generated `Session ID` stored in a secure `HttpOnly` Cookie.
+Fiber, Gin, and Echo expose equivalent `Middleware(manager)` functions.
 
-If a hacker steals the JWT from LocalStorage via XSS, they cannot decrypt it because they cannot steal the `HttpOnly` Cookie!
+## Encrypted JWT
+
+Encrypted managers hide claims from token holders and can bind authentication to
+application-supplied Additional Authenticated Data (AAD):
 
 ```go
-package main
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+manager, err := auth.NewEncryptedManager(
+    os.Getenv("AUTH_JWT_SECRET"),
+    os.Getenv("AUTH_AES_KEY"), // exactly 32 bytes
 )
-
-func main() {
-	manager, _ := auth.NewEncryptedManager("jwt-secret", "12345678901234567890123456789012")
-	app := fiber.New()
-
-	// --- 1. LOGIN API ---
-	app.Post("/login", func(c *fiber.Ctx) error {
-		user := auth.UserInfo{ID: "user_777", Role: "admin"}
-
-		// Generate a random Session ID (e.g., using UUID)
-		sessionID := "sess_" + fmt.Sprintf("%d", time.Now().UnixNano())
-
-		// Set Session ID in an HttpOnly cookie (Immune to XSS)
-		c.Cookie(&fiber.Cookie{
-			Name:     "session_id",
-			Value:    sessionID,
-			Expires:  time.Now().Add(24 * time.Hour),
-			HTTPOnly: true,
-		})
-
-		// Encrypt and bind the token to the Session ID (AAD)
-		token, _ := manager.GenerateToken(user, 24*time.Hour, []byte(sessionID))
-
-		// Return the token (Client saves this in LocalStorage or Memory)
-		return c.JSON(fiber.Map{"access_token": token})
-	})
-
-	// --- 2. PROTECTED ROUTE ---
-	api := app.Group("/api")
-
-	// Middleware Extractor: Tells the middleware how to find the AAD for decryption
-	aadExtractor := func(c *fiber.Ctx) []byte {
-		sessionID := c.Cookies("session_id")
-		if sessionID == "" {
-			return nil
-		}
-		return []byte(sessionID)
-	}
-
-	// Apply Middleware
-	api.Use(fiberauth.EncryptedMiddleware(manager, aadExtractor))
-
-	// API Handler
-	api.Get("/profile", func(c *fiber.Ctx) error {
-		// Context Injection: Get UserInfo safely
-		val := c.Locals(string(ctxkey.UserInfo))
-		userInfo := val.(*auth.UserInfo)
-
-		return c.JSON(fiber.Map{
-			"message": "Protected Data",
-			"user_id": userInfo.ID,
-		})
-	})
-
-	app.Listen(":3000")
+if err != nil {
+    return err
 }
+
+token, err := manager.GenerateToken(user, time.Hour, []byte(sessionID))
 ```
 
----
+The same AAD must be supplied during validation. Generate binding values with a
+cryptographically secure random source. Browser cookies carrying binding data
+should use `HttpOnly`, `Secure`, an explicit `SameSite` policy, and a narrow
+`Path`.
 
-## 🛡️ Security Best Practices
-1. **Never Hardcode Secrets**: Always load your `jwtSecret` and `aesKey` from environment variables (`.env`) or a Secret Manager.
-2. **AES Key Size**: The `aesKey` passed to `NewEncryptedManager` **MUST** be exactly 32 bytes long.
-3. **Use HTTPS**: `HttpOnly` cookies are only safe against MITM attacks if you enforce HTTPS in production (set `Secure: true` on your cookies).
+AAD and encrypted claims are defense in depth. They do not replace TLS, CSP and
+XSS prevention, CSRF controls, secure token storage, rotation, or revocation.
+
+## Generic Claims And Redis Sessions
+
+`GenericManager[T]` and `GenericEncryptedManager[T]` support custom claims,
+refresh tokens, and Redis-backed revocation:
+
+```go
+manager, err := auth.NewGenericManager[*CustomClaims](auth.GenericOptions{
+    SecretKey: os.Getenv("AUTH_JWT_SECRET"),
+    Redis:     redisClient,
+})
+if err != nil {
+    return err
+}
+
+refreshToken, err := manager.GenerateRefreshToken(ctx, userID, 7*24*time.Hour)
+revoked, err := manager.IsRevoked(ctx, claims.ID)
+err = manager.RevokeToken(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
+```
+
+Use the request context for Redis operations. Do not silently treat a Redis
+lookup failure as "not revoked" on security-sensitive endpoints.
+
+## Security Rules
+
+- Never hardcode or log signing keys, encryption keys, access tokens, or refresh
+  tokens.
+- Send bearer tokens in the `Authorization` header, not query strings.
+- Return generic authentication errors and log internal causes server-side.
+- Authenticate logout and derive the token ID from validated claims rather than
+  trusting a caller-supplied JTI.
+- Use checked context assertions.
+- Protect refresh and revocation endpoints with explicit abuse controls.
+
+See [`examples/auth`](../examples/auth) for one comparable standard-JWT flow on
+all four HTTP stacks.

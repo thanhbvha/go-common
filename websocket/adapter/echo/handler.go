@@ -9,7 +9,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 )
 
@@ -24,6 +27,9 @@ type Config struct {
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
+	// ConnectionKey resolves the key used for concurrent connection limits and
+	// connection metadata. It may return a trusted client IP or account key.
+	ConnectionKey func(c echo.Context, userID string) string
 }
 
 // Handler manages the Echo HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -40,21 +46,14 @@ func NewHandler(customConfig ...Config) *Handler {
 	}
 
 	if config.Authenticate == nil {
-		config.Authenticate = func(c echo.Context) (string, error) {
-			token := c.QueryParam("token")
-			if token == "" {
-				return "", fmt.Errorf("token query parameter is required")
-			}
-			return token, nil
+		config.Authenticate = func(echo.Context) (string, error) {
+			return "", fmt.Errorf("websocket authenticator is required")
 		}
 	}
 	if config.Upgrader == nil {
 		config.Upgrader = &websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
 		}
 	}
 	if config.RateLimiter == nil {
@@ -63,7 +62,9 @@ func NewHandler(customConfig ...Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
-	
+	if config.ConnectionKey == nil {
+		config.ConnectionKey = func(c echo.Context, _ string) string { return c.RealIP() }
+	}
 
 	// Pre-initialize the core global manager with the specified pubsub adapter
 	core.GetGlobalManager()
@@ -73,14 +74,18 @@ func NewHandler(customConfig ...Config) *Handler {
 
 // HandleUpgrade handles the Echo WebSocket connection upgrade process and registers session inside the core manager.
 func (h *Handler) HandleUpgrade(c echo.Context) error {
+	if !websocket.IsWebSocketUpgrade(c.Request()) {
+		return c.JSON(http.StatusUpgradeRequired, map[string]string{"error": "upgrade required"})
+	}
+
 	userID, err := h.config.Authenticate(c)
 	if err != nil || userID == "" {
 		logger.WarnAsync("WebSocket connection upgrade unauthorized", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
 
-	clientIP := c.RealIP()
-	requestID := c.Response().Header().Get(echo.HeaderXRequestID)
+	clientIP := h.config.ConnectionKey(c, userID)
+	requestID := getRequestID(c)
 
 	// Apply Rate Limiters
 	if !h.config.RateLimiter.Allow() {
@@ -107,11 +112,13 @@ func (h *Handler) HandleUpgrade(c echo.Context) error {
 
 	go func() {
 		defer h.config.ConnectionLimiter.RemoveConnection(clientIP)
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorAsync("Panic in Echo connection handler loop", "error", r, "userID", userID)
-			}
-		}()
+		defer func() { _ = conn.Close() }()
+		defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+			Component: "adapter/echo.connection",
+			UserID:    userID,
+			ClientIP:  clientIP,
+			RequestID: requestID,
+		}))
 
 		manager := core.GetGlobalManager()
 		shardID := manager.GetShardID(userID)
@@ -122,6 +129,18 @@ func (h *Handler) HandleUpgrade(c echo.Context) error {
 	}()
 
 	return nil
+}
+
+func getRequestID(c echo.Context) string {
+	if requestID, ok := ctxkey.GetRequestID(c.Request().Context()); ok {
+		return requestID
+	}
+	if value := c.Get("request_id"); value != nil {
+		if requestID, ok := value.(string); ok {
+			return requestID
+		}
+	}
+	return c.Response().Header().Get(echo.HeaderXRequestID)
 }
 
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.

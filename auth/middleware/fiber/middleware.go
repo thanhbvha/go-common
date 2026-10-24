@@ -1,10 +1,10 @@
+// Package fiberauth provides JWT authentication middleware for Fiber.
 package fiberauth
 
 import (
-	"strings"
-
 	"github.com/gofiber/fiber/v2"
 	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
 )
@@ -25,6 +25,7 @@ func Middleware(manager *auth.Manager) fiber.Handler {
 		// Store UserInfo in Fiber's context for downstream handlers
 		// Note: Fiber's Locals expects string keys, but we can use our ctxkey constants as strings
 		c.Locals(string(ctxkey.UserInfo), userInfo)
+		c.SetUserContext(ctxkey.SetUserInfo(c.UserContext(), userInfo))
 
 		return c.Next()
 	}
@@ -50,20 +51,12 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *fi
 		}
 
 		c.Locals(string(ctxkey.UserInfo), userInfo)
+		c.SetUserContext(ctxkey.SetUserInfo(c.UserContext(), userInfo))
 
 		return c.Next()
 	}
 }
 
 func extractTokenFromFiber(c *fiber.Ctx) string {
-	authHeader := c.Get("Authorization")
-	if authHeader == "" {
-		return ""
-	}
-
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-		return parts[1]
-	}
-	return ""
+	return authhttp.BearerToken(c.Get("Authorization"))
 }

@@ -1,3 +1,4 @@
+// Package fiberhealth exposes health check handlers for Fiber.
 package fiberhealth
 
 import (

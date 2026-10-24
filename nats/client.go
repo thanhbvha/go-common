@@ -192,13 +192,20 @@ func SetDefault(c *Client) {
 	globalMu.Unlock()
 }
 
-// Default returns the process-wide default Client registered via SetDefault.
-// It panics if SetDefault has not been called.
-func Default() *Client {
+// LookupDefault returns the process-wide default Client and whether it has
+// been configured. It is the non-panicking alternative to Default.
+func LookupDefault() (*Client, bool) {
 	globalMu.RLock()
 	c := globalClient
 	globalMu.RUnlock()
-	if c == nil {
+	return c, c != nil
+}
+
+// Default returns the process-wide default Client registered via SetDefault.
+// It panics if SetDefault has not been called.
+func Default() *Client {
+	c, ok := LookupDefault()
+	if !ok {
 		panic("nats: default client not set — call nats.SetDefault before use")
 	}
 	return c

@@ -5,8 +5,8 @@
 // synchronous writes rather than dropping records.
 //
 // Optional file rotation is available via lumberjack when FileOptions is set
-// in Options. Fiber (or any other HTTP framework) integration is intentionally
-// not included; framework-specific middleware lives in a separate adapter repo.
+// in Options. HTTP integration lives in isolated middleware subpackages for
+// standard net/http, Fiber, Gin, and Echo.
 //
 // Basic usage:
 //
@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -35,8 +36,10 @@ import (
 type ContextKey string
 
 // ContextKeyRequestID is the context key under which a request/trace ID is stored.
-// Use context.WithValue(ctx, logger.ContextKeyRequestID, id) to attach an ID,
-// then call the *WithContext variants to have it appended automatically.
+// New code should use ctxkey.SetRequestID and then call the *WithContext variants.
+//
+// Deprecated: use ctxkey.SetRequestID. ContextKeyRequestID remains supported
+// for backward compatibility.
 const ContextKeyRequestID ContextKey = "request_id"
 
 // asyncTask is a unit of deferred log work dispatched to a worker goroutine.
@@ -273,8 +276,12 @@ func (l *Logger) DebugAsync(msg string, args ...any) {
 
 // ---- Context-aware methods ----
 
-// extractRequestID reads the request ID stored in ctx under ContextKeyRequestID.
+// extractRequestID prefers the shared ctxkey value and falls back to the legacy
+// logger-specific key for backward compatibility.
 func extractRequestID(ctx context.Context) (string, bool) {
+	if id, ok := ctxkey.GetRequestID(ctx); ok && id != "" {
+		return id, true
+	}
 	id, ok := ctx.Value(ContextKeyRequestID).(string)
 	return id, ok && id != ""
 }

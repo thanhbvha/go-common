@@ -7,6 +7,7 @@ The `ratelimit` module provides an ultra-fast, distributed Rate Limiting solutio
 1. **Atomic Operations**: Uses Redis Lua scripts to evaluate and increment rate limits in a single, atomic operation to prevent race conditions in highly concurrent environments.
 2. **Standard Algorithm**: Implements the Fixed Window rate limiting algorithm.
 3. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
+   - `github.com/thanhbvha/go-common/ratelimit/middleware/nethttp` (`nethttplimit.Middleware()`)
    - `github.com/thanhbvha/go-common/ratelimit/middleware/fiber` (`fiberlimit.Middleware()`)
    - `github.com/thanhbvha/go-common/ratelimit/middleware/gin` (`ginlimit.Middleware()`)
    - `github.com/thanhbvha/go-common/ratelimit/middleware/echo` (`echolimit.Middleware()`)
@@ -58,6 +59,30 @@ func main() {
 	app.Listen(":3000")
 }
 ```
+
+## Standard `net/http`
+
+```go
+import nethttplimit "github.com/thanhbvha/go-common/ratelimit/middleware/nethttp"
+
+mux := http.NewServeMux()
+mux.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
+    _, _ = w.Write([]byte("Success!"))
+})
+
+// A nil KeyGenerator uses the direct peer IP from Request.RemoteAddr.
+handler := nethttplimit.Middleware(limiter, cfg, nil)(mux)
+srv := &http.Server{Addr: ":3000", Handler: handler}
+```
+
+The default key generator deliberately ignores forwarding headers. Applications
+behind a trusted reverse proxy should provide a custom `KeyGenerator` based on
+their validated proxy configuration or authenticated user information.
+
+Fiber, Gin, and Echo use their framework client-IP resolver by default. Configure
+each framework's trusted-proxy policy before using that value as a security key,
+or provide a custom `KeyGenerator`. For authenticated APIs, place a user/API-key
+limiter after authentication.
 
 ## Advanced Usage: Custom Rate Limit Keys
 

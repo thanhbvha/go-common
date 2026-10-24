@@ -2,10 +2,12 @@
 package core
 
 import (
-	"github.com/goccy/go-json"
 	"sync"
 
+	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 )
 
 // IncomingMessage represents the envelope for incoming payloads from a client.
@@ -50,7 +52,7 @@ func HandleEvent(ev *EventMessage) {
 
 	var inc IncomingMessage
 	if err := json.Unmarshal(ev.Raw, &inc); err != nil {
-		logger.ErrorAsync("Failed to unmarshal incoming message", "error", err, "shard", ev.Conn.shard.name, "userID", ev.Conn.userID, "raw", string(ev.Raw))
+		logger.ErrorAsync("Failed to unmarshal incoming message", "error", err, "shard", ev.Conn.shard.name, "userID", ev.Conn.userID, "payloadBytes", len(ev.Raw))
 		return
 	}
 
@@ -66,11 +68,15 @@ func HandleEvent(ev *EventMessage) {
 	if ok {
 		// Execute handler in a separate goroutine to avoid blocking the shard processor loop
 		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.ErrorAsync("Panic in event handler execution", "error", r, "eventType", inc.Type, "userID", ev.Conn.userID)
-				}
-			}()
+			defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+				Component: "core.event_handler",
+				Operation: "dispatch",
+				EventType: inc.Type,
+				UserID:    ev.Conn.GetUserID(),
+				ClientIP:  ev.Conn.GetClientIP(),
+				RequestID: ev.Conn.GetRequestID(),
+				ShardID:   ev.Conn.GetShardID(),
+			}))
 
 			if err := handler(ev.Conn, inc); err != nil {
 				logger.ErrorAsync("Error executing event handler", "error", err, "eventType", inc.Type, "userID", ev.Conn.userID)

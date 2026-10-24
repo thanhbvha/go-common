@@ -1,23 +1,22 @@
-# Web API Module (Multi-Framework)
+# Web API Example
 
-## Overview
-The `web` module provides standardized middlewares, response formatting, and validators for building HTTP REST APIs. 
-**It fully supports the big three Go frameworks: Fiber, Gin, and Echo!**
+The example exposes the same validated `POST /users` endpoint on standard
+`net/http`, Fiber, Gin, and Echo.
 
-## Key Features
-- `web/response`: Standardized JSON response envelopes separated by framework (`fiberresp.Success`, `ginresp.Success`, and `echoresp.Success`).
-- `web/middleware/*`: Pre-configured middlewares (Recover, ErrorHandler, Telemetry) separated by framework (`fiber`, `gin`, `echo`) to avoid unused dependencies.
-- `web/validator`: Global struct validator using `go-playground/validator/v10` that works universally across frameworks.
-- `utils/graceful`: A robust, centralized graceful shutdown coordinator.
+```powershell
+go run ./examples/web -stack=nethttp
+```
 
-## Covered Examples
-This module includes three complete REST API setups, demonstrating the power of framework-agnostic utilities:
-1. `RunFiberAPIExample()`: Setup using `gofiber/fiber/v2`
-2. `RunGinAPIExample()`: Setup using `gin-gonic/gin`
-3. `RunEchoAPIExample()`: Setup using `labstack/echo/v4`
+Valid stacks are `nethttp`, `fiber`, `gin`, and `echo`; each listens on port
+3000 and uses the same response envelope.
 
-## 🚨 Best Practices for AI/Developers
-- **Response Format**: Do not write custom `JSON()` calls directly. Always use the respective subpackage (e.g., `fiberresp.Success` for Fiber, `ginresp.Success` for Gin, `echoresp.Success` for Echo) to maintain a consistent API contract across all microservices.
-- **Middlewares**: Always attach the `Recover()` middleware at the very top of your app to prevent panics from crashing the whole server.
-- **Error Handling**: Use the provided Global Error Handlers (`fibermw.ErrorHandler`, `ginmw.ErrorHandler`, `echomw.ErrorHandler`) to automatically unwrap `xerrors` and format them securely for the client.
-- **Graceful Shutdown (CRITICAL)**: **NEVER** block the main thread synchronously with `app.Listen()`. Always launch the server in a goroutine, and use `graceful.Register(...)` followed by `graceful.Wait()` at the bottom of `main()`. This guarantees that active HTTP requests finish before the container terminates.
+```powershell
+Invoke-RestMethod -Method Post http://localhost:3000/users -ContentType application/json -Body '{"name":"Alice Smith","email":"alice@example.com"}'
+```
+
+Middleware order is request ID, access logger, recovery, telemetry, then the
+application handler. The response contains a non-secret demonstration
+`reference_id`; it does not generate or return credentials.
+
+All launchers use the struct-based graceful shutdown coordinator. Press Ctrl+C
+to stop the selected server and telemetry provider cleanly.

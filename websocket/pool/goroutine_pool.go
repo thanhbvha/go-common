@@ -12,14 +12,29 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 )
+
+// TaskMetadata identifies a worker task without including message payloads.
+type TaskMetadata struct {
+	Type      string
+	UserID    string
+	ClientIP  string
+	RequestID string
+	ShardID   string
+}
+
+type task struct {
+	run      func()
+	metadata TaskMetadata
+}
 
 // WorkerPool manages a dynamic pool of worker goroutines for high-performance concurrent processing.
 type WorkerPool struct {
 	workers    int32
 	maxWorkers int32
-	taskQueue  chan func()
+	taskQueue  chan task
 	wg         sync.WaitGroup
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -36,7 +51,7 @@ func NewWorkerPool(maxWorkers int) *WorkerPool {
 
 	pool := &WorkerPool{
 		maxWorkers: int32(maxWorkers),
-		taskQueue:  make(chan func(), maxWorkers*10), // Buffer for pending tasks
+		taskQueue:  make(chan task, maxWorkers*10), // Buffer for pending tasks
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -57,8 +72,14 @@ func NewWorkerPool(maxWorkers int) *WorkerPool {
 // Submit enqueues a task for execution in the pool. Returns true if the task was successfully scheduled,
 // or false if the queue is full and the pool cannot scale further.
 func (p *WorkerPool) Submit(task func()) bool {
+	return p.SubmitWithMetadata(TaskMetadata{Type: "anonymous"}, task)
+}
+
+// SubmitWithMetadata enqueues a task with non-sensitive recovery metadata.
+func (p *WorkerPool) SubmitWithMetadata(metadata TaskMetadata, run func()) bool {
+	queued := task{run: run, metadata: metadata}
 	select {
-	case p.taskQueue <- task:
+	case p.taskQueue <- queued:
 		p.scaleWorkers()
 		return true
 	default:
@@ -66,7 +87,7 @@ func (p *WorkerPool) Submit(task func()) bool {
 		if p.canAddWorker() {
 			p.addWorker()
 			select {
-			case p.taskQueue <- task:
+			case p.taskQueue <- queued:
 				return true
 			default:
 				return false
@@ -78,12 +99,12 @@ func (p *WorkerPool) Submit(task func()) bool {
 
 // SubmitWithTimeout attempts to enqueue a task within the given timeout duration.
 // Returns true on success, or false if the timeout expires or the pool context is canceled.
-func (p *WorkerPool) SubmitWithTimeout(task func(), timeout time.Duration) bool {
+func (p *WorkerPool) SubmitWithTimeout(run func(), timeout time.Duration) bool {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
-	case p.taskQueue <- task:
+	case p.taskQueue <- (task{run: run, metadata: TaskMetadata{Type: "anonymous"}}):
 		p.scaleWorkers()
 		return true
 	case <-timer.C:
@@ -123,7 +144,7 @@ func (p *WorkerPool) addWorker() {
 			select {
 			case <-p.ctx.Done():
 				return
-			case task := <-p.taskQueue:
+			case queued := <-p.taskQueue:
 				if !idleTimer.Stop() {
 					select {
 					case <-idleTimer.C:
@@ -132,14 +153,18 @@ func (p *WorkerPool) addWorker() {
 				}
 				idleTimer.Reset(30 * time.Second)
 
-				// Execute task with panic recovery
+				// A failed task is discarded; the worker remains available.
 				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							logger.ErrorAsync("[AddWorker] Panic in worker pool task", "error", r)
-						}
-					}()
-					task()
+					defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+						Component: "pool.worker_task",
+						Operation: "execute",
+						TaskType:  queued.metadata.Type,
+						UserID:    queued.metadata.UserID,
+						ClientIP:  queued.metadata.ClientIP,
+						RequestID: queued.metadata.RequestID,
+						ShardID:   queued.metadata.ShardID,
+					}))
+					queued.run()
 				}()
 
 			case <-idleTimer.C:

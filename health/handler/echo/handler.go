@@ -1,3 +1,4 @@
+// Package echohealth exposes health check handlers for Echo.
 package echohealth
 
 import (

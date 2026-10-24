@@ -1,5 +1,5 @@
 // Package recoveryhttp contains framework-neutral HTTP policy shared by the
-// Fiber, Gin, and Echo panic-recovery adapters.
+// standard net/http, Fiber, Gin, and Echo panic-recovery adapters.
 package recoveryhttp
 
 import (
@@ -9,6 +9,8 @@ import (
 
 	"github.com/thanhbvha/go-common/logger"
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/web/response"
 )
 
 const (
@@ -19,21 +21,11 @@ const (
 
 // Response is the public JSON body returned after recovering a panic. It never
 // includes the panic value, stack, file, or line.
-type Response struct {
-	Code      int    `json:"code"`
-	Status    string `json:"status"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
-}
+type Response = response.ErrorResponse
 
 // NewResponse creates the safe public response for a recovered panic.
 func NewResponse(requestID string) Response {
-	return Response{
-		Code:      StatusCode,
-		Status:    ErrorCode,
-		Message:   Message,
-		RequestID: requestID,
-	}
+	return response.NewHTTPError(StatusCode, ErrorCode, Message, requestID)
 }
 
 // Log writes a recovered panic synchronously. The request context is reduced to
@@ -43,7 +35,7 @@ func Log(ctx context.Context, requestID string, report panicrecovery.Report) {
 		ctx = context.Background()
 	}
 	if requestID != "" {
-		ctx = context.WithValue(ctx, logger.ContextKeyRequestID, requestID)
+		ctx = ctxkey.SetRequestID(ctx, requestID)
 	}
 	logger.ErrorWithContext(ctx, "panic recovered",
 		slog.String("panic_type", report.Type),

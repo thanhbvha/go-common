@@ -1,3 +1,4 @@
+// Package ginhealth exposes health check handlers for Gin.
 package ginhealth
 
 import (

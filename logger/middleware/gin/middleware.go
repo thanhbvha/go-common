@@ -1,11 +1,13 @@
+// Package ginlog provides request ID and access logging middleware for Gin.
 package ginlog
 
 import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
+	"github.com/thanhbvha/go-common/internal/httpkit"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
 // Middleware creates a custom request logging middleware for Gin
@@ -67,12 +69,10 @@ func Middleware() gin.HandlerFunc {
 // RequestIDMiddleware adds a unique X-Request-ID to each request in Gin
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		requestID := c.GetHeader("X-Request-ID")
-		if requestID == "" {
-			requestID = uuid.New().String()
-		}
+		requestID := httpkit.RequestID(c.GetHeader("X-Request-ID"))
 
 		c.Set("request_id", requestID)
+		c.Request = c.Request.WithContext(ctxkey.SetRequestID(c.Request.Context(), requestID))
 		c.Writer.Header().Set("X-Request-ID", requestID)
 
 		c.Next()

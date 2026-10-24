@@ -3,13 +3,15 @@ package core
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/pool"
 )
 
@@ -121,12 +123,8 @@ func (c *Connection) IsClosed() bool {
 // readPump pumps messages from the websocket connection to the shard.
 // The application runs readPump in a per-connection goroutine.
 func (c *Connection) readPump() {
-	defer func() {
-		if r := recover(); r != nil {
-			logger.ErrorAsync("Panic in readPump", "error", r, "userID", c.userID, "clientIP", c.clientIP, "shardID", c.shardID)
-		}
-		c.shard.unregister <- c
-	}()
+	defer func() { c.shard.unregister <- c }()
+	defer panicrecovery.Catch(wsrecovery.Handler(c.recoveryMetadata("core.read_pump")))
 
 	c.conn.SetReadLimit(maxMessageSize)
 	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -172,7 +170,13 @@ func (c *Connection) readPump() {
 			pool.GetGlobalBufferPool().Put(buffer)
 
 			workerPool := pool.GetGlobalPool()
-			taskSubmitted := workerPool.Submit(func() {
+			taskSubmitted := workerPool.SubmitWithMetadata(pool.TaskMetadata{
+				Type:      "enqueue_incoming_message",
+				UserID:    c.userID,
+				ClientIP:  c.clientIP,
+				RequestID: c.requestID,
+				ShardID:   c.shardID,
+			}, func() {
 				ev := &EventMessage{
 					Conn: c,
 					Raw:  messageCopy,
@@ -196,12 +200,10 @@ func (c *Connection) readPump() {
 func (c *Connection) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
-		if r := recover(); r != nil {
-			logger.ErrorAsync("Panic in writePump", "error", r, "userID", c.userID, "clientIP", c.clientIP)
-		}
 		ticker.Stop()
 		c.Close("writePump finished")
 	}()
+	defer panicrecovery.Catch(wsrecovery.Handler(c.recoveryMetadata("core.write_pump")))
 
 	for {
 		select {
@@ -240,6 +242,16 @@ func (c *Connection) writePump() {
 				return
 			}
 		}
+	}
+}
+
+func (c *Connection) recoveryMetadata(component string) wsrecovery.Metadata {
+	return wsrecovery.Metadata{
+		Component: component,
+		UserID:    c.userID,
+		ClientIP:  c.clientIP,
+		RequestID: c.requestID,
+		ShardID:   c.shardID,
 	}
 }
 

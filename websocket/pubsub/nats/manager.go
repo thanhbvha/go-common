@@ -3,13 +3,15 @@ package natspubsub
 import (
 	"context"
 	"fmt"
-	"github.com/goccy/go-json"
 	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
 	gonats "github.com/nats-io/nats.go"
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/nats"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
@@ -42,13 +44,7 @@ func GetGlobalManager() *Manager {
 func NewManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var client *nats.Client
-	func() {
-		defer func() {
-			_ = recover() // Catch panic if nats.Default is not set
-		}()
-		client = nats.Default()
-	}()
+	client, _ := nats.LookupDefault()
 
 	if client == nil {
 		logger.WarnAsync("NATS default client not set. WebSocket PubSub will run in standalone loopback mode.")
@@ -108,6 +104,12 @@ func (psm *Manager) Subscribe(channels ...string) error {
 		// We capture the channel variable to ensure correct closures.
 		subChan := channel
 		sub, err := nc.Subscribe(subChan, func(msg *gonats.Msg) {
+			defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+				Component: "pubsub.nats_subscription_callback",
+				Operation: "receive",
+				Channel:   subChan,
+				NodeID:    psm.nodeID,
+			}))
 			psm.processMessage(subChan, msg.Data)
 		})
 		if err != nil {
@@ -152,7 +154,7 @@ func (psm *Manager) Unsubscribe(channels ...string) error {
 func (psm *Manager) processMessage(channel string, payload []byte) {
 	var message pubsub.CrossNodeMessage
 	if err := json.Unmarshal(payload, &message); err != nil {
-		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "payload", string(payload))
+		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "channel", channel, "payloadBytes", len(payload))
 		return
 	}
 
@@ -171,11 +173,7 @@ func (psm *Manager) processMessage(channel string, payload []byte) {
 	}
 
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorAsync("Panic in message handler", "error", r, "type", message.Type, "node_id", psm.nodeID)
-			}
-		}()
+		defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.nats_message_handler", channel, &message)))
 
 		handler(&message)
 	}()
@@ -193,11 +191,7 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 		psm.mu.RUnlock()
 		if exists {
 			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.ErrorAsync("Panic in loopback handler", "error", r)
-					}
-				}()
+				defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.nats_loopback_handler", channel, message)))
 				handler(message)
 			}()
 		}
@@ -215,6 +209,22 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 	}
 
 	return nc.Publish(channel, data)
+}
+
+func (psm *Manager) recoveryMetadata(component, channel string, message *pubsub.CrossNodeMessage) wsrecovery.Metadata {
+	metadata := wsrecovery.Metadata{
+		Component: component,
+		Operation: "dispatch",
+		Channel:   channel,
+		NodeID:    psm.nodeID,
+	}
+	if message != nil {
+		metadata.MessageType = message.Type
+		metadata.UserID = message.UserID
+		metadata.ShardID = message.ShardID
+		metadata.RoomID = message.RoomID
+	}
+	return metadata
 }
 
 // BroadcastMessage sends a broadcast event to all subscribers of a specific shard ID.

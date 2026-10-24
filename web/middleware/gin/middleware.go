@@ -1,9 +1,14 @@
+// Package ginmw provides recovery, telemetry, and error middleware for Gin.
 package ginmw
 
 import (
+	"errors"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -15,6 +20,9 @@ func Recover() gin.HandlerFunc {
 		defer panicrecovery.Catch(func(report panicrecovery.Report) {
 			requestID, _ := c.Get("request_id")
 			requestIDString, _ := requestID.(string)
+			if requestIDString == "" {
+				requestIDString, _ = ctxkey.GetRequestID(c.Request.Context())
+			}
 			recoveryhttp.Log(c.Request.Context(), requestIDString, report)
 			c.Abort()
 			if !c.Writer.Written() {
@@ -28,10 +36,16 @@ func Recover() gin.HandlerFunc {
 // Telemetry creates an OpenTelemetry span for every incoming HTTP request in Gin.
 func Telemetry(operationName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx := c.Request.Context()
-
-		ctx, span := telemetry.StartSpan(ctx, operationName+" "+c.Request.URL.Path)
-		defer span.End()
+		parentCtx := telemetry.ExtractHTTPHeaders(c.Request.Context(), c.Request.Header)
+		ctx, span := telemetry.StartServerSpan(parentCtx, operationName+" "+c.Request.URL.Path)
+		completed := false
+		defer func() {
+			if !completed {
+				telemetry.SetAttributes(span, attribute.Int("http.status_code", http.StatusInternalServerError))
+				telemetry.RecordError(span, errors.New("panic in HTTP handler"))
+			}
+			span.End()
+		}()
 
 		attrs := []attribute.KeyValue{
 			attribute.String("http.method", c.Request.Method),
@@ -39,7 +53,9 @@ func Telemetry(operationName string) gin.HandlerFunc {
 			attribute.String("http.client_ip", c.ClientIP()),
 		}
 
-		if reqID, exists := c.Get("request_id"); exists {
+		if reqID, ok := ctxkey.GetRequestID(ctx); ok {
+			attrs = append(attrs, attribute.String("http.request_id", reqID))
+		} else if reqID, exists := c.Get("request_id"); exists {
 			if str, ok := reqID.(string); ok {
 				attrs = append(attrs, attribute.String("http.request_id", str))
 			}
@@ -50,6 +66,7 @@ func Telemetry(operationName string) gin.HandlerFunc {
 		c.Request = c.Request.WithContext(ctx)
 
 		c.Next()
+		completed = true
 
 		statusCode := c.Writer.Status()
 		telemetry.SetAttributes(span, attribute.Int("http.status_code", statusCode))
@@ -57,8 +74,7 @@ func Telemetry(operationName string) gin.HandlerFunc {
 		if len(c.Errors) > 0 {
 			telemetry.RecordError(span, c.Errors.Last())
 		} else if statusCode >= 500 {
-			// Record generic error if status code >= 500 but no error attached
-			telemetry.SetAttributes(span, attribute.String("error", "Internal Server Error"))
+			telemetry.RecordError(span, errors.New(http.StatusText(statusCode)))
 		}
 	}
 }

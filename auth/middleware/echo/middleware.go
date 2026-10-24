@@ -1,12 +1,12 @@
+// Package echoauth provides JWT authentication middleware for Echo.
 package echoauth
 
 import (
-	"net/http"
-	"strings"
-
 	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
+	echoresp "github.com/thanhbvha/go-common/web/response/echo"
 )
 
 // Middleware creates an Echo middleware to protect routes using standard JWT.
@@ -15,20 +15,17 @@ func Middleware(manager *auth.Manager) echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			tokenString := extractTokenFromEcho(c)
 			if tokenString == "" {
-				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error": "Missing or invalid Authorization header",
-				})
+				return echoresp.Error(c, 401, "Missing or invalid Authorization header")
 			}
 
 			userInfo, err := manager.ExtractUserInfo(tokenString)
 			if err != nil {
-				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error": "Invalid or expired token",
-				})
+				return echoresp.Error(c, 401, "Invalid or expired token")
 			}
 
 			// Store UserInfo in Echo's context
 			c.Set(string(ctxkey.UserInfo), userInfo)
+			c.SetRequest(c.Request().WithContext(ctxkey.SetUserInfo(c.Request().Context(), userInfo)))
 			return next(c)
 		}
 	}
@@ -41,9 +38,7 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c ech
 		return func(c echo.Context) error {
 			tokenString := extractTokenFromEcho(c)
 			if tokenString == "" {
-				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error": "Missing or invalid Authorization header",
-				})
+				return echoresp.Error(c, 401, "Missing or invalid Authorization header")
 			}
 
 			var aad []byte
@@ -53,26 +48,16 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c ech
 
 			userInfo, err := manager.ValidateToken(tokenString, aad)
 			if err != nil {
-				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error": "Invalid or expired token",
-				})
+				return echoresp.Error(c, 401, "Invalid or expired token")
 			}
 
 			c.Set(string(ctxkey.UserInfo), userInfo)
+			c.SetRequest(c.Request().WithContext(ctxkey.SetUserInfo(c.Request().Context(), userInfo)))
 			return next(c)
 		}
 	}
 }
 
 func extractTokenFromEcho(c echo.Context) string {
-	authHeader := c.Request().Header.Get("Authorization")
-	if authHeader == "" {
-		return ""
-	}
-
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-		return parts[1]
-	}
-	return ""
+	return authhttp.BearerToken(c.Request().Header.Get("Authorization"))
 }

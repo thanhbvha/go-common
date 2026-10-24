@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,150 +13,100 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/thanhbvha/go-common/ratelimit"
-	"github.com/thanhbvha/go-common/ratelimit/middleware/echo"
-	"github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
-	"github.com/thanhbvha/go-common/ratelimit/middleware/gin"
+	echolimit "github.com/thanhbvha/go-common/ratelimit/middleware/echo"
+	fiberlimit "github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
+	ginlimit "github.com/thanhbvha/go-common/ratelimit/middleware/gin"
+	nethttplimit "github.com/thanhbvha/go-common/ratelimit/middleware/nethttp"
+	"github.com/thanhbvha/go-common/utils/graceful"
 )
 
+const address = ":3000"
+
 func main() {
-	fmt.Println("=== RateLimit Module Examples ===")
+	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	flag.Parse()
 
-	// 1. Connect to Redis
-	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // Assuming a local Redis is running
-	})
-
-	// Uncomment the example you want to run:
-	RunIPBasedRateLimitExample(rdb)
-	// RunUserIDBasedRateLimitExample(rdb)
-	// RunGinRateLimitExample(rdb)
-	// RunEchoRateLimitExample(rdb)
-}
-
-// =====================================================================
-// 1. IP-Based Rate Limiting (Fiber - Default)
-// =====================================================================
-func RunIPBasedRateLimitExample(rdb *redis.Client) {
-	fmt.Println("\n--- 1. IP-Based Rate Limiting (Fiber) ---")
-
-	// Initialize the Rate Limiter
-	limiter := ratelimit.NewRedisLimiter(rdb, "api_limit_ip")
-
-	// Configure the Limit: Max 5 requests per 10 seconds
-	cfg := ratelimit.Config{
-		Limit:  5,
-		Window: 10 * time.Second,
+	rdb := redis.NewClient(&redis.Options{Addr: envOrDefault("REDIS_ADDR", "localhost:6379")})
+	defer rdb.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Redis is required for this example: %v\n", err)
+		os.Exit(1)
 	}
 
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
-	})
-
-	// Apply RateLimit Middleware to all routes under /api
-	// By default (nil KeyGenerator), the middleware uses Client IP as the rate limit key.
-	api := app.Group("/api", fiberlimit.Middleware(limiter, cfg, nil))
-
-	api.Get("/data", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"message": "Success! You have not exceeded the rate limit.",
-		})
-	})
-
-	// Start the server
-	fmt.Println("Server is running on http://localhost:3000")
-	fmt.Println("Try to quickly refresh http://localhost:3000/api/data more than 5 times!")
-	log.Fatal(app.Listen(":3000"))
-}
-
-// =====================================================================
-// 2. User-ID Based Rate Limiting (Fiber - Custom KeyGenerator)
-// =====================================================================
-func RunUserIDBasedRateLimitExample(rdb *redis.Client) {
-	fmt.Println("\n--- 2. User-ID Based Rate Limiting (Fiber) ---")
-
-	limiter := ratelimit.NewRedisLimiter(rdb, "api_limit_user")
-
-	cfg := ratelimit.Config{
-		Limit:  3,
-		Window: 10 * time.Second,
-	}
-
-	// CRITICAL: In production, ALWAYS pass a custom KeyGenerator function
-	// that extracts the User ID or API Token to prevent IP spoofing or NAT issues.
-	keyGenerator := func(c *fiber.Ctx) string {
-		// Example: Get user_id from header (in reality, from JWT token context)
-		userID := c.Get("X-User-Id")
-		if userID == "" {
-			return "anonymous" // Fallback key
-		}
-		return userID
-	}
-
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
-	})
-
-	api := app.Group("/api", fiberlimit.Middleware(limiter, cfg, keyGenerator))
-
-	api.Get("/data", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"message": "Success! You have not exceeded your personal rate limit.",
-		})
-	})
-
-	fmt.Println("Server is running on http://localhost:3000")
-	fmt.Println("To test:")
-	fmt.Println("  curl -H \"X-User-Id: User1\" http://localhost:3000/api/data")
-	fmt.Println("  curl -H \"X-User-Id: User2\" http://localhost:3000/api/data")
-	log.Fatal(app.Listen(":3000"))
-}
-
-// =====================================================================
-// 3. Gin Framework Example
-// =====================================================================
-func RunGinRateLimitExample(rdb *redis.Client) {
-	fmt.Println("\n--- 3. Gin Framework Rate Limiting ---")
-
-	limiter := ratelimit.NewRedisLimiter(rdb, "api_limit_gin")
+	limiter := ratelimit.NewRedisLimiter(rdb, "example_rate_limit_"+*stack)
 	cfg := ratelimit.Config{Limit: 5, Window: 10 * time.Second}
+	switch *stack {
+	case "nethttp":
+		runNetHTTP(limiter, cfg)
+	case "fiber":
+		runFiber(limiter, cfg)
+	case "gin":
+		runGin(limiter, cfg)
+	case "echo":
+		runEcho(limiter, cfg)
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
+		os.Exit(2)
+	}
+}
 
+func runNetHTTP(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/data", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"request allowed","stack":"net/http"}`))
+	})
+	handler := nethttplimit.Middleware(limiter, cfg, nil)(mux)
+	runHTTPServer("net/http", &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second})
+}
+
+func runFiber(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Get("/api/data", fiberlimit.Middleware(limiter, cfg, nil), func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"message": "request allowed", "stack": "fiber"})
+	})
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(context.Context) error { return app.Shutdown() })
+	go func() { _ = app.Listen(address) }()
+	fmt.Printf("Fiber rate-limit example listening on http://localhost%s\n", address)
+	shutdown.Wait()
+}
+
+func runGin(limiter ratelimit.Limiter, cfg ratelimit.Config) {
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.Default()
-
-	// Apply GinMiddleware
-	api := r.Group("/api", ginlimit.Middleware(limiter, cfg, nil))
-
-	api.GET("/data", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "Success! (Gin)",
-		})
+	router := gin.New()
+	router.GET("/api/data", ginlimit.Middleware(limiter, cfg, nil), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "request allowed", "stack": "gin"})
 	})
-
-	fmt.Println("Gin server is running on http://localhost:3000")
-	log.Fatal(r.Run(":3000"))
+	runHTTPServer("Gin", &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second})
 }
 
-// =====================================================================
-// 4. Echo Framework Example
-// =====================================================================
-func RunEchoRateLimitExample(rdb *redis.Client) {
-	fmt.Println("\n--- 4. Echo Framework Rate Limiting ---")
-
-	limiter := ratelimit.NewRedisLimiter(rdb, "api_limit_echo")
-	cfg := ratelimit.Config{Limit: 5, Window: 10 * time.Second}
-
+func runEcho(limiter ratelimit.Limiter, cfg ratelimit.Config) {
 	e := echo.New()
 	e.HideBanner = true
+	e.GET("/api/data", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"message": "request allowed", "stack": "echo"})
+	}, echolimit.Middleware(limiter, cfg, nil))
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
+	go func() { _ = e.Start(address) }()
+	fmt.Printf("Echo rate-limit example listening on http://localhost%s\n", address)
+	shutdown.Wait()
+}
 
-	// Apply EchoMiddleware
-	api := e.Group("/api", echolimit.Middleware(limiter, cfg, nil))
+func runHTTPServer(name string, server *http.Server) {
+	shutdown := graceful.NewShutdown(10 * time.Second)
+	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
+	go func() { _ = server.ListenAndServe() }()
+	fmt.Printf("%s rate-limit example listening on http://localhost%s\n", name, address)
+	shutdown.Wait()
+}
 
-	api.GET("/data", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]string{
-			"message": "Success! (Echo)",
-		})
-	})
-
-	fmt.Println("Echo server is running on http://localhost:3000")
-	log.Fatal(e.Start(":3000"))
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

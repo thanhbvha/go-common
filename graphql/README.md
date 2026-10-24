@@ -3,9 +3,9 @@
 A production-ready, framework-agnostic GraphQL wrapper for `go-common`, built on top of [gqlgen](https://gqlgen.com/).
 
 ## Key Features
-- **Framework-Agnostic**: Seamless integration with **Fiber**, **Gin**, and **Echo** through dedicated Adapters.
-- **Generic DataLoader (Go 1.22+)**: High-performance solution for the N+1 problem, requiring no tedious code generation.
-- **Auto Telemetry**: Automatic performance measurement and OpenTelemetry Tracing for every GraphQL Query.
+- **Framework-Agnostic**: Runs directly on standard **net/http**, with dedicated adapters for **Fiber**, **Gin**, and **Echo**.
+- **Generic DataLoader**: High-performance solution for the N+1 problem, requiring no tedious code generation.
+- **Auto Telemetry**: OpenTelemetry spans record operation metadata and errors without exporting raw query text.
 - **Smart Error Handling**: Automatic panic recovery and error mapping from the `xerrors` library to standard GraphQL extensions.
 
 ## Usage Guide
@@ -16,7 +16,25 @@ This library acts as the Runtime Engine. In a real project, you still need to us
 go run github.com/99designs/gqlgen generate
 ```
 
-### 2. Integration (Example with Fiber Framework)
+### 2. Integration with standard `net/http`
+
+The core server already implements `http.Handler`, so no adapter is needed:
+
+```go
+coreSrv := common_graphql.NewServer(es, common_graphql.Config{
+    EnableTelemetry: true,
+})
+
+mux := http.NewServeMux()
+mux.Handle("/query", coreSrv)
+mux.Handle("/", common_graphql.PlaygroundHandler("GraphQL API", "/query"))
+
+srv := &http.Server{Addr: ":3000", Handler: mux}
+```
+
+Inject DataLoaders or authenticated users by wrapping `coreSrv` and adding them to `r.Context()` before calling `ServeHTTP`.
+
+### 3. Integration with Fiber Framework
 
 ```go
 package main
@@ -30,7 +48,7 @@ import (
 	// "my-app/graph" 
 	
 	common_graphql "github.com/thanhbvha/go-common/graphql"
-	fiber_adapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
+	fiberadapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
 )
 
 func main() {
@@ -45,7 +63,7 @@ func main() {
 	})
 
 	// 3. Wrap the Server with Fiber Adapter
-	gqlHandler := fiber_adapter.NewHandler(coreSrv, fiber_adapter.Config{
+	gqlHandler := fiberadapter.NewHandler(coreSrv, fiberadapter.Config{
 		ContextSetup: func(ctx context.Context, c *fiber.Ctx) context.Context {
 			// (Optional) Inject UserID or DataLoaders into the Context here
 			return ctx
@@ -54,7 +72,7 @@ func main() {
 
 	// 4. Configure GraphQL Playground UI
 	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := fiber_adapter.PlaygroundHandler(corePlayground)
+	playgroundHandler := fiberadapter.PlaygroundHandler(corePlayground)
 
 	// 5. Register Routes
 	app.All("/query", gqlHandler)
@@ -66,7 +84,7 @@ func main() {
 
 > **Note:** Similarly, if you use Gin or Echo, you just need to change the import path to `github.com/thanhbvha/go-common/graphql/adapter/gin` (or `echo`).
 
-### 3. Performance Optimization (Anti N+1) with DataLoader
+### 4. Performance Optimization (Anti N+1) with DataLoader
 DataLoader is a crucial tool in GraphQL. This module provides a DataLoader using **Generics**, making the code extremely concise without generating files.
 
 ```go

@@ -9,7 +9,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 )
 
@@ -24,6 +27,9 @@ type Config struct {
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
+	// ConnectionKey resolves the key used for concurrent connection limits and
+	// connection metadata. It may return a trusted client IP or account key.
+	ConnectionKey func(c *gin.Context, userID string) string
 }
 
 // Handler manages the Gin HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -40,21 +46,14 @@ func NewHandler(customConfig ...Config) *Handler {
 	}
 
 	if config.Authenticate == nil {
-		config.Authenticate = func(c *gin.Context) (string, error) {
-			token := c.Query("token")
-			if token == "" {
-				return "", fmt.Errorf("token query parameter is required")
-			}
-			return token, nil
+		config.Authenticate = func(*gin.Context) (string, error) {
+			return "", fmt.Errorf("websocket authenticator is required")
 		}
 	}
 	if config.Upgrader == nil {
 		config.Upgrader = &websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
 		}
 	}
 	if config.RateLimiter == nil {
@@ -63,7 +62,9 @@ func NewHandler(customConfig ...Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
-	
+	if config.ConnectionKey == nil {
+		config.ConnectionKey = func(c *gin.Context, _ string) string { return c.ClientIP() }
+	}
 
 	// Pre-initialize the core global manager with the specified pubsub adapter
 	core.GetGlobalManager()
@@ -73,6 +74,11 @@ func NewHandler(customConfig ...Config) *Handler {
 
 // HandleUpgrade handles the Gin WebSocket connection upgrade process and registers session inside the core manager.
 func (h *Handler) HandleUpgrade(c *gin.Context) {
+	if !websocket.IsWebSocketUpgrade(c.Request) {
+		c.JSON(http.StatusUpgradeRequired, gin.H{"error": "upgrade required"})
+		return
+	}
+
 	userID, err := h.config.Authenticate(c)
 	if err != nil || userID == "" {
 		logger.WarnAsync("WebSocket connection upgrade unauthorized", "error", err)
@@ -80,8 +86,8 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 		return
 	}
 
-	clientIP := c.ClientIP()
-	requestID := c.Writer.Header().Get("X-Request-Id")
+	clientIP := h.config.ConnectionKey(c, userID)
+	requestID := getRequestID(c)
 
 	// Apply Rate Limiters
 	if !h.config.RateLimiter.Allow() {
@@ -110,11 +116,13 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 
 	go func() {
 		defer h.config.ConnectionLimiter.RemoveConnection(clientIP)
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorAsync("Panic in Gin connection handler loop", "error", r, "userID", userID)
-			}
-		}()
+		defer func() { _ = conn.Close() }()
+		defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+			Component: "adapter/gin.connection",
+			UserID:    userID,
+			ClientIP:  clientIP,
+			RequestID: requestID,
+		}))
 
 		manager := core.GetGlobalManager()
 		shardID := manager.GetShardID(userID)
@@ -123,6 +131,18 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 			logger.ErrorAsync("Failed to handle WebSocket connection in manager", "error", err, "userID", userID)
 		}
 	}()
+}
+
+func getRequestID(c *gin.Context) string {
+	if requestID, ok := ctxkey.GetRequestID(c.Request.Context()); ok {
+		return requestID
+	}
+	if value, exists := c.Get("request_id"); exists {
+		if requestID, ok := value.(string); ok {
+			return requestID
+		}
+	}
+	return c.Writer.Header().Get("X-Request-ID")
 }
 
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.

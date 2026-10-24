@@ -1,12 +1,12 @@
+// Package ginauth provides JWT authentication middleware for Gin.
 package ginauth
 
 import (
-	"net/http"
-	"strings"
-
 	"github.com/gin-gonic/gin"
 	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
+	ginresp "github.com/thanhbvha/go-common/web/response/gin"
 )
 
 // Middleware creates a Gin middleware to protect routes using standard JWT.
@@ -14,22 +14,21 @@ func Middleware(manager *auth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := extractTokenFromGin(c)
 		if tokenString == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "Missing or invalid Authorization header",
-			})
+			ginresp.Error(c, 401, "Missing or invalid Authorization header")
+			c.Abort()
 			return
 		}
 
 		userInfo, err := manager.ExtractUserInfo(tokenString)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "Invalid or expired token",
-			})
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
 			return
 		}
 
 		// Store UserInfo in Gin's context
 		c.Set(string(ctxkey.UserInfo), userInfo)
+		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(c.Request.Context(), userInfo))
 		c.Next()
 	}
 }
@@ -40,9 +39,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gi
 	return func(c *gin.Context) {
 		tokenString := extractTokenFromGin(c)
 		if tokenString == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "Missing or invalid Authorization header",
-			})
+			ginresp.Error(c, 401, "Missing or invalid Authorization header")
+			c.Abort()
 			return
 		}
 
@@ -53,26 +51,17 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gi
 
 		userInfo, err := manager.ValidateToken(tokenString, aad)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "Invalid or expired token",
-			})
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
 			return
 		}
 
 		c.Set(string(ctxkey.UserInfo), userInfo)
+		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(c.Request.Context(), userInfo))
 		c.Next()
 	}
 }
 
 func extractTokenFromGin(c *gin.Context) string {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
-		return ""
-	}
-
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-		return parts[1]
-	}
-	return ""
+	return authhttp.BearerToken(c.GetHeader("Authorization"))
 }

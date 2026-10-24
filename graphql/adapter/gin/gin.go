@@ -1,4 +1,5 @@
-package gin_adapter
+// Package ginadapter adapts the GraphQL core HTTP handler to Gin.
+package ginadapter
 
 import (
 	"context"

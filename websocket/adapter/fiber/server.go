@@ -7,6 +7,7 @@ package fiber
 
 import (
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -68,15 +69,12 @@ func NewServer(port int, handler *Handler, customConfig ...fiber.Config) *Server
 				code = e.Code
 			}
 			logger.ErrorAsync("Fiber HTTP error occurred", "error", err.Error(), "status", code, "path", ctx.Path())
-			return ctx.Status(code).JSON(fiber.Map{"error": err.Error()})
+			message := err.Error()
+			if code >= fiber.StatusInternalServerError {
+				message = http.StatusText(http.StatusInternalServerError)
+			}
+			return ctx.Status(code).JSON(fiber.Map{"error": message})
 		}
-	}
-
-	// Apply default proxy settings if not customized
-	if len(config.TrustedProxies) == 0 {
-		config.EnableTrustedProxyCheck = true
-		config.TrustedProxies = []string{"0.0.0.0/0"}
-		config.ProxyHeader = fiber.HeaderXForwardedFor
 	}
 
 	app := fiber.New(config)
@@ -88,25 +86,14 @@ func NewServer(port int, handler *Handler, customConfig ...fiber.Config) *Server
 	}
 }
 
-// SetupRoutes binds standard upgrade routes, stats endpoint, and health check APIs on the Fiber application.
+// SetupRoutes binds only the public upgrade and health routes. Operational
+// routes are intentionally left to the application so it can enforce its own
+// administrator authentication policy.
 func (s *Server) SetupRoutes() {
 	// WebSocket gateway upgrade endpoint
 	s.app.Get("/ws", s.handler.HandleUpgrade)
 
-	// API routes
-	api := s.app.Group("/api/ws")
-	api.Get("/stats", s.handler.HandleStats)
-	api.All("/shard", s.handler.HandleShardManagement)
-
 	s.app.Get("/health", s.handler.HandleHealthCheck)
-
-	s.app.Get("/metrics", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"server": "websocket",
-			"status": "running",
-			"uptime": time.Now().Format(time.RFC3339),
-		})
-	})
 }
 
 // Start launches the Fiber listener loop on a separate goroutine and reports startup health.

@@ -1,7 +1,7 @@
 # Logger Module
 
 ## Overview
-The `logger` module is a high-performance, structured logging library based on `golang.org/x/slog`. It natively supports asynchronous writing (to reduce I/O blocking), automatic log rotation (via Lumberjack), and seamless integration with OpenTelemetry and web frameworks like Fiber, Gin, and Echo.
+The `logger` module is a high-performance, structured logging library based on `golang.org/x/slog`. It natively supports asynchronous writing (to reduce I/O blocking), automatic log rotation (via Lumberjack), and HTTP middleware for standard `net/http`, Fiber, Gin, and Echo.
 
 ## Key Features
 - `logger.Info()`, `logger.Error()`, etc. for standard logging.

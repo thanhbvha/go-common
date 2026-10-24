@@ -8,7 +8,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/thanhbvha/go-common/logger"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/websocket/adapter/internal/wshttp"
 	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/limiter"
 )
 
@@ -17,10 +21,16 @@ type Config struct {
 	// Authenticate resolves user identifiers from the Fiber context.
 	// Returns the UserID, or an error if unauthorized.
 	Authenticate func(c *fiber.Ctx) (string, error)
+	// CheckOrigin validates the browser Origin before upgrading. The default
+	// allows requests without Origin and same-origin requests only.
+	CheckOrigin func(c *fiber.Ctx) bool
 	// RateLimiter specifies a custom RateLimiter. Falls back to global instance if nil.
 	RateLimiter *limiter.RateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
+	// ConnectionKey resolves the key used for concurrent connection limits and
+	// connection metadata. Configure Fiber trusted proxies before using c.IP().
+	ConnectionKey func(c *fiber.Ctx, userID string) string
 }
 
 // Handler manages the Fiber HTTP endpoints and upgrades connections to the core WebSocket manager.
@@ -31,14 +41,8 @@ type Handler struct {
 // NewHandler instantiates a new Fiber adapter Handler with the specified configuration.
 func NewHandler(config Config) *Handler {
 	if config.Authenticate == nil {
-		// Provide a default query token authenticator if none is provided
-		config.Authenticate = func(c *fiber.Ctx) (string, error) {
-			token := c.Query("token")
-			if token == "" {
-				return "", fmt.Errorf("token query parameter is required")
-			}
-			// In production, user would parse and validate token here
-			return token, nil
+		config.Authenticate = func(*fiber.Ctx) (string, error) {
+			return "", fmt.Errorf("websocket authenticator is required")
 		}
 	}
 	if config.RateLimiter == nil {
@@ -47,7 +51,14 @@ func NewHandler(config Config) *Handler {
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
-	
+	if config.ConnectionKey == nil {
+		config.ConnectionKey = func(c *fiber.Ctx, _ string) string { return c.IP() }
+	}
+	if config.CheckOrigin == nil {
+		config.CheckOrigin = func(c *fiber.Ctx) bool {
+			return wshttp.CheckSameOrigin(c.Get(fiber.HeaderOrigin), string(c.Context().Host()))
+		}
+	}
 
 	// Pre-initialize the core global manager with the specified pubsub adapter
 	core.GetGlobalManager()
@@ -61,6 +72,10 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 		logger.WarnAsync("Received non-websocket upgrade HTTP request")
 		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{"error": "upgrade required"})
 	}
+	if !h.config.CheckOrigin(c) {
+		logger.WarnAsync("WebSocket connection upgrade rejected due to origin policy", "origin", c.Get(fiber.HeaderOrigin))
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "origin not allowed"})
+	}
 
 	userID, err := h.config.Authenticate(c)
 	if err != nil || userID == "" {
@@ -68,36 +83,29 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 
-	clientIP := c.IP()
-	requestID := ""
-	if reqIDVal := c.Locals("requestid"); reqIDVal != nil {
-		if reqIDStr, ok := reqIDVal.(string); ok {
-			requestID = reqIDStr
-		}
+	clientIP := h.config.ConnectionKey(c, userID)
+	requestID := getRequestID(c)
+
+	if !h.config.RateLimiter.Allow() {
+		logger.WarnAsync("Connection upgrade rejected due to rate limiting", "clientIP", clientIP, "userID", userID)
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "rate limit exceeded"})
+	}
+	if !h.config.ConnectionLimiter.CanConnect(clientIP) {
+		logger.WarnAsync("Connection upgrade rejected due to key connection limit", "clientIP", clientIP, "userID", userID)
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "connection limit exceeded"})
 	}
 
 	return websocket.New(func(conn *websocket.Conn) {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorAsync("Panic in Fiber connection handler loop", "error", r, "userID", userID)
-			}
-		}()
-
 		if conn == nil {
 			return
 		}
-
-		if !h.config.RateLimiter.Allow() {
-			logger.WarnAsync("Connection upgrade rejected due to rate limiting", "clientIP", clientIP, "userID", userID)
-			_ = conn.Close()
-			return
-		}
-
-		if !h.config.ConnectionLimiter.CanConnect(clientIP) {
-			logger.WarnAsync("Connection upgrade rejected due to key connection limit", "clientIP", clientIP, "userID", userID)
-			_ = conn.Close()
-			return
-		}
+		defer func() { _ = conn.Close() }()
+		defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
+			Component: "adapter/fiber.connection",
+			UserID:    userID,
+			ClientIP:  clientIP,
+			RequestID: requestID,
+		}))
 
 		if !h.config.ConnectionLimiter.AddConnection(clientIP) {
 			_ = conn.Close()
@@ -115,6 +123,16 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 			logger.ErrorAsync("Failed to handle WebSocket connection in manager", "error", err, "userID", userID)
 		}
 	})(c)
+}
+
+func getRequestID(c *fiber.Ctx) string {
+	if requestID, ok := ctxkey.GetRequestID(c.UserContext()); ok {
+		return requestID
+	}
+	if requestID, ok := c.Locals("request_id").(string); ok {
+		return requestID
+	}
+	return c.Get("X-Request-ID")
 }
 
 // HandleStats returns JSON-formatted runtime metrics of the Manager, pubsub system, and limiters.

@@ -1,20 +1,30 @@
-# Rate Limit Module
+# Rate Limit Example
 
-## Overview
-The `ratelimit` module provides a distributed, high-performance rate limiter based on the Redis Sliding Window algorithm. It prevents abuse, DDoS attacks, and ensures fair usage of APIs across a clustered environment.
+This example runs the same Redis fixed-window limit on standard `net/http`,
+Fiber, Gin, and Echo.
 
-## Key Features
-- `ratelimit.NewRedisLimiter(redisClient, prefix)`: Initializes the core limiter engine.
-- **Framework-Agnostic Middlewares**: Ready-to-use middlewares for `Fiber`, `Gin`, and `Echo` which are neatly isolated in subpackages (`fiberlimit.Middleware`, `ginlimit.Middleware`, `echolimit.Middleware`).
-- Automatically handles Redis pipeline transactions to guarantee atomicity and speed.
+## Prerequisite
 
-## Covered Examples
-This module includes four independent handler functions to demonstrate different frameworks and configurations:
-1. `RunIPBasedRateLimitExample()`: Basic usage with **Fiber** where the client's IP address is used as the rate limit key.
-2. `RunUserIDBasedRateLimitExample()`: A secure, production-ready example with **Fiber** that extracts a User ID from the HTTP Header to use as the rate limit key.
-3. `RunGinRateLimitExample()`: Demonstrates how to use the Rate Limit middleware with the **Gin** web framework.
-4. `RunEchoRateLimitExample()`: Demonstrates how to use the Rate Limit middleware with the **Echo** web framework.
+Start Redis and optionally set its address:
 
-## 🚨 Best Practices for AI/Developers
-- **Key Generation (CRITICAL)**: By default, if you pass `nil` as the KeyGenerator to the middleware, it uses the Client's IP address. In a production environment behind load balancers, or for authenticated APIs, **always** provide a custom KeyGenerator that extracts the User ID or API Key from the context/token (as shown in `RunUserIDBasedRateLimitExample`). Relying purely on IPs can lead to NAT collisions or easy spoofing.
-- **Granularity**: You can instantiate multiple limiters with different configurations (e.g., 100 req/min for general API, but 5 req/min for the `/login` endpoint to prevent brute force).
+```powershell
+$env:REDIS_ADDR="localhost:6379"
+go run ./examples/ratelimit -stack=nethttp
+```
+
+Valid stacks are `nethttp`, `fiber`, `gin`, and `echo`. Each exposes
+`GET http://localhost:3000/api/data` with a limit of five requests per ten
+seconds.
+
+```powershell
+1..6 | ForEach-Object { Invoke-WebRequest http://localhost:3000/api/data -SkipHttpErrorCheck | Select-Object StatusCode }
+```
+
+The sixth request should return HTTP 429. Middleware currently fails open when
+Redis is unavailable, but this example verifies Redis during startup so that
+the behavior is visible. Decide explicitly whether fail-open is acceptable for
+sensitive endpoints such as login, OTP, and password reset.
+
+IP-based limits can group users behind NAT. For authenticated APIs, use a custom
+key generator based on a verified user or API-key context, not a caller-supplied
+identity header.

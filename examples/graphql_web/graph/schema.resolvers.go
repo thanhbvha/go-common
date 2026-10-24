@@ -7,6 +7,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
@@ -17,8 +18,14 @@ import (
 // Author is the resolver for the author field.
 func (r *postResolver) Author(ctx context.Context, obj *model.Post) (*model.User, error) {
 	// Use DataLoader to fetch users instead of querying the DB directly (Solves N+1 issue)
-	loaderVal, _ := ctxkey.GetDataLoader(ctx)
-	loader := loaderVal.(*common_graphql.DataLoader[int, *model.User])
+	loaderVal, ok := ctxkey.GetDataLoader(ctx)
+	if !ok {
+		return nil, fmt.Errorf("user DataLoader is not configured")
+	}
+	loader, ok := loaderVal.(*common_graphql.DataLoader[int, *model.User])
+	if !ok || loader == nil {
+		return nil, fmt.Errorf("user DataLoader has an invalid type")
+	}
 	return loader.Load(ctx, obj.AuthorID)
 }
 

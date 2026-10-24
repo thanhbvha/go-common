@@ -3,6 +3,7 @@
 A high-performance, framework-agnostic, and clustered WebSocket library with support for parallel Shard sharding, asynchronous worker pools, token-bucket rate limiting, and Redis Pub/Sub cluster routing.
 
 Includes dedicated adapters for popular Go web frameworks:
+- **Standard Library Adapter (`websocket/adapter/nethttp`)**
 - **Fiber Adapter (`websocket/adapter/fiber`)**
 - **Gin Adapter (`websocket/adapter/gin`)**
 - **Echo Adapter (`websocket/adapter/echo`)**
@@ -19,7 +20,7 @@ The library utilizes a highly parallel, sharded architecture that isolates state
 
 ```mermaid
 graph TD
-    Client[WebSocket Client] -->|1. Upgrade Request| Adapter[Framework Adapter: Fiber/Gin/Echo]
+    Client[WebSocket Client] -->|1. Upgrade Request| Adapter[HTTP Adapter: net/http/Fiber/Gin/Echo]
     Adapter -->|2. Authenticate & Extract UserID| Limiter[Rate & Connection Limiters]
     Limiter -->|3. Allow| Manager[core.Manager]
     Manager -->|4. xxHash sum64 UserID % maxShards| Router{Consistent Hashing}
@@ -44,8 +45,8 @@ graph TD
 #### Detailed Workflows
 
 ##### A. Connection Upgrade & Shard Routing
-1. A client initiates a standard WebSocket handshake at `/ws?user_id=123&token=abc`.
-2. The framework adapter (**Fiber**, **Gin**, or **Echo**) verifies the handshake, authenticates the query credentials, and checks rate limits and concurrent IP limits.
+1. A client initiates a standard WebSocket handshake at `/ws?user_id=123` and supplies its credential through the application's normal authentication mechanism, such as an `Authorization: Bearer ...` header or a secure session cookie.
+2. The HTTP adapter (**net/http**, **Fiber**, **Gin**, or **Echo**) verifies the handshake, authenticates the request, and checks rate limits and concurrent IP limits.
 3. The adapter extracts the logical `userID` (e.g. `user_123`) and requests a shard assignment from the **`core.Manager`**.
 4. The `Manager` performs a consistent hashing routing operation:
    $$\text{ShardIndex} = \text{xxHash.Sum64String}(\text{userID}) \pmod{\text{maxShards}}$$
@@ -66,6 +67,7 @@ graph TD
 ```go
 import (
 	"github.com/thanhbvha/go-common/websocket/core"
+	wsNetHTTP "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
 	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
 	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
 	wsEcho "github.com/thanhbvha/go-common/websocket/adapter/echo"
@@ -88,25 +90,74 @@ func main() {
 		return nil
 	})
 
-	// 3. Instantiate Adapters (Zero-arguments defaults fallback)
+	// 3. Instantiate an adapter with an explicit authenticator.
+	// The default authenticator rejects all upgrades.
+
+	// Standard net/http Adapter Setup
+	httpHandler := wsNetHTTP.NewHandler(wsNetHTTP.Config{
+		Authenticate: func(r *http.Request) (string, error) {
+			return validateToken(r.Header.Get("Authorization"))
+		},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", httpHandler.HandleUpgrade)
 
 	// A. Fiber Adapter Setup
-	fiberHandler := wsFiber.NewHandler()
+	fiberHandler := wsFiber.NewHandler(wsFiber.Config{Authenticate: authenticateFiber})
 	fiberServer := wsFiber.NewServer(8080, fiberHandler)
 	fiberServer.SetupRoutes()
 	go fiberServer.Start()
 
 	// B. Gin Adapter Setup
-	ginHandler := wsGin.NewHandler()
+	ginHandler := wsGin.NewHandler(wsGin.Config{Authenticate: authenticateGin})
 	r := gin.Default()
 	r.GET("/ws", ginHandler.HandleUpgrade)
 
 	// C. Echo Adapter Setup
-	echoHandler := wsEcho.NewHandler()
+	echoHandler := wsEcho.NewHandler(wsEcho.Config{Authenticate: authenticateEcho})
 	e := echo.New()
 	e.GET("/ws", echoHandler.HandleUpgrade)
 }
 ```
+
+### Security defaults
+
+- An explicit `Authenticate` callback is required. Without one, upgrade requests are rejected; query parameters are never treated as authenticated identities automatically.
+- The standard-library, Gin, Echo, and Fiber adapters default to same-origin browser connections. For intentional cross-origin use, supply a strict allowlist through Gorilla's `Upgrader.CheckOrigin` or Fiber's `Config.CheckOrigin`.
+- The Fiber server does not trust proxy headers by default. Configure `TrustedProxies`, `EnableTrustedProxyCheck`, and `ProxyHeader` explicitly when deploying behind known proxies.
+- Every adapter exposes `Config.ConnectionKey`. Use it to select a direct peer,
+  a framework IP resolved through an explicit trusted-proxy policy, or an
+  authenticated account key for concurrent connection limits.
+- Operational handlers such as `HandleStats` and `HandleShardManagement` are not registered by `fiber.Server.SetupRoutes`. Register them explicitly behind application administrator authorization. The Gin, Echo, and `net/http` examples also omit these routes by default.
+- Health output includes runtime topology metadata. Expose it only on an internal listener or protect it when that metadata is sensitive.
+
+### Panic recovery
+
+Wrap the HTTP upgrade routes with the matching recovery middleware from `web/middleware/nethttp`, `web/middleware/fiber`, `web/middleware/gin`, or `web/middleware/echo`. These middlewares return a safe HTTP 500 response and record a structured panic report before the WebSocket handshake is committed.
+
+After a successful upgrade, framework middleware cannot recover panics from the connection goroutine. Each adapter and the core read/write pumps therefore use the framework-independent `recovery` package directly. These recovery boundaries log the panic type and message, origin file/line/function, bounded stack trace, and available connection metadata, then perform connection cleanup. Panic diagnostics are never sent to the WebSocket peer.
+
+Runtime event, shard, worker, Redis, and NATS boundaries use the same structured
+recovery path. Logs contain correlation and routing metadata but never include
+WebSocket frames or pub/sub payload data.
+
+| Boundary | Panic policy | Cleanup / continuation |
+|---|---|---|
+| HTTP upgrade | Return safe HTTP 500 | Request ends before upgrade |
+| Adapter connection | Stop connection goroutine | Close socket and release connection-limit slot |
+| Core read/write pump | Stop failed pump | Unregister or close the connection |
+| Business event handler | Discard failed invocation | Future events continue; no automatic retry |
+| Worker task | Discard failed task | Worker remains available for later tasks |
+| Shard run loop | Discard the consumed operation | Restart loop unless shard context is canceled |
+| Shard cleanup pass | Abort failed pass | Next scheduled cleanup still runs |
+| Redis listener | Stop failed listener | Remove and close its subscription so explicit resubscribe can succeed |
+| Redis/NATS message handler | Discard failed invocation | Subscription and future messages continue |
+| Redis/NATS loopback handler | Discard failed invocation | Standalone mode continues |
+
+Shard operations are not replayed after panic. Applications requiring retries
+must implement idempotency and retry semantics at the business-message layer.
+Redis and NATS default clients are discovered through non-panicking
+`LookupDefault` accessors; absence selects standalone loopback mode.
 
 ### Key types
 
