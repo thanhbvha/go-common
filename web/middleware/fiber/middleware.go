@@ -13,15 +13,24 @@ package fibermw
 
 import (
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/recover"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
 	"github.com/thanhbvha/go-common/xerrors"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Recover enables Fiber's built-in Recover middleware to prevent crashes on panics
+// Recover prevents handler panics from crashing the process, logs a structured
+// framework-independent report, and returns a safe JSON response.
 func Recover() fiber.Handler {
-	return recover.New()
+	return func(c *fiber.Ctx) (err error) {
+		defer panicrecovery.Catch(func(report panicrecovery.Report) {
+			requestID, _ := c.Locals("request_id").(string)
+			recoveryhttp.Log(c.UserContext(), requestID, report)
+			err = c.Status(recoveryhttp.StatusCode).JSON(recoveryhttp.NewResponse(requestID))
+		})
+		return c.Next()
+	}
 }
 
 // Telemetry creates an OpenTelemetry span for every incoming HTTP request.

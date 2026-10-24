@@ -12,6 +12,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
 | `config` | Environment variable and configuration file loader (Viper wrapper) |
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
+| `recovery` | Framework-independent structured panic capture with Fiber / Gin / Echo middleware adapters |
 | `redis` | Redis client wrapper (single / cluster / sentinel) with health-check |
 | `nats` | NATS client wrapper — Core Pub/Sub, JetStream streams/consumers, KV Store |
 | `kafka` | Apache Kafka client wrapper (franz-go) — Producer, Consumer, Admin, TLS/SASL |
@@ -21,7 +22,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `websocket` | Clustered, framework-agnostic real-time WebSocket server (Fiber / Gin / Echo) |
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
-| `web` | Web core utilities (standard response, validator, Fiber middlewares) |
+| `web` | Web core utilities (standard response, validator, Fiber / Gin / Echo middleware adapters) |
 | `graphql` | Framework-agnostic GraphQL engine with Go 1.22+ Generic DataLoader & Telemetry |
 | `utils` | Go Generics toolset (slice, maps, str), Cryptography (AES, ChaCha20, Argon2id, Hashing), and Graceful Shutdown |
 | `cache` | Multi-tier Caching (Ristretto Local + Redis Remote) & Redis Distributed Lock |
@@ -57,6 +58,7 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`logger`](./logger/README.md)
 - [`config`](./config/README.md)
 - [`xerrors`](./xerrors/README.md)
+- [`recovery`](./recovery/README.md)
 - [`redis`](./redis/README.md)
 - [`nats`](./nats/README.md)
 - [`kafka`](./kafka/README.md)

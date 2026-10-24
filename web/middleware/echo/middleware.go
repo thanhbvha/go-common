@@ -2,14 +2,27 @@ package echomw
 
 import (
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Recover enables Echo's built-in Recovery middleware to prevent crashes on panics
+// Recover prevents handler panics from crashing the process, logs a structured
+// framework-independent report, and returns a safe JSON response.
 func Recover() echo.MiddlewareFunc {
-	return middleware.Recover()
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) (err error) {
+			defer panicrecovery.Catch(func(report panicrecovery.Report) {
+				requestID, _ := c.Get("request_id").(string)
+				recoveryhttp.Log(c.Request().Context(), requestID, report)
+				if !c.Response().Committed {
+					err = c.JSON(recoveryhttp.StatusCode, recoveryhttp.NewResponse(requestID))
+				}
+			})
+			return next(c)
+		}
+	}
 }
 
 // Telemetry creates an OpenTelemetry span for every incoming HTTP request in Echo.

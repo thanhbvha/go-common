@@ -34,3 +34,13 @@ app.Post("/users", func(c *fiber.Ctx) error {
     return fiberresp.Success(c, req)
 })
 ```
+
+## Panic recovery
+
+The Fiber, Gin, and Echo `Recover` middleware adapters use the shared
+framework-independent `recovery` package. A recovered panic is logged with its
+bounded message, type, origin file/line/function, and structured stack. Clients
+receive only a generic `INTERNAL_ERROR` response and the current request ID.
+
+Recovery applies only to the request goroutine. Application-created goroutines
+must install their own `defer recovery.Catch(...)` boundary.

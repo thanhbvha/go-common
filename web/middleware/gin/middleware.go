@@ -2,13 +2,27 @@ package ginmw
 
 import (
 	"github.com/gin-gonic/gin"
+	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Recover enables Gin's built-in Recovery middleware to prevent crashes on panics
+// Recover prevents handler panics from crashing the process, logs a structured
+// framework-independent report, and returns a safe JSON response.
 func Recover() gin.HandlerFunc {
-	return gin.Recovery()
+	return func(c *gin.Context) {
+		defer panicrecovery.Catch(func(report panicrecovery.Report) {
+			requestID, _ := c.Get("request_id")
+			requestIDString, _ := requestID.(string)
+			recoveryhttp.Log(c.Request.Context(), requestIDString, report)
+			c.Abort()
+			if !c.Writer.Written() {
+				c.JSON(recoveryhttp.StatusCode, recoveryhttp.NewResponse(requestIDString))
+			}
+		})
+		c.Next()
+	}
 }
 
 // Telemetry creates an OpenTelemetry span for every incoming HTTP request in Gin.
