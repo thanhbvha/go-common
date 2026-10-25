@@ -49,26 +49,34 @@ Do not use best-effort WebSocket delivery as the only record for payments, ledge
 
 ```mermaid
 flowchart LR
-    Client[WebSocket client] --> Adapter[net/http, Gin, Echo, or Fiber adapter]
-    Adapter --> Auth[Authentication, origin policy, and upgrade limits]
-    Auth --> Manager[core.Manager]
-    Manager --> Shard[core.Shard]
+    Client["WebSocket client"] --> Adapter["HTTP adapter: net/http, Gin, Echo, or Fiber"]
+    Adapter --> Auth["Authentication, origin policy, and upgrade limits"]
+    Auth --> Manager["core.Manager"]
+    Manager --> Shard["core.Shard"]
 
-    subgraph Connection lifecycle
-        Reader[read pump] --> Inbound[bounded shard inbound queue]
-        Writer[write pump] <-- SendQueue[bounded connection send queue]
+    subgraph ConnectionLifecycle["Connection lifecycle"]
+        Reader["Read pump"] --> Inbound["Bounded shard inbound queue"]
+        SendQueue["Bounded connection send queue"] --> Writer["Write pump"]
     end
 
     Shard --> Reader
     Shard --> SendQueue
-    Inbound --> Registry[EventRegistry validation and authorization]
-    Registry --> Executor[partitioned bounded executor]
-    Executor --> Supervisor[bounded handler supervisor]
-    Supervisor --> Handler[application handler]
+    Inbound --> Registry["EventRegistry validation and authorization"]
+    Registry --> Executor["Partitioned bounded executor"]
+    Executor --> Supervisor["Bounded handler supervisor"]
+    Supervisor --> Handler["Application handler"]
+    Handler --> SendQueue
+    Writer --> Client
 
-    Manager <--> Broker[Noop, Redis Pub/Sub, or NATS]
-    Broker <--> Peers[peer application nodes]
+    Manager --> Broker["Optional Redis Pub/Sub or NATS broker"]
+    Broker --> Manager
+    Broker --> Peers["Peer application nodes"]
+    Peers --> Broker
 ```
+
+The adapter authenticates and upgrades the request before the manager admits the connection and assigns it to a shard. Inbound events pass through bounded queues, registry validation and authorization, partitioned execution, and bounded handler supervision. Handler responses and shard fan-out share the connection's bounded send queue and write pump.
+
+The broker path is optional and best-effort. In single-node mode the manager uses the no-op pub/sub implementation, so no external broker or peer nodes participate.
 
 ### Manager
 
