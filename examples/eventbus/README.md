@@ -132,7 +132,7 @@ The administrator prefers cursor pagination when a driver advertises it. Kafka
 DLQ purge is logical: it advances an administration cursor, while physical log
 records remain until broker retention removes them. Kafka requeue requires
 complete per-partition prefixes and administrator operations must be serialized
-across processes. See `eventbus/driver/kafka/ADMIN.md` for the full model.
+across processes.
 
 ## OpenTelemetry and operations dashboard
 
@@ -147,8 +147,7 @@ It demonstrates the canonical OTel instruments and W3C trace propagation while
 using batch enqueue, pause, topology drain, resume, a local rate limit,
 ordering-key concurrency policy, and payload-size limit. Import
 `eventbus/dashboards/grafana-eventbus.json` after confirming your collector's
-Prometheus name translation. The panel meanings, suggested alerts, stats polling
-rules, and trace triage procedure are documented in `eventbus/OPERATIONS.md`.
+Prometheus name translation.
 
 ## Capability notes
 
@@ -190,6 +189,5 @@ namespace and supplying the explicit confirmation flag.
 
 `./examples/eventbus/benchmark` runs the Phase 6 payload, concurrency, immediate,
 delayed, and retry matrix against any configured driver and emits machine-readable
-JSON. `run-matrix.ps1` executes all 36 combinations. See
-`eventbus/BENCHMARKS.md` before using `--preload` for 100,000/1,000,000-message
-backlogs; durable test data is not automatically deleted.
+JSON. `run-matrix.ps1` executes all 36 combinations. Durable preload data is not
+automatically deleted; use only disposable infrastructure for large backlogs.

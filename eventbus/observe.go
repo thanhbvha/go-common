@@ -79,12 +79,6 @@ func (e *engine) traceSettlement(ctx context.Context, decision, outcome string) 
 	}
 }
 
-func (e *engine) traceEvent(ctx context.Context, name string, attributes map[string]string) {
-	if recorder, ok := e.cfg.Tracer.(TraceRecorder); ok {
-		recorder.RecordEvent(ctx, name, attributes)
-	}
-}
-
 func metricsName(name, subscriber string) string {
 	if subscriber != "" {
 		return name + "_" + subscriber

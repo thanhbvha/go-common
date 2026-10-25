@@ -21,8 +21,7 @@ func BenchmarkCodecEncode(b *testing.B) {
 	payload := benchmarkPayload{ID: 9_007_199_254_740_993, Name: "benchmark", Enabled: true}
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := codec.Encode("benchmark.codec", payload, 5); err != nil {
 			b.Fatal(err)
 		}
@@ -39,8 +38,7 @@ func BenchmarkCodecDecode(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(data)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := codec.Decode(data); err != nil {
 			b.Fatal(err)
 		}
@@ -60,13 +58,11 @@ func BenchmarkEnqueue(b *testing.B) {
 	payload := benchmarkPayload{ID: 42, Name: "benchmark", Enabled: true}
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := bus.Enqueue(context.Background(), "benchmark.enqueue", payload); err != nil {
 			b.Fatal(err)
 		}
 	}
-	b.StopTimer()
 	if got := sink.published.Load(); got != int64(b.N) {
 		b.Fatalf("published = %d, want %d", got, b.N)
 	}
@@ -97,14 +93,12 @@ func BenchmarkEngineDispatch(b *testing.B) {
 
 	payload := benchmarkPayload{ID: 42, Name: "benchmark", Enabled: true}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := bus.Enqueue(ctx, "benchmark.dispatch", payload); err != nil {
 			b.Fatal(err)
 		}
 		<-completed
 	}
-	b.StopTimer()
 	if err := bus.Stop(context.Background()); err != nil {
 		b.Fatal(err)
 	}
@@ -134,8 +128,7 @@ func BenchmarkMemoryTransportRoundTrip(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(msg.Payload)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := t.Publish(ctx, topo, msg); err != nil {
 			b.Fatal(err)
 		}
@@ -144,7 +137,6 @@ func BenchmarkMemoryTransportRoundTrip(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	b.StopTimer()
 	cancel()
 	select {
 	case <-consumeDone:

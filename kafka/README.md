@@ -88,8 +88,7 @@ franz-go's synchronous commit APIs only after processing succeeds.
 
 The EventBus Kafka adapter always uses manual, synchronous commits for main and
 delay consumers, regardless of `ConsumerCommitInterval`. Its delayed scheduler
-uses three durable tier topics and a bounded per-sweep batch; see
-`eventbus/driver/kafka/SCHEDULER.md` in this module.
+uses three durable tier topics and a bounded per-sweep batch.
 
 ## Admin operations
 

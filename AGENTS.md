@@ -7,7 +7,7 @@
 
 - Core packages are framework-independent; HTTP/auth/GraphQL/WebSocket integrations live in framework-specific adapter or middleware subpackages. Keep framework types in those integrations.
 - `foundation.App` runs startup hooks sequentially: hooks must return rather than serve/block inline. Its shutdown hooks execute LIFO. `utils/graceful` also has a separate global shutdown registry; do not assume a global registration joins an App instance's registry.
-- EventBus wiring starts at `eventbus.Open` -> registry or `WithTransport` -> engine -> `eventbus/transport` -> driver. Keep it distinct from the existing `queue`, `queue_nats`, and `queue_kafka` APIs. Read `eventbus/TESTING.md` before changing its tests.
+- EventBus wiring starts at `eventbus.Open` -> registry or `WithTransport` -> engine -> `eventbus/transport` -> driver.
 - Configuration uses Viper through `config.Load`/`LoadEnv`; set `AutomaticEnv` explicitly or use `DefaultOptions()` (a zero-value `Options` does not enable it). Nested dots/dashes map to underscores, with an optional `EnvPrefix`.
 
 ## Commands and verification
