@@ -1,0 +1,47 @@
+services:
+  redis-single:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  redis-cluster:
+    image: redis:7-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        for port in 7000 7001 7002; do
+          mkdir -p /data/$${port}
+          redis-server \
+            --port $${port} \
+            --bind 0.0.0.0 \
+            --protected-mode no \
+            --appendonly yes \
+            --appendfsync always \
+            --cluster-enabled yes \
+            --cluster-config-file /data/$${port}/nodes.conf \
+            --cluster-node-timeout 5000 \
+            --cluster-announce-ip 127.0.0.1 \
+            --cluster-announce-port $${port} \
+            --cluster-announce-bus-port $$((port + 10000)) \
+            --dir /data/$${port} &
+        done
+        until redis-cli -p 7000 ping >/dev/null 2>&1 && redis-cli -p 7001 ping >/dev/null 2>&1 && redis-cli -p 7002 ping >/dev/null 2>&1; do
+          sleep 0.1
+        done
+        yes yes | redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 --cluster-replicas 0
+        wait
+    ports:
+      - "7000-7002:7000-7002"
+      - "17000-17002:17000-17002"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p 7000 cluster info | grep -q 'cluster_state:ok'"]
+      interval: 1s
+      timeout: 1s
+      retries: 60

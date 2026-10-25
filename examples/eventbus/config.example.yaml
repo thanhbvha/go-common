@@ -1,0 +1,8 @@
+driver: memory
+namespace: example_eventbus_v2
+redis_addr: 127.0.0.1:6379
+nats_urls: nats://127.0.0.1:4222
+kafka_brokers: 127.0.0.1:9092
+kafka_tls: false
+kafka_sasl_mechanism: ""
+wait: 0s

@@ -14,6 +14,9 @@ A production-ready Apache Kafka client for `go-common`, built on top of
 - **Structured logging** — pluggable `Logger` interface (compatible with `go-common/logger`)
 - **Graceful shutdown** — `Flush` before `Close` to avoid data loss
 
+- **Native client factory** — role-specific clients inherit one immutable
+  broker, TLS/SASL, client-ID, timeout, retry, and batching configuration
+
 ## Quick start
 
 ```go
@@ -46,6 +49,27 @@ cfg.SASLUsername        = os.Getenv("KAFKA_USER")
 cfg.SASLPassword        = os.Getenv("KAFKA_PASSWORD")
 ```
 
+`SASLOAuthBearer` currently supports a static `SASLToken`. A configured token
+URL without a static token is rejected; automatic token-endpoint exchange is
+not implemented.
+
+Use `NewNativeClientFactory` when a framework integration needs separate
+producer and consumer instances without duplicating security options:
+
+```go
+factory, err := kafka.NewNativeClientFactory(cfg)
+producer, err := factory.NewProducer()
+consumer, err := factory.NewConsumer(
+    kgo.ConsumerGroup("workers"),
+    kgo.ConsumeTopics("jobs"),
+)
+```
+
+Integrations that coordinate offsets themselves should use
+`NewManualConsumer`; it preserves the same connection, security, session, and
+fetch settings while disabling auto-commit. The caller must commit with
+franz-go's synchronous commit APIs only after processing succeeds.
+
 ## Configuration reference
 
 | Field | Default | Description |
@@ -55,12 +79,16 @@ cfg.SASLPassword        = os.Getenv("KAFKA_PASSWORD")
 | `SecurityProtocol` | `Plaintext` | `Plaintext` / `SSL` / `SASLPlaintext` / `SASLSSL` |
 | `SASLMechanism` | `SASLNone` | `SASLPlain` / `SASLSCRAMSHA256` / `SASLSCRAMSHA512` / `SASLOAuthBearer` |
 | `ProducerAcks` | `-1` | `-1`=all replicas, `1`=leader, `0`=none |
-| `ProducerIdempotent` | `true` | Exactly-once produce semantics |
+| `ProducerIdempotent` | `true` | Idempotent produce; requires `ProducerAcks=-1`; `false` disables it |
 | `ProducerCompression` | `"snappy"` | `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `ConsumerGroup` | `""` | Consumer group ID (required for Subscribe) |
 | `ConsumerAutoOffsetReset` | `"earliest"` | `"earliest"` / `"latest"` |
 | `ConsumerCommitInterval` | `1s` | Auto-commit interval; `0` = manual commit |
 | `MaxConnRetries` | `3` | Connection attempts before error |
+
+The EventBus Kafka adapter always uses manual, synchronous commits for main and
+delay consumers, regardless of `ConsumerCommitInterval`. Its delayed scheduler
+uses three durable tier topics and a bounded per-sweep batch.
 
 ## Admin operations
 
