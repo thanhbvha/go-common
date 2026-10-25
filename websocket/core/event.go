@@ -1,13 +1,14 @@
-// package core contains the core WebSocket sharding, connection lifecycle, and manager logic.
 package core
 
 import (
+	"context"
+	stdjson "encoding/json"
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/websocket/pool"
 )
 
 // IncomingMessage represents the envelope for incoming payloads from a client.
@@ -23,19 +24,86 @@ type OutgoingMessage struct {
 	RequestID string      `json:"request_id,omitempty"`
 }
 
-// JobHandler defines a callback function that handles a specific incoming message type.
+// JobHandler is the compatibility handler signature.
 type JobHandler func(conn *Connection, msg IncomingMessage) error
 
+// ContextJobHandler is a cancellation-aware business event callback.
+type ContextJobHandler func(ctx context.Context, conn *Connection, msg IncomingMessage) error
+
+type handlerRegistration struct {
+	run             ContextJobHandler
+	timeout         time.Duration
+	maxPayloadBytes int
+	validate        func([]byte) error
+}
+
+// EventStats reports cumulative bounded dispatch outcomes.
+type EventStats struct {
+	Malformed uint64
+	Unknown   uint64
+	Submitted uint64
+	Dropped   uint64
+	Errors    uint64
+	Timeouts  uint64
+	Panics    uint64
+}
+
+type EventRegistry struct {
+	mu       sync.RWMutex
+	handlers map[string]handlerRegistration
+}
+
+func NewEventRegistry() *EventRegistry {
+	return &EventRegistry{handlers: make(map[string]handlerRegistration)}
+}
+
 var (
-	handlersMu sync.RWMutex
-	handlers   = map[string]JobHandler{}
+	defaultEventRegistry = NewEventRegistry()
 )
 
-// RegisterHandler binds an event type to a specific JobHandler callback in a thread-safe manner.
+// RegisterHandler binds a compatibility handler with the default timeout.
 func RegisterHandler(eventType string, handler JobHandler) {
-	handlersMu.Lock()
-	defer handlersMu.Unlock()
-	handlers[eventType] = handler
+	RegisterContextHandler(eventType, 30*time.Second, func(_ context.Context, conn *Connection, msg IncomingMessage) error {
+		return handler(conn, msg)
+	})
+}
+
+// RegisterContextHandler binds a context-aware handler and invocation timeout.
+// Handlers must observe ctx for timeout cancellation; the executor never creates
+// an unbounded goroutine to forcibly abandon a non-cooperative handler.
+func RegisterContextHandler(eventType string, timeout time.Duration, handler ContextJobHandler) {
+	RegisterHandlerConfig(eventType, HandlerConfig{Timeout: timeout, Handler: handler})
+}
+
+// RegisterHandlerConfig registers validation, timeout, authorization and execution policy.
+func RegisterHandlerConfig(eventType string, config HandlerConfig) {
+	handler := config.Handler
+	if eventType == "" || handler == nil {
+		return
+	}
+	if config.Timeout <= 0 {
+		config.Timeout = 30 * time.Second
+	}
+	defaultEventRegistry.Register(eventType, config)
+}
+
+func (r *EventRegistry) Register(eventType string, config HandlerConfig) {
+	if r == nil || eventType == "" || config.Handler == nil {
+		return
+	}
+	if config.Timeout <= 0 {
+		config.Timeout = 30 * time.Second
+	}
+	r.mu.Lock()
+	r.handlers[eventType] = handlerRegistration{run: config.Handler, timeout: config.Timeout, maxPayloadBytes: config.MaxPayloadBytes, validate: config.Validate}
+	r.mu.Unlock()
+}
+
+func (r *EventRegistry) lookup(eventType string) (handlerRegistration, bool) {
+	r.mu.RLock()
+	registration, ok := r.handlers[eventType]
+	r.mu.RUnlock()
+	return registration, ok
 }
 
 // EventMessage represents a raw incoming payload coupled with its source Connection.
@@ -44,45 +112,100 @@ type EventMessage struct {
 	Raw  []byte
 }
 
-// HandleEvent unmarshals the raw message envelope and dispatches the task to the registered handler asynchronously.
+// HandleEvent parses and submits an event to the bounded per-manager executor.
 func HandleEvent(ev *EventMessage) {
 	if ev == nil || ev.Conn == nil {
 		return
 	}
 
 	var inc IncomingMessage
-	if err := json.Unmarshal(ev.Raw, &inc); err != nil {
-		logger.ErrorAsync("Failed to unmarshal incoming message", "error", err, "shard", ev.Conn.shard.name, "userID", ev.Conn.userID, "payloadBytes", len(ev.Raw))
+	observer := ev.Conn.shard.observer()
+	if !stdjson.Valid(ev.Raw) {
+		observer.EventMalformed()
+		ev.Conn.malformedMessages.Add(1)
+		return
+	}
+	if err := json.Unmarshal(ev.Raw, &inc); err != nil || inc.Type == "" {
+		observer.EventMalformed()
+		ev.Conn.malformedMessages.Add(1)
 		return
 	}
 
-	if inc.Type == "" {
-		logger.ErrorAsync("No event type specified in incoming message", "shard", ev.Conn.shard.name, "userID", ev.Conn.userID)
+	registry := ev.Conn.shard.eventRegistry()
+	registration, ok := registry.lookup(inc.Type)
+	if !ok {
+		observer.EventUnknown()
+		return
+	}
+	if registration.maxPayloadBytes > 0 && len(inc.Data) > registration.maxPayloadBytes {
+		observer.EventMalformed()
+		ev.Conn.malformedMessages.Add(1)
+		return
+	}
+	if registration.validate != nil && registration.validate(inc.Data) != nil {
+		observer.EventMalformed()
+		ev.Conn.malformedMessages.Add(1)
+		return
+	}
+	if err := ev.Conn.shard.authorizer().CanPublish(ev.Conn.ctx, ev.Conn.identity, inc.Type); err != nil {
+		observer.EventDropped()
+		return
+	}
+	if !ev.Conn.tryAcquireHandler() {
+		observer.EventDropped()
+		return
+	}
+	executor := ev.Conn.shard.coordinator.GetEventExecutor()
+	if executor == nil {
+		ev.Conn.releaseHandler()
+		observer.EventDropped()
 		return
 	}
 
-	handlersMu.RLock()
-	handler, ok := handlers[inc.Type]
-	handlersMu.RUnlock()
-
-	if ok {
-		// Execute handler in a separate goroutine to avoid blocking the shard processor loop
-		go func() {
-			defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
-				Component: "core.event_handler",
-				Operation: "dispatch",
-				EventType: inc.Type,
-				UserID:    ev.Conn.GetUserID(),
-				ClientIP:  ev.Conn.GetClientIP(),
-				RequestID: ev.Conn.GetRequestID(),
-				ShardID:   ev.Conn.GetShardID(),
-			}))
-
-			if err := handler(ev.Conn, inc); err != nil {
-				logger.ErrorAsync("Error executing event handler", "error", err, "eventType", inc.Type, "userID", ev.Conn.userID)
+	err := executor.Submit(ev.Conn.ctx, ev.Conn.connectionID, func(parent context.Context) (handlerErr error) {
+		defer ev.Conn.releaseHandler()
+		ctx, cancel := context.WithTimeout(parent, registration.timeout)
+		defer cancel()
+		finishTrace := func(error) {}
+		if tracer, ok := observer.(TraceObserver); ok {
+			ctx, finishTrace = tracer.StartEvent(ctx, inc.Type)
+		}
+		started := time.Now()
+		defer func() {
+			if latency, ok := observer.(LatencyObserver); ok {
+				latency.ObserveEventLatency(time.Since(started))
+			}
+			finishTrace(handlerErr)
+		}()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				observer.EventPanic()
+				panic(recovered)
 			}
 		}()
-	} else {
-		logger.ErrorAsync("No handler registered for event type", "eventType", inc.Type, "shard", ev.Conn.shard.name, "userID", ev.Conn.userID)
+		handlerErr = ev.Conn.shard.handlerSupervisor.Run(ctx, func(handlerCtx context.Context) error {
+			return registration.run(handlerCtx, ev.Conn, inc)
+		})
+		if errors.Is(handlerErr, context.DeadlineExceeded) {
+			observer.EventTimeout()
+		}
+		if handlerErr != nil {
+			observer.EventError()
+		}
+		return handlerErr
+	})
+	if err != nil {
+		ev.Conn.releaseHandler()
+		observer.EventDropped()
+		if !errors.Is(err, pool.ErrExecutorFull) && !errors.Is(err, pool.ErrExecutorStopped) {
+			observer.EventError()
+		}
+		return
 	}
+	observer.EventSubmitted()
+}
+
+// GetEventStats returns cumulative event dispatch counters.
+func GetEventStats() EventStats {
+	return defaultObserver.EventStats()
 }

@@ -21,6 +21,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -59,6 +60,9 @@ func Load(opts Options, target interface{}) error {
 
 	if opts.Path != "" {
 		v.SetConfigFile(opts.Path)
+		if filepath.Base(opts.Path) == ".env" {
+			v.SetConfigType("env")
+		}
 		err := v.ReadInConfig()
 		if err != nil {
 			if !opts.IgnoreFileNotFound {

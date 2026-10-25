@@ -20,8 +20,12 @@ import (
 
 // Config holds configuration for the standard net/http WebSocket adapter.
 type Config struct {
+	// Manager is the core manager used by this adapter.
+	Manager *core.Manager
 	// Authenticate resolves a user identifier from an upgrade request.
 	Authenticate func(*http.Request) (string, error)
+	// AuthenticateIdentity resolves a structured identity and takes precedence over Authenticate.
+	AuthenticateIdentity func(*http.Request) (core.Identity, error)
 	// Upgrader controls the WebSocket handshake. The default enforces same-origin.
 	Upgrader *websocket.Upgrader
 	// RateLimiter limits connection upgrade attempts.
@@ -35,7 +39,8 @@ type Config struct {
 
 // Handler serves WebSocket upgrade and operational HTTP endpoints.
 type Handler struct {
-	config Config
+	config  Config
+	manager *core.Manager
 }
 
 // NewHandler creates a standard-library WebSocket handler. Cross-origin use
@@ -66,24 +71,37 @@ func NewHandler(customConfig ...Config) *Handler {
 		config.ConnectionKey = func(r *http.Request, _ string) string { return httpkit.ClientIP(r) }
 	}
 
-	core.GetGlobalManager()
-	return &Handler{config: config}
+	if config.Manager == nil {
+		config.Manager = core.GetGlobalManager()
+	}
+	return &Handler{config: config, manager: config.Manager}
 }
 
 // HandleUpgrade authenticates, limits, and upgrades an HTTP request before
 // registering the connection with the core manager.
 func (h *Handler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
+	if !h.manager.IsAcceptingConnections() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service draining"})
+		return
+	}
 	if !websocket.IsWebSocketUpgrade(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "upgrade required"})
 		return
 	}
 
-	userID, err := h.config.Authenticate(r)
-	if err != nil || userID == "" {
+	identity := core.Identity{}
+	var err error
+	if h.config.AuthenticateIdentity != nil {
+		identity, err = h.config.AuthenticateIdentity(r)
+	} else {
+		identity.UserID, err = h.config.Authenticate(r)
+	}
+	if err != nil || identity.UserID == "" {
 		logger.WarnAsync("WebSocket connection upgrade unauthorized", "error", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	userID := identity.UserID
 
 	clientIP := h.config.ConnectionKey(r, userID)
 	if !h.config.RateLimiter.Allow() {
@@ -108,7 +126,7 @@ func (h *Handler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := getRequestID(r)
-	go h.handleConnection(conn, userID, clientIP, requestID)
+	go h.handleConnection(conn, identity, clientIP, requestID)
 }
 
 func getRequestID(r *http.Request) string {
@@ -118,7 +136,8 @@ func getRequestID(r *http.Request) string {
 	return r.Header.Get("X-Request-ID")
 }
 
-func (h *Handler) handleConnection(conn core.Conn, userID, clientIP, requestID string) {
+func (h *Handler) handleConnection(conn core.Conn, identity core.Identity, clientIP, requestID string) {
+	userID := identity.UserID
 	defer h.config.ConnectionLimiter.RemoveConnection(clientIP)
 	defer func() { _ = conn.Close() }()
 	defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
@@ -128,20 +147,18 @@ func (h *Handler) handleConnection(conn core.Conn, userID, clientIP, requestID s
 		RequestID: requestID,
 	}))
 
-	manager := core.GetGlobalManager()
-	shardID := manager.GetShardID(userID)
-	if err := manager.HandleConnection(conn, shardID, userID, clientIP, requestID); err != nil {
+	shardID := h.manager.GetShardID(userID)
+	if err := h.manager.HandleIdentityConnection(conn, shardID, identity, clientIP, requestID); err != nil {
 		logger.ErrorAsync("Failed to handle WebSocket connection in manager", "error", err, "userID", userID)
 	}
 }
 
 // HandleStats returns manager, limiter, and pubsub runtime statistics.
 func (h *Handler) HandleStats(w http.ResponseWriter, _ *http.Request) {
-	manager := core.GetGlobalManager()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"manager":     manager.GetStats(),
+		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
-		"pubsub":      manager.GetPubSubManager().GetStats(),
+		"pubsub":      h.manager.GetPubSubManager().GetStats(),
 		"timestamp":   time.Now(),
 	})
 }
@@ -153,8 +170,7 @@ func (h *Handler) HandleShardManagement(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "shard ID required"})
 		return
 	}
-	manager := core.GetGlobalManager()
-	if shard, exists := manager.GetShard(shardID); exists {
+	if shard, exists := h.manager.GetShard(shardID); exists {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"shardID": shardID, "connections": shard.GetConnectionCount(), "exists": true,
 		})
@@ -165,17 +181,12 @@ func (h *Handler) HandleShardManagement(w http.ResponseWriter, r *http.Request) 
 
 // HandleHealthCheck reports manager and cluster node health metadata.
 func (h *Handler) HandleHealthCheck(w http.ResponseWriter, _ *http.Request) {
-	manager := core.GetGlobalManager()
-	stats := manager.GetStats()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":           "healthy",
-		"timestamp":        time.Now(),
-		"totalConnections": stats["totalConnections"],
-		"totalShards":      stats["totalShards"],
-		"memoryLimit":      stats["maxTotalConnections"],
-		"shardLimit":       stats["maxShards"],
-		"nodeID":           manager.GetPubSubManager().GetNodeID(),
-	})
+	readiness := h.manager.Readiness()
+	status := http.StatusOK
+	if !readiness.Ready {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

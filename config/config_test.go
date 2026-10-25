@@ -106,3 +106,23 @@ func TestLoadEnvMissingFile(t *testing.T) {
 		t.Fatalf("LoadEnv failed when file is missing: %v", err)
 	}
 }
+
+func TestLoadDotEnvFile(t *testing.T) {
+	type DotEnvConfig struct {
+		Name         string `mapstructure:"name"`
+		DatabaseHost string `mapstructure:"database_host"`
+		DatabasePort int    `mapstructure:"database_port"`
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("NAME=DotEnvApp\nDATABASE_HOST=dotenv-host\nDATABASE_PORT=6380\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg DotEnvConfig
+	if err := config.LoadEnv(path, &cfg); err != nil {
+		t.Fatalf("LoadEnv failed: %v", err)
+	}
+	if cfg.Name != "DotEnvApp" || cfg.DatabaseHost != "dotenv-host" || cfg.DatabasePort != 6380 {
+		t.Fatalf("unexpected dotenv config: %+v", cfg)
+	}
+}

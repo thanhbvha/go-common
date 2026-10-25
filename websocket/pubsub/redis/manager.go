@@ -3,8 +3,11 @@ package redispubsub
 
 import (
 	"context"
+	stdjson "encoding/json"
 	"fmt"
+	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -13,18 +16,28 @@ import (
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/redis"
 	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/websocket/pool"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
 // Manager manages subscriptions and publication of messages across multiple instances in a cluster.
 type Manager struct {
-	redisClient *redis.Client
-	nodeID      string
-	subscribers map[string]*goredis.PubSub
-	handlers    map[string]func(*pubsub.CrossNodeMessage)
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
+	redisClient        *redis.Client
+	nodeID             string
+	subscribers        map[string]*goredis.PubSub
+	desired            map[string]struct{}
+	handlers           map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)
+	registrations      map[pubsub.HandlerRegistration]string
+	mu                 sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	executor           *pool.PartitionedExecutor
+	failurePolicy      pubsub.ClusterFailurePolicy
+	supervisorWG       sync.WaitGroup
+	reconnectAttempts  atomic.Uint64
+	reconnectSuccesses atomic.Uint64
+	reconnectFailures  atomic.Uint64
+	lastReconnectError string
 }
 
 var (
@@ -51,47 +64,92 @@ func NewManager() *Manager {
 		logger.WarnAsync("Redis default client not set. WebSocket PubSub will run in standalone loopback mode.")
 	}
 
-	return &Manager{
-		redisClient: client,
-		nodeID:      pubsub.GenerateNodeID(),
-		subscribers: make(map[string]*goredis.PubSub),
-		handlers:    make(map[string]func(*pubsub.CrossNodeMessage)),
-		ctx:         ctx,
-		cancel:      cancel,
+	manager := &Manager{
+		redisClient:   client,
+		nodeID:        pubsub.GenerateNodeID(),
+		subscribers:   make(map[string]*goredis.PubSub),
+		desired:       make(map[string]struct{}),
+		handlers:      make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
+		registrations: make(map[pubsub.HandlerRegistration]string),
+		ctx:           ctx,
+		cancel:        cancel,
+		executor:      pool.NewPartitionedExecutor(4, 256),
+		failurePolicy: pubsub.AllowStandalone,
 	}
+	manager.supervisorWG.Add(1)
+	go manager.superviseSubscriptions()
+	return manager
 }
 
 // NewManagerWithClient instantiates a new Manager with a custom, user-provided Redis client.
 func NewManagerWithClient(client *redis.Client) *Manager {
+	if client == nil {
+		return NewManagerWithClientAndPolicy(nil, pubsub.AllowStandalone)
+	}
+	return NewManagerWithClientAndPolicy(client, pubsub.StayUnready)
+}
+
+func NewManagerWithClientAndPolicy(client *redis.Client, policy pubsub.ClusterFailurePolicy) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Manager{
-		redisClient: client,
-		nodeID:      pubsub.GenerateNodeID(),
-		subscribers: make(map[string]*goredis.PubSub),
-		handlers:    make(map[string]func(*pubsub.CrossNodeMessage)),
-		ctx:         ctx,
-		cancel:      cancel,
+	manager := &Manager{
+		redisClient:   client,
+		nodeID:        pubsub.GenerateNodeID(),
+		subscribers:   make(map[string]*goredis.PubSub),
+		desired:       make(map[string]struct{}),
+		handlers:      make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
+		registrations: make(map[pubsub.HandlerRegistration]string),
+		ctx:           ctx,
+		cancel:        cancel,
+		executor:      pool.NewPartitionedExecutor(4, 256),
+		failurePolicy: policy,
 	}
+	manager.supervisorWG.Add(1)
+	go manager.superviseSubscriptions()
+	return manager
 }
 
 // RegisterHandler binds a callback handler to a specific cross-node message type.
-func (psm *Manager) RegisterHandler(messageType string, handler func(*pubsub.CrossNodeMessage)) {
+func (psm *Manager) RegisterHandler(messageType string, handler func(*pubsub.CrossNodeMessage)) pubsub.HandlerRegistration {
+	registration := pubsub.NewHandlerRegistration()
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
-	psm.handlers[messageType] = handler
+	if psm.handlers[messageType] == nil {
+		psm.handlers[messageType] = make(map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage))
+	}
+	psm.handlers[messageType][registration] = handler
+	psm.registrations[registration] = messageType
+	return registration
+}
+
+func (psm *Manager) UnregisterHandler(registration pubsub.HandlerRegistration) {
+	psm.mu.Lock()
+	defer psm.mu.Unlock()
+	messageType, ok := psm.registrations[registration]
+	if !ok {
+		return
+	}
+	delete(psm.registrations, registration)
+	delete(psm.handlers[messageType], registration)
+	if len(psm.handlers[messageType]) == 0 {
+		delete(psm.handlers, messageType)
+	}
 }
 
 // Subscribe listens to the specified Redis channels and processes incoming messages.
 func (psm *Manager) Subscribe(channels ...string) error {
 	if psm.redisClient == nil {
-		return nil // No-op in standalone/test mode
+		if psm.failurePolicy == pubsub.AllowStandalone {
+			return nil
+		}
+		return fmt.Errorf("redis client is not configured")
 	}
 
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 
 	for _, channel := range channels {
+		psm.desired[channel] = struct{}{}
 		if _, exists := psm.subscribers[channel]; exists {
 			continue // Already subscribed
 		}
@@ -120,6 +178,7 @@ func (psm *Manager) Unsubscribe(channels ...string) error {
 	defer psm.mu.Unlock()
 
 	for _, channel := range channels {
+		delete(psm.desired, channel)
 		pubsub, exists := psm.subscribers[channel]
 		if !exists {
 			continue
@@ -180,6 +239,9 @@ func (psm *Manager) cleanupSubscription(channel string, subscription *goredis.Pu
 
 // processMessage decodes and directs a single payload to its corresponding handler.
 func (psm *Manager) processMessage(channel, payload string) {
+	if !stdjson.Valid([]byte(payload)) {
+		return
+	}
 	var message pubsub.CrossNodeMessage
 	if err := json.Unmarshal([]byte(payload), &message); err != nil {
 		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "channel", channel, "payloadBytes", len(payload))
@@ -192,36 +254,50 @@ func (psm *Manager) processMessage(channel, payload string) {
 	}
 
 	psm.mu.RLock()
-	handler, exists := psm.handlers[message.Type]
+	handlers := copyHandlers(psm.handlers[message.Type])
 	psm.mu.RUnlock()
 
-	if !exists {
+	if len(handlers) == 0 {
 		logger.WarnAsync("No handler for message type", "type", message.Type, "channel", channel)
 		return
 	}
 
-	go func() {
-		defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.redis_message_handler", channel, &message)))
-
-		handler(&message)
-	}()
+	for _, handler := range handlers {
+		handler := handler
+		_ = psm.executor.Submit(psm.ctx, messagePartitionKey(&message), func(context.Context) error {
+			defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.redis_message_handler", channel, &message)))
+			handler(&message)
+			return nil
+		})
+	}
 }
 
 // Publish transmits a pubsub.CrossNodeMessage to the specified Redis channel.
 func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) error {
+	if message.ID == "" {
+		message.ID = pubsub.GenerateNodeID()
+	}
+	if message.Version == 0 {
+		message.Version = 1
+	}
 	message.NodeID = psm.nodeID
 	message.Timestamp = time.Now()
 
 	if psm.redisClient == nil {
+		if psm.failurePolicy != pubsub.AllowStandalone {
+			return fmt.Errorf("redis cluster backend unavailable")
+		}
 		// Standalone/in-memory loopback mode
 		psm.mu.RLock()
-		handler, exists := psm.handlers[message.Type]
+		handlers := copyHandlers(psm.handlers[message.Type])
 		psm.mu.RUnlock()
-		if exists {
-			go func() {
+		for _, handler := range handlers {
+			handler := handler
+			_ = psm.executor.Submit(psm.ctx, messagePartitionKey(message), func(context.Context) error {
 				defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.redis_loopback_handler", channel, message)))
 				handler(message)
-			}()
+				return nil
+			})
 		}
 		return nil
 	}
@@ -379,12 +455,19 @@ func (psm *Manager) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"node_id":             psm.nodeID,
-		"subscribed_channels": len(psm.subscribers),
-		"channels":            channels,
-		"registered_handlers": len(psm.handlers),
-		"handlers":            handlers,
-		"mode":                "standalone/loopback",
+		"node_id":              psm.nodeID,
+		"subscribed_channels":  len(psm.subscribers),
+		"desired_channels":     len(psm.desired),
+		"channels":             channels,
+		"registered_handlers":  len(psm.registrations),
+		"handlers":             handlers,
+		"mode":                 map[bool]string{true: "redis", false: "standalone"}[psm.redisClient != nil],
+		"ready":                psm.readyLocked(),
+		"reconnect_state":      psm.reconnectStateLocked(),
+		"reconnect_attempts":   psm.reconnectAttempts.Load(),
+		"reconnect_successes":  psm.reconnectSuccesses.Load(),
+		"reconnect_failures":   psm.reconnectFailures.Load(),
+		"last_reconnect_error": psm.lastReconnectError,
 	}
 }
 
@@ -395,7 +478,6 @@ func (psm *Manager) Shutdown() error {
 	psm.cancel()
 
 	psm.mu.Lock()
-	defer psm.mu.Unlock()
 
 	for channel, pubsub := range psm.subscribers {
 		if err := pubsub.Close(); err != nil {
@@ -404,8 +486,134 @@ func (psm *Manager) Shutdown() error {
 	}
 
 	psm.subscribers = make(map[string]*goredis.PubSub)
-	psm.handlers = make(map[string]func(*pubsub.CrossNodeMessage))
+	psm.desired = make(map[string]struct{})
+	psm.handlers = make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage))
+	psm.registrations = make(map[pubsub.HandlerRegistration]string)
+	psm.mu.Unlock()
+	psm.supervisorWG.Wait()
+	_ = psm.executor.Shutdown(context.Background())
 
 	logger.InfoAsync("Pub/sub manager shutdown complete", "node_id", psm.nodeID)
 	return nil
+}
+
+func copyHandlers(source map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)) []func(*pubsub.CrossNodeMessage) {
+	handlers := make([]func(*pubsub.CrossNodeMessage), 0, len(source))
+	for _, handler := range source {
+		handlers = append(handlers, handler)
+	}
+	return handlers
+}
+
+func (psm *Manager) Ready() bool {
+	psm.mu.RLock()
+	defer psm.mu.RUnlock()
+	return psm.readyLocked()
+}
+
+func (psm *Manager) WaitReady(ctx context.Context) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if psm.Ready() {
+			return nil
+		}
+		select {
+		case <-psm.ctx.Done():
+			return pubsub.ErrManagerClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (psm *Manager) reconnectStateLocked() string {
+	select {
+	case <-psm.ctx.Done():
+		return "closed"
+	default:
+	}
+	if psm.readyLocked() {
+		return "ready"
+	}
+	if psm.redisClient == nil {
+		return "standalone"
+	}
+	if !psm.redisClient.IsConnected() {
+		return "disconnected"
+	}
+	return "recovering_subscriptions"
+}
+
+func (psm *Manager) readyLocked() bool {
+	if psm.redisClient == nil {
+		return psm.failurePolicy == pubsub.AllowStandalone
+	}
+	return psm.redisClient.IsConnected() && len(psm.desired) == len(psm.subscribers)
+}
+
+func (psm *Manager) superviseSubscriptions() {
+	defer psm.supervisorWG.Done()
+	backoff := 100 * time.Millisecond
+	for {
+		timer := time.NewTimer(backoff + time.Duration(rand.Int63n(int64(backoff)+1)))
+		select {
+		case <-psm.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			psm.reconnectAttempts.Add(1)
+			if err := psm.reconcileSubscriptions(); err != nil {
+				psm.reconnectFailures.Add(1)
+				psm.mu.Lock()
+				psm.lastReconnectError = err.Error()
+				psm.mu.Unlock()
+				backoff *= 2
+				if backoff > 5*time.Second {
+					backoff = 5 * time.Second
+				}
+			} else {
+				psm.reconnectSuccesses.Add(1)
+				psm.mu.Lock()
+				psm.lastReconnectError = ""
+				psm.mu.Unlock()
+				backoff = time.Second
+			}
+		}
+	}
+}
+
+func (psm *Manager) reconcileSubscriptions() error {
+	if psm.redisClient == nil || !psm.redisClient.IsConnected() {
+		if psm.failurePolicy == pubsub.AllowStandalone {
+			return nil
+		}
+		return fmt.Errorf("redis backend unavailable")
+	}
+	psm.mu.RLock()
+	missing := make([]string, 0)
+	for channel := range psm.desired {
+		if _, active := psm.subscribers[channel]; !active {
+			missing = append(missing, channel)
+		}
+	}
+	psm.mu.RUnlock()
+	if len(missing) > 0 {
+		return psm.Subscribe(missing...)
+	}
+	return nil
+}
+
+func messagePartitionKey(message *pubsub.CrossNodeMessage) string {
+	if message == nil {
+		return ""
+	}
+	if message.UserID != "" {
+		return "user:" + message.UserID
+	}
+	if message.RoomID != "" {
+		return "room:" + message.RoomID
+	}
+	return "shard:" + message.ShardID
 }

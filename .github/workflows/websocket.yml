@@ -1,0 +1,79 @@
+name: websocket
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go vet ./...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -count=10 ./websocket/core ./websocket/pool ./websocket/pubsub/... ./websocket/adapter/...
+
+  broker-integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      nats:
+        image: nats:2.11-alpine
+        ports: ["4222:4222"]
+    env:
+      WS_REDIS_INTEGRATION: "1"
+      WS_NATS_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -tags=integration -count=1 ./websocket/pubsub/redis ./websocket/pubsub/nats
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./websocket/core -run '^$' -fuzz FuzzIncomingEnvelope -fuzztime 20s
+      - run: go test ./websocket/core -run '^$' -fuzz FuzzConnectionLifecycle -fuzztime 20s
+      - run: go test ./websocket/pubsub -run '^$' -fuzz FuzzCrossNodeMessageDecode -fuzztime 20s
+
+  benchmark:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: mkdir -p artifacts
+      - run: go test -run '^$' -bench . -benchmem -count=5 ./websocket/core ./websocket/pubsub | tee artifacts/websocket-bench.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: websocket-benchmark
+          path: artifacts/websocket-bench.txt

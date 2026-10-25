@@ -1,10 +1,13 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/thanhbvha/go-common/websocket/pool"
 )
 
 func TestEventHandlerContinuesAfterPanic(t *testing.T) {
@@ -20,7 +23,10 @@ func TestEventHandlerContinuesAfterPanic(t *testing.T) {
 	})
 
 	transport := newMockConn()
-	connection := NewConnection(transport, &Shard{name: "shard-test"}, "user-test", "shard-test", "127.0.0.1", "node-test", "request-test")
+	coordinator := &lifecycleCoordinator{executor: pool.NewPartitionedExecutor(1, 16)}
+	t.Cleanup(func() { _ = coordinator.executor.Shutdown(context.Background()) })
+	shard := NewShard("shard-test", coordinator)
+	connection := NewConnection(transport, shard, "user-test", "shard-test", "127.0.0.1", "node-test", "request-test")
 	t.Cleanup(func() { connection.Close("test cleanup") })
 	raw := []byte(fmt.Sprintf(`{"type":%q,"data":{"secret":"panic-diagnostic-must-not-be-sent"}}`, eventType))
 
@@ -35,8 +41,8 @@ func TestEventHandlerContinuesAfterPanic(t *testing.T) {
 	}
 
 	select {
-	case frame := <-transport.writeChan:
-		t.Fatalf("panic diagnostics were written to client frame: %q", frame)
+	case frame := <-transport.writes:
+		t.Fatalf("panic diagnostics were written to client frame: %q", frame.data)
 	default:
 	}
 }

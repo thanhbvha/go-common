@@ -18,9 +18,13 @@ import (
 
 // Config holds the configuration options for the Fiber WebSocket adapter.
 type Config struct {
+	// Manager is the core manager used by this adapter.
+	Manager *core.Manager
 	// Authenticate resolves user identifiers from the Fiber context.
 	// Returns the UserID, or an error if unauthorized.
 	Authenticate func(c *fiber.Ctx) (string, error)
+	// AuthenticateIdentity resolves a structured identity and takes precedence over Authenticate.
+	AuthenticateIdentity func(c *fiber.Ctx) (core.Identity, error)
 	// CheckOrigin validates the browser Origin before upgrading. The default
 	// allows requests without Origin and same-origin requests only.
 	CheckOrigin func(c *fiber.Ctx) bool
@@ -35,7 +39,8 @@ type Config struct {
 
 // Handler manages the Fiber HTTP endpoints and upgrades connections to the core WebSocket manager.
 type Handler struct {
-	config Config
+	config  Config
+	manager *core.Manager
 }
 
 // NewHandler instantiates a new Fiber adapter Handler with the specified configuration.
@@ -60,14 +65,17 @@ func NewHandler(config Config) *Handler {
 		}
 	}
 
-	// Pre-initialize the core global manager with the specified pubsub adapter
-	core.GetGlobalManager()
-
-	return &Handler{config: config}
+	if config.Manager == nil {
+		config.Manager = core.GetGlobalManager()
+	}
+	return &Handler{config: config, manager: config.Manager}
 }
 
 // HandleUpgrade handles the Fiber WebSocket connection upgrade process and registers session wrapper inside the core manager.
 func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
+	if !h.manager.IsAcceptingConnections() {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "service draining"})
+	}
 	if !websocket.IsWebSocketUpgrade(c) {
 		logger.WarnAsync("Received non-websocket upgrade HTTP request")
 		return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{"error": "upgrade required"})
@@ -77,11 +85,18 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "origin not allowed"})
 	}
 
-	userID, err := h.config.Authenticate(c)
-	if err != nil || userID == "" {
+	identity := core.Identity{}
+	var err error
+	if h.config.AuthenticateIdentity != nil {
+		identity, err = h.config.AuthenticateIdentity(c)
+	} else {
+		identity.UserID, err = h.config.Authenticate(c)
+	}
+	if err != nil || identity.UserID == "" {
 		logger.WarnAsync("WebSocket connection upgrade unauthorized", "error", err)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
+	userID := identity.UserID
 
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
@@ -114,12 +129,11 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 
 		defer h.config.ConnectionLimiter.RemoveConnection(clientIP)
 
-		manager := core.GetGlobalManager()
-		shardID := manager.GetShardID(userID)
+		shardID := h.manager.GetShardID(userID)
 
 		adapterConn := NewConnAdapter(conn)
 
-		if err := manager.HandleConnection(adapterConn, shardID, userID, clientIP, requestID); err != nil {
+		if err := h.manager.HandleIdentityConnection(adapterConn, shardID, identity, clientIP, requestID); err != nil {
 			logger.ErrorAsync("Failed to handle WebSocket connection in manager", "error", err, "userID", userID)
 		}
 	})(c)
@@ -137,13 +151,10 @@ func getRequestID(c *fiber.Ctx) string {
 
 // HandleStats returns JSON-formatted runtime metrics of the Manager, pubsub system, and limiters.
 func (h *Handler) HandleStats(c *fiber.Ctx) error {
-	manager := core.GetGlobalManager()
-	pubsubManager := manager.GetPubSubManager()
-
 	return c.JSON(fiber.Map{
-		"manager":     manager.GetStats(),
+		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
-		"pubsub":      pubsubManager.GetStats(),
+		"pubsub":      h.manager.GetPubSubManager().GetStats(),
 		"timestamp":   time.Now(),
 	})
 }
@@ -155,8 +166,7 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "shard ID required"})
 	}
 
-	manager := core.GetGlobalManager()
-	if shard, exists := manager.GetShard(shardID); exists {
+	if shard, exists := h.manager.GetShard(shardID); exists {
 		return c.JSON(fiber.Map{
 			"shardID":     shardID,
 			"connections": shard.GetConnectionCount(),
@@ -169,16 +179,10 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 
 // HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
 func (h *Handler) HandleHealthCheck(c *fiber.Ctx) error {
-	manager := core.GetGlobalManager()
-	stats := manager.GetStats()
-
-	return c.JSON(fiber.Map{
-		"status":           "healthy",
-		"timestamp":        time.Now(),
-		"totalConnections": stats["totalConnections"],
-		"totalShards":      stats["totalShards"],
-		"memoryLimit":      stats["maxTotalConnections"],
-		"shardLimit":       stats["maxShards"],
-		"nodeID":           manager.GetPubSubManager().GetNodeID(),
-	})
+	readiness := h.manager.Readiness()
+	status := fiber.StatusOK
+	if !readiness.Ready {
+		status = fiber.StatusServiceUnavailable
+	}
+	return c.Status(status).JSON(fiber.Map{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
 }

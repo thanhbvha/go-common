@@ -2,15 +2,17 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/logger"
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/websocket/pool"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
 )
 
@@ -19,7 +21,6 @@ const (
 	broadcastChannelSize = 4096
 	incomingMessageSize  = 4096
 	maxConnections       = 100000
-	registerChannelSize  = 1000
 	cleanupInterval      = 30 * time.Second
 )
 
@@ -32,6 +33,7 @@ const (
 type ShardCoordinator interface {
 	GetShardID(userID string) string
 	GetPubSubManager() pubsub.Manager
+	GetEventExecutor() *pool.PartitionedExecutor
 	// DecrTotalConnections decrements the manager-level connection counter.
 	// Exposed via interface so Shard doesn't need a concrete *Manager reference.
 	DecrTotalConnections()
@@ -39,54 +41,95 @@ type ShardCoordinator interface {
 
 type Shard struct {
 	// activeConns tracks all physical WebSocket connections currently connected directly to this shard.
-	activeConns map[*Connection]bool
+	activeConns map[*Connection]struct{}
 
 	// userSessions maps an authenticated User ID to their active physical connections.
 	// This structure naturally supports multi-device/multi-tab logins (1-to-many relationship).
 	//   key:   userID (e.g. "user_123")
 	//   value: map of active Connection pointers belonging to this user
-	userSessions map[string]map[*Connection]bool
+	userSessions map[string]map[*Connection]struct{}
 
 	// chatRooms tracks logical pub/sub message rooms hosted within this shard.
 	//   key 1: roomID (e.g. "room_game_99")
 	//   key 2: userID (to fast-lookup users in this room)
 	//   value: connection pointer mapping
-	chatRooms map[string]map[string]map[*Connection]bool
+	chatRooms map[string]map[string]map[*Connection]struct{}
 
-	broadcast       chan []byte
-	incomingMessage chan *EventMessage
-	register        chan *Connection
-	unregister      chan *Connection
-	mu              sync.RWMutex
-	connectionCount int64
-	ctx             context.Context
-	cancel          context.CancelFunc
-	name            string // Shard unique identifier (e.g. "shard_0", "shard_1")
-	coordinator     ShardCoordinator
+	incomingMessage   chan *EventMessage
+	mu                sync.RWMutex
+	connectionCount   int64
+	ctx               context.Context
+	cancel            context.CancelFunc
+	name              string // Shard unique identifier (e.g. "shard_0", "shard_1")
+	coordinator       ShardCoordinator
+	config            ManagerConfig
+	handlerSupervisor *HandlerSupervisor
+	shutdownOnce      sync.Once
+	done              chan struct{}
 }
+
+var (
+	// ErrShardStopped indicates that an operation targeted a stopped shard.
+	ErrShardStopped = errors.New("websocket shard stopped")
+	// ErrConnectionInactive indicates that a room operation targeted a
+	// connection which is not active on that shard.
+	ErrConnectionInactive = errors.New("websocket connection is not active on shard")
+)
 
 // NewShard creates a new Shard instance with the specified name and registers cross-node PubSub handlers.
 func NewShard(name string, coordinator ShardCoordinator) *Shard {
 	ctx, cancel := context.WithCancel(context.Background())
-
-	shard := &Shard{
-		activeConns:     make(map[*Connection]bool),
-		userSessions:    make(map[string]map[*Connection]bool),
-		chatRooms:       make(map[string]map[string]map[*Connection]bool),
-		broadcast:       make(chan []byte, broadcastChannelSize),
-		incomingMessage: make(chan *EventMessage, incomingMessageSize),
-		register:        make(chan *Connection, registerChannelSize),
-		unregister:      make(chan *Connection, registerChannelSize),
-		ctx:             ctx,
-		cancel:          cancel,
-		name:            name,
-		coordinator:     coordinator,
+	config := coordinatorConfig(coordinator)
+	supervisor := NewHandlerSupervisor(config.MaxHandlerGoroutines)
+	if provider, ok := coordinator.(interface{ GetHandlerSupervisor() *HandlerSupervisor }); ok {
+		supervisor = provider.GetHandlerSupervisor()
 	}
 
-	shard.setupPubSubHandlers()
+	shard := &Shard{
+		activeConns:       make(map[*Connection]struct{}),
+		userSessions:      make(map[string]map[*Connection]struct{}),
+		chatRooms:         make(map[string]map[string]map[*Connection]struct{}),
+		incomingMessage:   make(chan *EventMessage, config.InboundQueueSize),
+		ctx:               ctx,
+		cancel:            cancel,
+		name:              name,
+		coordinator:       coordinator,
+		config:            config,
+		handlerSupervisor: supervisor,
+		done:              make(chan struct{}),
+	}
 
 	return shard
 }
+
+func coordinatorConfig(coordinator ShardCoordinator) ManagerConfig {
+	if configured, ok := coordinator.(interface{ GetConfig() ManagerConfig }); ok {
+		config := configured.GetConfig()
+		if config.EventExecutor == nil {
+			config.EventExecutor = coordinator.GetEventExecutor()
+		}
+		config, _ = normalizeManagerConfig(config)
+		return config
+	}
+	config, _ := normalizeManagerConfig(ManagerConfig{EventExecutor: coordinator.GetEventExecutor()})
+	return config
+}
+
+func (s *Shard) eventRegistry() *EventRegistry {
+	if configured, ok := s.coordinator.(interface{ GetEventRegistry() *EventRegistry }); ok {
+		return configured.GetEventRegistry()
+	}
+	return defaultEventRegistry
+}
+
+func (s *Shard) authorizer() Authorizer {
+	if configured, ok := s.coordinator.(interface{ GetAuthorizer() Authorizer }); ok {
+		return configured.GetAuthorizer()
+	}
+	return currentAuthorizer()
+}
+
+func (s *Shard) observer() Observer { return s.config.Observer }
 
 // GetConnectionCount returns the current number of active connections in the shard.
 func (s *Shard) GetConnectionCount() int64 {
@@ -95,82 +138,168 @@ func (s *Shard) GetConnectionCount() int64 {
 
 // CanAcceptConnection checks if the shard has headroom to accept another connection.
 func (s *Shard) CanAcceptConnection() bool {
-	return atomic.LoadInt64(&s.connectionCount) < maxConnections
+	return atomic.LoadInt64(&s.connectionCount) < s.config.MaxShardConnections
 }
 
 // SendToUser transmits a message directly to a user's active connection(s) on this shard.
 func (s *Shard) SendToUser(userID string, message []byte) {
+	message = bytes.Clone(message)
 	s.mu.RLock()
 	userConns, exists := s.userSessions[userID]
-	s.mu.RUnlock()
-
 	if !exists {
+		s.mu.RUnlock()
 		return
 	}
+	connections := make([]*Connection, 0, len(userConns))
+	for conn := range userConns {
+		connections = append(connections, conn)
+	}
+	s.mu.RUnlock()
 
 	var deadConnections []*Connection
-
-	for conn := range userConns {
+	for _, conn := range connections {
 		if conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 			continue
 		}
 
-		if !conn.Send(message) {
+		if !conn.sendShared(message) {
 			deadConnections = append(deadConnections, conn)
 		}
 	}
 
-	if len(deadConnections) > 0 {
-		go func() {
-			for _, conn := range deadConnections {
-				s.Unregister(conn)
-			}
-		}()
+	for _, conn := range deadConnections {
+		s.Unregister(conn)
 	}
 }
 
 // SendToRoom transmits a message to all users subscribed to a specific room.
 func (s *Shard) SendToRoom(roomID string, message []byte) {
+	message = bytes.Clone(message)
 	s.mu.RLock()
 	roomUsers, exists := s.chatRooms[roomID]
-	s.mu.RUnlock()
-
 	if !exists {
+		s.mu.RUnlock()
 		return
 	}
-
-	var deadConnections []*Connection
-
+	connections := make([]*Connection, 0)
 	for _, userConns := range roomUsers {
 		for conn := range userConns {
-			if conn.IsClosed() {
-				deadConnections = append(deadConnections, conn)
-				continue
-			}
+			connections = append(connections, conn)
+		}
+	}
+	s.mu.RUnlock()
 
-			if !conn.Send(message) {
-				deadConnections = append(deadConnections, conn)
-			}
+	var deadConnections []*Connection
+	for _, conn := range connections {
+		if conn.IsClosed() {
+			deadConnections = append(deadConnections, conn)
+			continue
+		}
+		if !conn.sendShared(message) {
+			deadConnections = append(deadConnections, conn)
 		}
 	}
 
-	if len(deadConnections) > 0 {
-		go func() {
-			for _, conn := range deadConnections {
-				s.Unregister(conn)
-			}
-		}()
+	for _, conn := range deadConnections {
+		s.Unregister(conn)
 	}
 }
 
-// Broadcast schedules a raw byte slice to be broadcast to all connections managed by this shard.
-func (s *Shard) Broadcast(message []byte) {
-	select {
-	case s.broadcast <- message:
-	default:
-		logger.WarnAsync("Broadcast channel full, dropping message", "shard", s.name)
+// JoinRoom idempotently adds an active connection to a logical room.
+func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) error {
+	if err := contextError(ctx); err != nil {
+		return err
 	}
+	if roomID == "" || conn == nil {
+		return ErrConnectionInactive
+	}
+	select {
+	case <-s.ctx.Done():
+		return ErrShardStopped
+	default:
+	}
+	if err := s.authorizer().CanSubscribe(ctx, conn.identity, roomID); err != nil {
+		return ErrUnauthorized
+	}
+	if !conn.addRoom(roomID) {
+		return ErrRoomLimit
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, active := s.activeConns[conn]; !active || conn.IsClosed() {
+		conn.removeRoom(roomID)
+		return ErrConnectionInactive
+	}
+	roomUsers, exists := s.chatRooms[roomID]
+	if !exists {
+		roomUsers = make(map[string]map[*Connection]struct{})
+		s.chatRooms[roomID] = roomUsers
+	}
+	userConns, exists := roomUsers[conn.userID]
+	if !exists {
+		userConns = make(map[*Connection]struct{})
+		roomUsers[conn.userID] = userConns
+	}
+	userConns[conn] = struct{}{}
+	return nil
+}
+
+// LeaveRoom idempotently removes a connection from a logical room.
+func (s *Shard) LeaveRoom(ctx context.Context, roomID string, conn *Connection) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if roomID == "" || conn == nil {
+		return nil
+	}
+	conn.removeRoom(roomID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	roomUsers, exists := s.chatRooms[roomID]
+	if !exists {
+		return nil
+	}
+	if userConns, exists := roomUsers[conn.userID]; exists {
+		delete(userConns, conn)
+		if len(userConns) == 0 {
+			delete(roomUsers, conn.userID)
+		}
+	}
+	if len(roomUsers) == 0 {
+		delete(s.chatRooms, roomID)
+	}
+	return nil
+}
+
+// GetRoomSize returns the number of active physical connections in a room.
+func (s *Shard) GetRoomSize(roomID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	size := 0
+	for _, userConns := range s.chatRooms[roomID] {
+		size += len(userConns)
+	}
+	return size
+}
+
+func contextError(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+// Broadcast sends a raw byte slice to all connections managed by this shard.
+func (s *Shard) Broadcast(message []byte) {
+	s.handleBroadcast(message)
 }
 
 // BroadcastGlobal broadcasts a message to all local shard clients and routes it to peer cluster instances.
@@ -179,174 +308,171 @@ func (s *Shard) BroadcastGlobal(message []byte) {
 	s.broadcastToOtherNodes(message)
 }
 
-// Register enqueues a new Connection to be added to this shard.
-func (s *Shard) Register(conn *Connection) {
-	select {
-	case s.register <- conn:
-	default:
-		logger.ErrorAsync("Register channel full, rejecting connection", "shard", s.name)
-		conn.Close("Register channel full")
+// Register adds a connection synchronously. Pumps must not start until this
+// returns, which prevents register/unregister reordering.
+func (s *Shard) Register(conn *Connection) bool {
+	if conn == nil {
+		return false
 	}
+	select {
+	case <-s.ctx.Done():
+		conn.Close("Shard stopped")
+		return false
+	default:
+	}
+	return s.handleRegister(conn)
 }
 
-// Unregister enqueues a Connection to be gracefully disconnected and removed.
+// Unregister synchronously disconnects and removes a connection.
 func (s *Shard) Unregister(conn *Connection) {
-	select {
-	case s.unregister <- conn:
-	default:
-		s.forceUnregister(conn)
+	s.UnregisterContext(context.Background(), conn)
+}
+
+// UnregisterContext synchronously removes a connection unless the caller has
+// already canceled the operation.
+func (s *Shard) UnregisterContext(ctx context.Context, conn *Connection) bool {
+	if conn == nil {
+		return false
 	}
+	if err := contextError(ctx); err != nil {
+		return false
+	}
+	reason := "Graceful unregistration"
+	select {
+	case <-s.ctx.Done():
+		reason = "Shard stopped"
+	default:
+	}
+	return s.removeConnection(conn, reason)
 }
 
 // forceUnregister synchronously pulls a connection out of the shard maps under heavy load.
 func (s *Shard) forceUnregister(conn *Connection) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.activeConns[conn]; ok {
-		delete(s.activeConns, conn)
-		atomic.AddInt64(&s.connectionCount, -1)
-		s.coordinator.DecrTotalConnections()
-		conn.Close("Force unregister")
-		logger.DebugAsync("Connection forcefully unregistered", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
-	}
+	s.removeConnection(conn, "Force unregister")
 }
 
-// Run boots the main message select loop for the Shard, processing connections and broadcasts.
+func (s *Shard) removeConnection(conn *Connection, reason string) bool {
+	conn.roomsMu.Lock()
+	s.mu.Lock()
+	if _, ok := s.activeConns[conn]; !ok {
+		s.mu.Unlock()
+		conn.roomsMu.Unlock()
+		return false
+	}
+	delete(s.activeConns, conn)
+	if userConns, exists := s.userSessions[conn.userID]; exists {
+		delete(userConns, conn)
+		if len(userConns) == 0 {
+			delete(s.userSessions, conn.userID)
+		}
+	}
+	for roomID := range conn.rooms {
+		roomUsers, exists := s.chatRooms[roomID]
+		if !exists {
+			continue
+		}
+		if userConns, ok := roomUsers[conn.userID]; ok {
+			delete(userConns, conn)
+			if len(userConns) == 0 {
+				delete(roomUsers, conn.userID)
+			}
+		}
+		if len(roomUsers) == 0 {
+			delete(s.chatRooms, roomID)
+		}
+	}
+	conn.rooms = make(map[string]struct{})
+	atomic.AddInt64(&s.connectionCount, -1)
+	s.mu.Unlock()
+	conn.roomsMu.Unlock()
+
+	conn.Close(reason)
+	s.releaseManagerConnection(conn)
+	s.observer().ConnectionClosed()
+	logger.DebugAsync("Connection unregistered", "reason", reason, "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
+	return true
+}
+
+func (s *Shard) releaseManagerConnection(conn *Connection) {
+	if releaser, ok := s.coordinator.(interface{ ReleaseConnectionQuota([]quotaKey) }); ok {
+		releaser.ReleaseConnectionQuota(conn.quotaKeys)
+		return
+	}
+	s.coordinator.DecrTotalConnections()
+}
+
+// Run processes the bounded inbound event queue until shutdown.
 func (s *Shard) Run() {
 	go s.cleanupRoutine()
-
-	for {
-		operation := "select"
-		func() {
-			defer panicrecovery.Catch(func(report panicrecovery.Report) {
-				wsrecovery.Handler(wsrecovery.Metadata{
-					Component: "core.shard_run_loop",
-					Operation: operation,
-					ShardID:   s.name,
-				})(report)
-			})
-			s.runLoop(&operation)
-		}()
-
-		select {
-		case <-s.ctx.Done():
-			s.shutdown()
-			return
-		default:
-		}
-	}
-}
-
-// runLoop is the inner select loop, extracted so Run() can recover and restart it after a panic.
-func (s *Shard) runLoop(operation *string) {
 	for {
 		select {
 		case <-s.ctx.Done():
+			s.shutdown(context.Background())
 			return
-		case conn := <-s.register:
-			*operation = "register"
-			s.handleRegister(conn)
-		case conn := <-s.unregister:
-			*operation = "unregister"
-			s.handleUnregister(conn)
-		case message := <-s.broadcast:
-			*operation = "broadcast"
-			s.handleBroadcast(message)
 		case ev := <-s.incomingMessage:
-			*operation = "incoming_event"
 			s.handleIncomingMessageEvent(ev)
 		}
-		*operation = "select"
 	}
 }
 
 // handleRegister registers a validated connection in the shard structure maps.
-func (s *Shard) handleRegister(conn *Connection) {
+func (s *Shard) handleRegister(conn *Connection) bool {
 	if conn == nil {
 		logger.ErrorAsync("Cannot register nil connection", "shard", s.name)
-		return
-	}
-	if !s.CanAcceptConnection() {
-		logger.ErrorAsync("Shard at max capacity, rejecting connection", "shard", s.name, "count", s.GetConnectionCount())
-		conn.Close("Shard at max capacity")
-		return
+		return false
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.activeConns[conn] = true
+	select {
+	case <-s.ctx.Done():
+		s.mu.Unlock()
+		conn.Close("Shard stopped")
+		return false
+	default:
+	}
+	if atomic.LoadInt64(&s.connectionCount) >= s.config.MaxShardConnections {
+		count := s.GetConnectionCount()
+		s.mu.Unlock()
+		logger.ErrorAsync("Shard at max capacity, rejecting connection", "shard", s.name, "count", count)
+		conn.Close("Shard at max capacity")
+		return false
+	}
+	s.activeConns[conn] = struct{}{}
 
 	if _, exists := s.userSessions[conn.userID]; !exists {
-		s.userSessions[conn.userID] = make(map[*Connection]bool)
+		s.userSessions[conn.userID] = make(map[*Connection]struct{})
 	}
-	s.userSessions[conn.userID][conn] = true
+	s.userSessions[conn.userID][conn] = struct{}{}
 
 	atomic.AddInt64(&s.connectionCount, 1)
+	s.mu.Unlock()
 
-	logger.InfoAsync("Connection registered to Shard", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
-}
-
-// handleUnregister gracefully removes a connection from registration maps.
-func (s *Shard) handleUnregister(conn *Connection) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.activeConns[conn]; ok {
-		delete(s.activeConns, conn)
-
-		if userConns, exists := s.userSessions[conn.userID]; exists {
-			delete(userConns, conn)
-			if len(userConns) == 0 {
-				delete(s.userSessions, conn.userID)
-			}
-		}
-
-		// Cleanup chatRooms to prevent memory leak
-		for roomID, roomUsers := range s.chatRooms {
-			if userConns, ok := roomUsers[conn.userID]; ok {
-				delete(userConns, conn)
-				if len(userConns) == 0 {
-					delete(roomUsers, conn.userID)
-				}
-			}
-			if len(roomUsers) == 0 {
-				delete(s.chatRooms, roomID)
-			}
-		}
-
-		atomic.AddInt64(&s.connectionCount, -1)
-		s.coordinator.DecrTotalConnections()
-
-		conn.Close("Graceful unregistration")
-		logger.InfoAsync("Connection unregistered from Shard", "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
-	}
+	return true
 }
 
 // handleBroadcast writes a broadcast message to all active connection send channels.
 func (s *Shard) handleBroadcast(message []byte) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	connections := make([]*Connection, 0, len(s.activeConns))
+	for conn := range s.activeConns {
+		connections = append(connections, conn)
+	}
+	s.mu.RUnlock()
 
 	var deadConnections []*Connection
-
-	for conn := range s.activeConns {
+	for _, conn := range connections {
 		if conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 			continue
 		}
 
-		if !conn.Send(message) {
+		if !conn.sendShared(message) {
 			deadConnections = append(deadConnections, conn)
 		}
 	}
 
-	if len(deadConnections) > 0 {
-		go func() {
-			for _, conn := range deadConnections {
-				s.Unregister(conn)
-			}
-		}()
+	for _, conn := range deadConnections {
+		s.Unregister(conn)
 	}
 }
 
@@ -383,14 +509,19 @@ func (s *Shard) cleanupRoutine() {
 // cleanup sweeps and terminates connections which have missed heartbeats.
 func (s *Shard) cleanup() {
 	s.mu.RLock()
-	var deadConnections []*Connection
-
+	connections := make([]*Connection, 0, len(s.activeConns))
 	for conn := range s.activeConns {
+		connections = append(connections, conn)
+	}
+	s.mu.RUnlock()
+
+	var deadConnections []*Connection
+	for _, conn := range connections {
 		if conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 		} else {
 			conn.mu.RLock()
-			stale := time.Since(conn.lastPing) > 2*pongWait
+			stale := time.Since(conn.lastPing) > 2*s.config.PongWait
 			conn.mu.RUnlock()
 
 			if stale {
@@ -398,8 +529,6 @@ func (s *Shard) cleanup() {
 			}
 		}
 	}
-	s.mu.RUnlock()
-
 	for _, conn := range deadConnections {
 		s.Unregister(conn)
 	}
@@ -410,92 +539,32 @@ func (s *Shard) cleanup() {
 }
 
 // shutdown disconnects all active sessions when the shard terminates.
-func (s *Shard) shutdown() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Shard) shutdown(ctx context.Context) {
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		connections := make([]*Connection, 0, len(s.activeConns))
+		for conn := range s.activeConns {
+			connections = append(connections, conn)
+		}
+		s.activeConns = make(map[*Connection]struct{})
+		s.userSessions = make(map[string]map[*Connection]struct{})
+		s.chatRooms = make(map[string]map[string]map[*Connection]struct{})
+		atomic.StoreInt64(&s.connectionCount, 0)
+		s.mu.Unlock()
 
-	logger.InfoAsync("Shutting down Shard", "shard", s.name, "connections", len(s.activeConns))
-
-	for conn := range s.activeConns {
-		if conn != nil {
+		logger.InfoAsync("Shutting down Shard", "shard", s.name, "connections", len(connections))
+		for _, conn := range connections {
 			conn.Close("Shard shutdown")
+			s.releaseManagerConnection(conn)
+			s.observer().ConnectionClosed()
 		}
-	}
-
-	s.activeConns = make(map[*Connection]bool)
-	s.userSessions = make(map[string]map[*Connection]bool)
-	atomic.StoreInt64(&s.connectionCount, 0)
-}
-
-// setupPubSubHandlers configures event callbacks for clustered Redis synchronization.
-func (s *Shard) setupPubSubHandlers() {
-	pubsubManager := s.coordinator.GetPubSubManager()
-
-	// Direct user notification routing
-	pubsubManager.RegisterHandler(pubsub.MessageTypeNotification, func(msg *pubsub.CrossNodeMessage) {
-		if msg.ShardID != s.name || msg.UserID == "" {
-			return
-		}
-
-		if data, ok := msg.Data["message"]; ok {
-			if messageBytes, ok := data.(string); ok {
-				s.SendToUser(msg.UserID, []byte(messageBytes))
-			} else if messageData, err := json.Marshal(data); err == nil {
-				s.SendToUser(msg.UserID, messageData)
+		for _, conn := range connections {
+			if conn.hasStarted() {
+				_ = conn.Wait(ctx)
 			}
 		}
+		close(s.done)
 	})
-
-	// Chat room routing
-	pubsubManager.RegisterHandler(pubsub.MessageTypeChatRoom, func(msg *pubsub.CrossNodeMessage) {
-		if msg.ShardID != s.name || msg.RoomID == "" {
-			return
-		}
-
-		if data, ok := msg.Data["message"]; ok {
-			if messageBytes, ok := data.(string); ok {
-				s.SendToRoom(msg.RoomID, []byte(messageBytes))
-			} else if messageData, err := json.Marshal(data); err == nil {
-				s.SendToRoom(msg.RoomID, messageData)
-			}
-		}
-	})
-
-	// Shard broadcast routing
-	pubsubManager.RegisterHandler(pubsub.MessageTypeBroadcast, func(msg *pubsub.CrossNodeMessage) {
-		if msg.ShardID != s.name {
-			return
-		}
-
-		if data, ok := msg.Data["message"]; ok {
-			if messageBytes, ok := data.(string); ok {
-				s.Broadcast([]byte(messageBytes))
-			} else if messageData, err := json.Marshal(data); err == nil {
-				s.Broadcast(messageData)
-			}
-		}
-	})
-
-	// User connection details (for other nodes)
-	pubsubManager.RegisterHandler(pubsub.MessageTypeUserJoin, func(msg *pubsub.CrossNodeMessage) {
-		if msg.ShardID != s.name {
-			return
-		}
-		logger.InfoAsync("User joined on peer cluster node", "shard", s.name, "userID", msg.UserID, "nodeID", msg.NodeID)
-	})
-
-	pubsubManager.RegisterHandler(pubsub.MessageTypeUserLeave, func(msg *pubsub.CrossNodeMessage) {
-		if msg.ShardID != s.name {
-			return
-		}
-		logger.InfoAsync("User left peer cluster node", "shard", s.name, "userID", msg.UserID, "nodeID", msg.NodeID)
-	})
-
-	// Subscribe to this shard's clustered route
-	shardChannel := "shard:" + s.name
-	if err := pubsubManager.Subscribe(shardChannel, "system"); err != nil {
-		logger.ErrorAsync("Failed to subscribe shard to pub/sub cluster route", "error", err, "shard", s.name)
-	}
 }
 
 // broadcastToOtherNodes routes a broadcast payload to cluster nodes using Redis pubsub.
@@ -539,9 +608,16 @@ func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
 	}
 }
 
-// Shutdown gracefully shuts down the shard select loop and notifies peer nodes of shard termination.
-func (s *Shard) Shutdown() {
+// Shutdown gracefully stops the shard event loop and notifies peer nodes of shard termination.
+func (s *Shard) Shutdown(ctx context.Context) error {
 	pubsubManager := s.coordinator.GetPubSubManager()
 	_ = pubsubManager.NotifyShardDestroy(s.name)
 	s.cancel()
+	s.shutdown(ctx)
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

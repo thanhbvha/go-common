@@ -2,9 +2,12 @@
 package core
 
 import (
+	"bytes"
 	"context"
-	"io"
+	"errors"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -12,16 +15,20 @@ import (
 	"github.com/thanhbvha/go-common/logger"
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/pool"
+	"github.com/thanhbvha/go-common/websocket/limiter"
 )
 
 const (
 	// Connection constants for high-performance tuning
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 1024 // 1024 bytes
+	writeWait            = 10 * time.Second
+	pongWait             = 60 * time.Second
+	pingPeriod           = (pongWait * 9) / 10
+	maxMessageSize       = 1024 // 1024 bytes
+	defaultSendQueueSize = 256
+	maxPendingHandlers   = 64
 )
+
+var nextConnectionID atomic.Uint64
 
 // Conn defines a generic WebSocket connection interface to support multiple HTTP frameworks.
 type Conn interface {
@@ -29,8 +36,6 @@ type Conn interface {
 	ReadMessage() (messageType int, p []byte, err error)
 	// WriteMessage writes a single message to the connection.
 	WriteMessage(messageType int, data []byte) error
-	// NextWriter returns a writer for the next message to send.
-	NextWriter(messageType int) (io.WriteCloser, error)
 	// SetReadLimit sets the maximum size in bytes for a message read from the peer.
 	SetReadLimit(limit int64)
 	// SetReadDeadline sets the read deadline on the underlying network connection.
@@ -45,19 +50,38 @@ type Conn interface {
 
 // Connection represents an active WebSocket client session with thread-safe send channels and metadata.
 type Connection struct {
-	conn      Conn
-	send      chan []byte
-	shard     *Shard
-	userID    string
-	shardID   string
-	clientIP  string
-	lastPing  time.Time
-	mu        sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closed    bool
-	nodeID    string
-	requestID string
+	conn              Conn
+	send              chan []byte
+	shard             *Shard
+	userID            string
+	shardID           string
+	clientIP          string
+	lastPing          time.Time
+	mu                sync.RWMutex
+	lifecycleMu       sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	closeOnce         sync.Once
+	runOnce           sync.Once
+	unregisterOnce    sync.Once
+	pumps             sync.WaitGroup
+	writerDone        chan struct{}
+	done              chan struct{}
+	nodeID            string
+	requestID         string
+	connectionID      string
+	config            ManagerConfig
+	messageLimiter    *limiter.RateLimiter
+	byteLimiter       *limiter.RateLimiter
+	pendingHandlers   atomic.Int32
+	malformedMessages atomic.Uint64
+	inboundDrops      atomic.Uint64
+	consecutiveDrops  atomic.Int32
+	started           atomic.Bool
+	identity          Identity
+	roomsMu           sync.Mutex
+	rooms             map[string]struct{}
+	quotaKeys         []quotaKey
 }
 
 // NewConnection instantiates a Connection session wrapper.
@@ -73,63 +97,141 @@ func NewConnection(conn Conn, shard *Shard, userID, shardID, clientIP, nodeID, r
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sendChan := pool.GetGlobalConnectionPool().GetChannel()
+	config := coordinatorConfig(shard.coordinator)
 
 	return &Connection{
-		conn:      conn,
-		send:      sendChan,
-		shard:     shard,
-		userID:    userID,
-		shardID:   shardID,
-		clientIP:  clientIP,
-		nodeID:    nodeID,
-		requestID: requestID,
-		lastPing:  time.Now(),
-		ctx:       ctx,
-		cancel:    cancel,
-		closed:    false,
+		conn:           conn,
+		send:           make(chan []byte, config.SendQueueSize),
+		shard:          shard,
+		userID:         userID,
+		shardID:        shardID,
+		clientIP:       clientIP,
+		nodeID:         nodeID,
+		requestID:      requestID,
+		connectionID:   strconv.FormatUint(nextConnectionID.Add(1), 10),
+		config:         config,
+		identity:       Identity{UserID: userID},
+		rooms:          make(map[string]struct{}),
+		messageLimiter: limiter.NewRateLimiter(config.MessagesPerSecond, config.MessageBurst),
+		byteLimiter:    limiter.NewRateLimiter(config.BytesPerSecond, config.ByteBurst),
+		lastPing:       time.Now(),
+		ctx:            ctx,
+		cancel:         cancel,
+		writerDone:     make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 }
 
-// Close terminates the connection session and cleans up allocated memory pool channels.
+func (c *Connection) setIdentity(identity Identity) { c.identity = identity }
+func (c *Connection) Identity() Identity            { return c.identity }
+
+func (c *Connection) addRoom(roomID string) bool {
+	c.roomsMu.Lock()
+	defer c.roomsMu.Unlock()
+	if _, ok := c.rooms[roomID]; ok {
+		return true
+	}
+	if len(c.rooms) >= c.config.MaxRoomsPerConnection {
+		return false
+	}
+	c.rooms[roomID] = struct{}{}
+	return true
+}
+func (c *Connection) removeRoom(roomID string) {
+	c.roomsMu.Lock()
+	delete(c.rooms, roomID)
+	c.roomsMu.Unlock()
+}
+
+// Close signals connection shutdown. It is idempotent and deliberately does
+// not wait for the read/write pumps, so it is safe to call from either pump.
 func (c *Connection) Close(reason string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closed {
-		return
-	}
-
-	logger.InfoAsync("Closing connection", "reason", reason, "userID", c.userID, "shardID", c.shardID, "clientIP", c.clientIP, "requestID", c.requestID)
-
-	c.closed = true
-	c.cancel()
-
-	// Return channel to pool before closing
-	pool.GetGlobalConnectionPool().PutChannel(c.send)
-
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		if !c.config.DisableLifecycleLogging {
+			logLifecycle("Closing connection", "reason", reason, "userID", c.userID, "shardID", c.shardID, "clientIP", c.clientIP, "requestID", c.requestID)
+		}
+		c.lifecycleMu.Lock()
+		c.cancel()
+		c.lifecycleMu.Unlock()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
 }
 
 // IsClosed reports whether this Connection session has been marked as closed.
 func (c *Connection) IsClosed() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.closed
+	select {
+	case <-c.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// Run starts exactly one read pump and one write pump, then blocks until both
+// have exited and the connection has been submitted for unregistration.
+func (c *Connection) Run() {
+	c.runOnce.Do(c.start)
+	<-c.done
+}
+
+func (c *Connection) start() {
+	c.started.Store(true)
+	c.pumps.Add(2)
+	go func() {
+		defer c.pumps.Done()
+		defer c.Close("readPump finished")
+		c.readPump()
+	}()
+	go func() {
+		defer c.pumps.Done()
+		defer close(c.writerDone)
+		defer c.Close("writePump finished")
+		c.writePump()
+	}()
+	go func() {
+		c.pumps.Wait()
+		c.unregisterOnce.Do(func() {
+			c.shard.removeConnection(c, "Connection lifecycle finished")
+		})
+		close(c.done)
+	}()
+}
+
+func (c *Connection) hasStarted() bool { return c.started.Load() }
+
+// Wait blocks until the complete connection lifecycle has finished or ctx is
+// canceled. Run must have been called for lifecycle completion to occur.
+func (c *Connection) Wait(ctx context.Context) error {
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// CloseAndWait signals shutdown and waits for lifecycle completion.
+func (c *Connection) CloseAndWait(ctx context.Context, reason string) error {
+	c.Close(reason)
+	return c.Wait(ctx)
 }
 
 // readPump pumps messages from the websocket connection to the shard.
 // The application runs readPump in a per-connection goroutine.
 func (c *Connection) readPump() {
-	defer func() { c.shard.unregister <- c }()
 	defer panicrecovery.Catch(wsrecovery.Handler(c.recoveryMetadata("core.read_pump")))
 
-	c.conn.SetReadLimit(maxMessageSize)
-	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetReadLimit(c.config.MaxMessageBytes)
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.config.PongWait)); err != nil {
+		logger.ErrorAsync("Failed to set WebSocket read deadline", "error", err, "userID", c.userID)
+		return
+	}
 	c.conn.SetPongHandler(func(string) error {
-		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.config.PongWait)); err != nil {
+			return err
+		}
 		c.mu.Lock()
 		c.lastPing = time.Now()
 		c.mu.Unlock()
@@ -141,102 +243,90 @@ func (c *Connection) readPump() {
 		case <-c.ctx.Done():
 			return
 		default:
-			buffer := pool.GetGlobalBufferPool().Get()
-
 			if c.conn == nil {
-				pool.GetGlobalBufferPool().Put(buffer)
 				logger.ErrorAsync("readPump CRITICAL: c.conn is nil before read", "userID", c.userID)
 				return
 			}
 
 			mt, message, err := c.conn.ReadMessage()
 			if err != nil {
-				pool.GetGlobalBufferPool().Put(buffer)
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				if isUnexpectedReadClose(err) {
 					logger.ErrorAsync("WebSocket read error (unexpected close)", "error", err, "userID", c.userID, "clientIP", c.clientIP)
 				}
 				return
 			}
 
 			if mt != websocket.TextMessage && mt != websocket.BinaryMessage {
-				pool.GetGlobalBufferPool().Put(buffer)
 				continue
 			}
 
-			buffer = append(buffer, message...)
-			messageCopy := make([]byte, len(buffer))
-			copy(messageCopy, buffer)
+			c.shard.observer().InboundMessage(len(message))
+			messageCopy := bytes.Clone(message)
 
-			pool.GetGlobalBufferPool().Put(buffer)
-
-			workerPool := pool.GetGlobalPool()
-			taskSubmitted := workerPool.SubmitWithMetadata(pool.TaskMetadata{
-				Type:      "enqueue_incoming_message",
-				UserID:    c.userID,
-				ClientIP:  c.clientIP,
-				RequestID: c.requestID,
-				ShardID:   c.shardID,
-			}, func() {
-				ev := &EventMessage{
-					Conn: c,
-					Raw:  messageCopy,
-				}
-				select {
-				case c.shard.incomingMessage <- ev:
-				default:
-					logger.WarnAsync("Incoming message channel full, dropping message", "shardID", c.shardID, "userID", c.userID)
-				}
-			})
-
-			if !taskSubmitted {
-				logger.WarnAsync("Worker pool full, dropping message", "shardID", c.shardID, "userID", c.userID)
+			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(messageCopy))) {
+				c.inboundDrops.Add(1)
+				continue
+			}
+			ev := &EventMessage{Conn: c, Raw: messageCopy}
+			select {
+			case c.shard.incomingMessage <- ev:
+			default:
+				c.inboundDrops.Add(1)
 			}
 		}
 	}
 }
 
+func isUnexpectedReadClose(err error) bool {
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) {
+		return true
+	}
+	return closeError.Code != websocket.CloseNormalClosure && closeError.Code != websocket.CloseGoingAway
+}
+
+func (c *Connection) tryAcquireHandler() bool {
+	for {
+		current := c.pendingHandlers.Load()
+		if current >= c.config.MaxPendingHandlers {
+			c.inboundDrops.Add(1)
+			return false
+		}
+		if c.pendingHandlers.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func (c *Connection) releaseHandler() { c.pendingHandlers.Add(-1) }
+
 // writePump pumps messages from the send channel to the websocket connection.
 // A goroutine running writePump is started for each connection.
 func (c *Connection) writePump() {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.Close("writePump finished")
-	}()
+	ticker := time.NewTicker(c.config.PingPeriod)
+	defer ticker.Stop()
 	defer panicrecovery.Catch(wsrecovery.Handler(c.recoveryMetadata("core.write_pump")))
 
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case message, ok := <-c.send:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+		case message := <-c.send:
+			if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)); err != nil {
+				logger.ErrorAsync("Failed to set WebSocket write deadline", "error", err, "userID", c.userID)
 				return
 			}
-
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				logger.ErrorAsync("Error getting next writer", "error", err, "userID", c.userID)
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				logger.ErrorAsync("Error writing WebSocket message", "error", err, "userID", c.userID)
 				return
 			}
-			_, _ = w.Write(message)
-
-			// Batch additional queued messages together for performance optimization
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				_, _ = w.Write([]byte{'\n'})
-				_, _ = w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				logger.ErrorAsync("Error closing writer", "error", err, "userID", c.userID)
-				return
-			}
+			c.shard.observer().OutboundMessage(len(message))
 
 		case <-ticker.C:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)); err != nil {
+				logger.ErrorAsync("Failed to set WebSocket ping deadline", "error", err, "userID", c.userID)
+				return
+			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				logger.ErrorAsync("Error sending ping message", "error", err, "userID", c.userID)
 				return
@@ -268,50 +358,59 @@ func (c *Connection) SendJSON(data interface{}) bool {
 
 // Send schedules a raw byte slice message for delivery. Returns false if closed or send buffer is full.
 func (c *Connection) Send(message []byte) bool {
-	if c.IsClosed() {
+	return c.sendMessage(bytes.Clone(message))
+}
+
+func (c *Connection) sendShared(message []byte) bool {
+	return c.sendMessage(message)
+}
+
+func (c *Connection) sendMessage(message []byte) bool {
+	c.lifecycleMu.RLock()
+	select {
+	case <-c.ctx.Done():
+		c.lifecycleMu.RUnlock()
 		return false
+	default:
 	}
 
 	select {
 	case c.send <- message:
+		c.consecutiveDrops.Store(0)
+		c.lifecycleMu.RUnlock()
 		return true
 	default:
-		logger.WarnAsync("Send channel full, dropping message", "userID", c.userID)
-		return false
+		c.lifecycleMu.RUnlock()
+		c.shard.observer().OutboundDropped(true)
+		if c.consecutiveDrops.Add(1) >= c.config.SlowConsumerDropThreshold {
+			c.Close("Outbound queue full")
+			return false
+		}
+		return true
 	}
 }
 
 // GetUserID returns the User ID associated with this Connection session.
 func (c *Connection) GetUserID() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.userID
 }
 
 // GetShardID returns the Shard ID associated with this Connection session.
 func (c *Connection) GetShardID() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.shardID
 }
 
 // GetClientIP returns the remote client IP address.
 func (c *Connection) GetClientIP() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.clientIP
 }
 
 // GetShard returns the Shard manager this Connection is registered to.
 func (c *Connection) GetShard() *Shard {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.shard
 }
 
 // GetRequestID returns the trace request ID associated with the upgrading request.
 func (c *Connection) GetRequestID() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.requestID
 }

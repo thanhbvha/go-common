@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,9 +19,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
 
+	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
 	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/nats"
-	"github.com/thanhbvha/go-common/redis"
+	commonnats "github.com/thanhbvha/go-common/nats"
+	commonredis "github.com/thanhbvha/go-common/redis"
 	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
 	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
 	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
@@ -30,256 +32,524 @@ import (
 	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
 	wsNetHTTP "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
 	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
+	natspubsub "github.com/thanhbvha/go-common/websocket/pubsub/nats"
 	redispubsub "github.com/thanhbvha/go-common/websocket/pubsub/redis"
 )
 
+const (
+	eventSessionInfo      = "session.info"
+	eventSystemPing       = "system.ping"
+	eventRoomJoin         = "room.join"
+	eventRoomLeave        = "room.leave"
+	eventChatSend         = "chat.send"
+	eventUserNotify       = "user.notify"
+	eventClusterBroadcast = "cluster.broadcast"
+)
+
+type application struct {
+	manager       *core.Manager
+	redisClient   *commonredis.Client
+	natsClient    *commonnats.Client
+	clientToken   string
+	adminToken    string
+	defaultTenant string
+}
+
+type roomPayload struct {
+	RoomID string `json:"room_id"`
+}
+
+type chatPayload struct {
+	RoomID string `json:"room_id"`
+	Text   string `json:"text"`
+}
+
+type userNotificationPayload struct {
+	UserID string `json:"user_id"`
+	Text   string `json:"text"`
+}
+
+type broadcastPayload struct {
+	Text string `json:"text"`
+}
+
+type demoAuthorizer struct{}
+
+func (demoAuthorizer) CanSubscribe(_ context.Context, identity core.Identity, roomID string) error {
+	if identity.UserID == "" || identity.TenantID == "" || !strings.HasPrefix(roomID, identity.TenantID+":") {
+		return core.ErrUnauthorized
+	}
+	return nil
+}
+
+func (demoAuthorizer) CanPublish(_ context.Context, identity core.Identity, eventType string) error {
+	if identity.UserID == "" || identity.TenantID == "" {
+		return core.ErrUnauthorized
+	}
+	if eventType == eventClusterBroadcast && identity.AccountID != "admin" {
+		return core.ErrUnauthorized
+	}
+	return nil
+}
+
 func main() {
-	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
+	configPath := exampleconfig.Path(os.Args[1:])
+	loaded, err := exampleconfig.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load config %q: %v\n", configPath, err)
+		os.Exit(1)
+	}
+	configFile := flag.String("config", configPath, "YAML or .env configuration file")
+	stack := flag.String("stack", loaded.ServerStack, "HTTP stack: nethttp, fiber, gin, or echo")
+	broker := flag.String("broker", loaded.ServerBroker, "Broker: standalone, redis, or nats")
+	address := flag.String("addr", loaded.ServerAddr, "HTTP listen address")
+	redisAddress := flag.String("redis", loaded.ServerRedis, "Redis host:port")
+	natsURL := flag.String("nats", loaded.ServerNATS, "NATS URL")
+	defaultTenant := flag.String("tenant", loaded.ServerTenant, "Default tenant when tenant_id is omitted")
 	flag.Parse()
-	fmt.Println("=== Clustered WebSocket Module Examples ===")
+	_ = configFile
 
-	// 1. Setup shared infrastructure (Logger, Redis, NATS, Event Handlers)
-	SetupCore()
+	app, err := newApplication(*broker, *redisAddress, *natsURL, *defaultTenant, loaded.ClientToken, loaded.AdminToken)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer app.close()
 
-	// 2. Start the selected HTTP adapter. All adapters bind to port 8080.
+	logger.InfoAsync("WebSocket example initialized", "stack", *stack, "broker", *broker, "address", *address)
+
 	switch *stack {
 	case "nethttp":
-		RunNetHTTPExample()
+		err = app.runNetHTTP(*address)
 	case "fiber":
-		RunFiberExample()
+		err = app.runFiber(*address)
 	case "gin":
-		RunGinExample()
+		err = app.runGin(*address)
 	case "echo":
-		RunEchoExample()
+		err = app.runEcho(*address)
 	default:
-		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
-		os.Exit(2)
+		err = fmt.Errorf("invalid -stack %q; use nethttp, fiber, gin, or echo", *stack)
+	}
+	if err != nil {
+		logger.ErrorAsync("WebSocket example stopped with error", "error", err)
+		app.close()
+		os.Exit(1)
 	}
 }
 
-// SetupCore initializes the shared architecture components that are framework-agnostic.
-func SetupCore() {
-	// 1. Bootstrap structured asynchronous logger
-	l := logger.New(logger.Options{
-		Level:  slog.LevelDebug,
-		StdOut: true,
-	})
+func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, adminToken string) (*application, error) {
+	if clientToken == "" {
+		return nil, errors.New("client_token is required in config or WS_EXAMPLE_CLIENT_TOKEN")
+	}
+	if adminToken == "" {
+		adminToken = clientToken
+	}
+
+	l := logger.New(logger.Options{Level: slog.LevelInfo, StdOut: true})
 	logger.SetDefault(l)
 
-	logger.InfoAsync("Bootstrapping Clustered WebSocket Service...")
-
-	// 2. Initialize process-wide default Redis client (For Pub/Sub)
-	redisCfg := redis.DefaultConfig()
-	redisCfg.Host = "localhost"
-	redisCfg.Port = 6379
-	redisCfg.MaxConnRetries = 1
-
-	redisClient := redis.New(redisCfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if err := redisClient.Connect(ctx); err != nil {
-		logger.WarnAsync("Redis unavailable, running WebSocket in standalone loopback mode", "error", err)
-	} else {
-		redis.SetDefault(redisClient)
-		// Inject the Redis PubSub Manager into the WebSocket core for clustered message routing
-		pubsub.SetGlobalManager(redispubsub.NewManagerWithClient(redisClient))
-		logger.InfoAsync("Redis clustered pub/sub engine connected successfully")
+	app := &application{clientToken: clientToken, adminToken: adminToken, defaultTenant: defaultTenant}
+	bus, ownership, err := app.newPubSub(broker, redisAddress, natsURL)
+	if err != nil {
+		return nil, err
 	}
 
-	// [NATS Alternative]
-	// If you wanted to use NATS instead of Redis for PubSub:
-	// import natspubsub "github.com/thanhbvha/go-common/websocket/pubsub/nats"
-	// natsClient := nats.New(...)
-	// pubsub.SetGlobalManager(natspubsub.NewManagerWithClient(natsClient))
+	registry := core.NewEventRegistry()
+	registerHandlers(registry)
 
-	// 3. Register custom event handlers for business logic
-	core.RegisterHandler("chat_message", func(conn *core.Connection, msg core.IncomingMessage) error {
-		logger.InfoAsync("Received chat message event", "userID", conn.GetUserID(), "payloadBytes", len(msg.Data))
+	config := core.DefaultManagerConfig()
+	config.PubSub = bus
+	config.PubSubOwnership = ownership
+	config.EventRegistry = registry
+	config.Authorizer = demoAuthorizer{}
+	config.Observer = &core.AtomicObserver{}
+	config.MaxConnections = 20_000
+	config.MaxShards = 64
+	config.MaxShardConnections = 1_000
+	config.SendQueueSize = 128
+	config.InboundQueueSize = 1_024
+	config.MaxMessageBytes = 16 * 1024
+	config.MessagesPerSecond = 20
+	config.MessageBurst = 50
+	config.BytesPerSecond = 32 * 1024
+	config.ByteBurst = 64 * 1024
+	config.MaxPendingHandlers = 16
+	config.MaxHandlerGoroutines = 64
+	config.MaxRoomsPerConnection = 50
+	config.SlowConsumerDropThreshold = 2
+	config.MaxConnectionsPerUser = 5
+	config.MaxConnectionsPerAccount = 100
+	config.MaxConnectionsPerTenant = 5_000
+	config.WriteWait = 5 * time.Second
+	config.PongWait = 60 * time.Second
+	config.PingPeriod = 50 * time.Second
 
-		// Echo message back to sender
-		conn.SendJSON(core.OutgoingMessage{
-			Type: "chat_echo",
-			Data: map[string]interface{}{
-				"sender":  conn.GetUserID(),
-				"payload": string(msg.Data),
-				"sent_at": time.Now(),
-			},
-		})
-		return nil
-	})
+	app.manager = core.NewManagerWithConfig(config)
+	if readiness, ok := bus.(pubsub.WaitReadyProvider); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := readiness.WaitReady(ctx)
+		cancel()
+		if err != nil {
+			app.close()
+			return nil, fmt.Errorf("wait for %s broker readiness: %w", broker, err)
+		}
+	}
+	return app, nil
 }
 
-// =====================================================================
-// 1. Standard net/http WebSocket Adapter Example
-// =====================================================================
-func RunNetHTTPExample() {
-	logger.InfoAsync("Starting net/http WebSocket Adapter...")
+func (a *application) newPubSub(broker, redisAddress, natsURL string) (pubsub.Manager, core.PubSubOwnership, error) {
+	switch broker {
+	case "standalone":
+		return pubsub.NewNoopManager(), core.PubSubOwned, nil
+	case "redis":
+		host, port, ok := strings.Cut(redisAddress, ":")
+		if !ok || host == "" || port == "" {
+			return nil, core.PubSubBorrowed, fmt.Errorf("invalid Redis address %q", redisAddress)
+		}
+		redisConfig := commonredis.DefaultConfig()
+		redisConfig.Host = host
+		if _, err := fmt.Sscanf(port, "%d", &redisConfig.Port); err != nil {
+			return nil, core.PubSubBorrowed, fmt.Errorf("invalid Redis port in %q: %w", redisAddress, err)
+		}
+		redisConfig.Logger = logger.Default()
+		a.redisClient = commonredis.New(redisConfig)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.redisClient.Connect(ctx); err != nil {
+			return nil, core.PubSubBorrowed, fmt.Errorf("connect Redis: %w", err)
+		}
+		return redispubsub.NewManagerWithClientAndPolicy(a.redisClient, pubsub.FailStartup), core.PubSubOwned, nil
+	case "nats":
+		natsConfig := commonnats.DefaultConfig()
+		natsConfig.URLs = []string{natsURL}
+		natsConfig.Logger = logger.Default()
+		a.natsClient = commonnats.New(natsConfig)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.natsClient.Connect(ctx); err != nil {
+			return nil, core.PubSubBorrowed, fmt.Errorf("connect NATS: %w", err)
+		}
+		return natspubsub.NewManagerWithClientAndPolicy(a.natsClient, pubsub.FailStartup), core.PubSubOwned, nil
+	default:
+		return nil, core.PubSubBorrowed, fmt.Errorf("invalid -broker %q; use standalone, redis, or nats", broker)
+	}
+}
 
+func registerHandlers(registry *core.EventRegistry) {
+	registry.Register(eventSessionInfo, handlerConfig(2*time.Second, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
+		return sendEvent(conn, "session.info.result", map[string]any{
+			"identity":    conn.Identity(),
+			"shard_id":    conn.GetShardID(),
+			"request_id":  conn.GetRequestID(),
+			"server_time": time.Now().UTC(),
+		})
+	}))
+
+	registry.Register(eventSystemPing, handlerConfig(time.Second, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
+		return sendEvent(conn, "system.pong", map[string]any{"server_time": time.Now().UTC()})
+	}))
+
+	registry.Register(eventRoomJoin, handlerConfig(2*time.Second, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		var payload roomPayload
+		if err := decodePayload(message.Data, &payload); err != nil {
+			return sendError(conn, eventRoomJoin, err)
+		}
+		if err := conn.GetShard().JoinRoom(ctx, payload.RoomID, conn); err != nil {
+			return sendError(conn, eventRoomJoin, err)
+		}
+		return sendEvent(conn, "room.joined", map[string]any{"room_id": payload.RoomID, "members": conn.GetShard().GetRoomSize(payload.RoomID)})
+	}))
+
+	registry.Register(eventRoomLeave, handlerConfig(2*time.Second, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		var payload roomPayload
+		if err := decodePayload(message.Data, &payload); err != nil {
+			return sendError(conn, eventRoomLeave, err)
+		}
+		if err := conn.GetShard().LeaveRoom(ctx, payload.RoomID, conn); err != nil {
+			return sendError(conn, eventRoomLeave, err)
+		}
+		return sendEvent(conn, "room.left", map[string]any{"room_id": payload.RoomID})
+	}))
+
+	registry.Register(eventChatSend, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		var payload chatPayload
+		if err := decodePayload(message.Data, &payload); err != nil {
+			return sendError(conn, eventChatSend, err)
+		}
+		if payload.Text == "" {
+			return sendError(conn, eventChatSend, errors.New("text is required"))
+		}
+		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "chat.message", RequestID: conn.GetRequestID(), Data: map[string]any{
+			"room_id": payload.RoomID,
+			"text":    payload.Text,
+			"sender":  conn.Identity(),
+			"sent_at": time.Now().UTC(),
+		}})
+		if err != nil {
+			return err
+		}
+		conn.GetShard().SendToRoom(payload.RoomID, outgoing)
+		conn.GetShard().BroadcastRoomMessage(payload.RoomID, outgoing)
+		return nil
+	}))
+
+	registry.Register(eventUserNotify, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		var payload userNotificationPayload
+		if err := decodePayload(message.Data, &payload); err != nil {
+			return sendError(conn, eventUserNotify, err)
+		}
+		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "user.notification", RequestID: conn.GetRequestID(), Data: map[string]any{
+			"text":    payload.Text,
+			"sender":  conn.GetUserID(),
+			"sent_at": time.Now().UTC(),
+		}})
+		if err != nil {
+			return err
+		}
+		conn.GetShard().SendToUser(payload.UserID, outgoing)
+		conn.GetShard().BroadcastUserNotification(payload.UserID, outgoing)
+		return nil
+	}))
+
+	registry.Register(eventClusterBroadcast, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		var payload broadcastPayload
+		if err := decodePayload(message.Data, &payload); err != nil {
+			return sendError(conn, eventClusterBroadcast, err)
+		}
+		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "cluster.broadcast", RequestID: conn.GetRequestID(), Data: map[string]any{
+			"text":    payload.Text,
+			"sender":  conn.GetUserID(),
+			"sent_at": time.Now().UTC(),
+		}})
+		if err != nil {
+			return err
+		}
+		conn.GetShard().BroadcastGlobal(outgoing)
+		return nil
+	}))
+}
+
+func handlerConfig(timeout time.Duration, maxPayloadBytes int, handler core.ContextJobHandler) core.HandlerConfig {
+	return core.HandlerConfig{Timeout: timeout, MaxPayloadBytes: maxPayloadBytes, Handler: handler}
+}
+
+func decodePayload(data []byte, destination any) error {
+	if len(data) == 0 || string(data) == "null" {
+		return errors.New("payload is required")
+	}
+	if err := json.Unmarshal(data, destination); err != nil {
+		return fmt.Errorf("invalid payload: %w", err)
+	}
+	return nil
+}
+
+func sendEvent(conn *core.Connection, eventType string, data any) error {
+	if !conn.SendJSON(core.OutgoingMessage{Type: eventType, Data: data, RequestID: conn.GetRequestID()}) {
+		return errors.New("outbound queue rejected message")
+	}
+	return nil
+}
+
+func sendError(conn *core.Connection, source string, err error) error {
+	if !conn.SendJSON(core.OutgoingMessage{Type: "error", Data: map[string]any{"source": source, "message": err.Error()}, RequestID: conn.GetRequestID()}) {
+		return errors.New("outbound queue rejected error response")
+	}
+	return nil
+}
+
+func (a *application) authenticate(userID, tenantID, accountID, sessionID, authorization string) (core.Identity, error) {
+	if !validBearerToken(authorization, a.clientToken) {
+		return core.Identity{}, errors.New("invalid bearer token")
+	}
+	if userID == "" {
+		return core.Identity{}, errors.New("user_id is required")
+	}
+	if tenantID == "" {
+		tenantID = a.defaultTenant
+	}
+	if accountID == "" {
+		accountID = "member"
+	}
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
+	}
+	return core.Identity{UserID: userID, TenantID: tenantID, AccountID: accountID, SessionID: sessionID, ExpiresAt: time.Now().Add(8 * time.Hour)}, nil
+}
+
+func validBearerToken(authorization, expected string) bool {
+	scheme, token, ok := strings.Cut(authorization, " ")
+	return ok && strings.EqualFold(scheme, "Bearer") && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+}
+
+func authenticateDemo(userID, authorization string) (string, error) {
+	expected := os.Getenv("WS_DEMO_TOKEN")
+	if expected == "" || !validBearerToken(authorization, expected) {
+		return "", errors.New("invalid demo token")
+	}
+	if userID == "" {
+		return "", errors.New("user_id is required")
+	}
+	return userID, nil
+}
+
+func (a *application) adminAuthorized(authorization string) bool {
+	return validBearerToken(authorization, a.adminToken)
+}
+
+func (a *application) adapterLimiters() (*limiter.RateLimiter, *limiter.ConnectionLimiter) {
+	return limiter.NewRateLimiter(100, 200), limiter.NewConnectionLimiter(20)
+}
+
+func (a *application) runNetHTTP(address string) error {
+	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsNetHTTP.NewHandler(wsNetHTTP.Config{
-		Authenticate: func(r *http.Request) (string, error) {
-			return authenticateDemo(r.URL.Query().Get("user_id"), r.Header.Get("Authorization"))
+		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
+			query := r.URL.Query()
+			return a.authenticate(query.Get("user_id"), query.Get("tenant_id"), query.Get("account_id"), query.Get("session_id"), r.Header.Get("Authorization"))
 		},
 	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handler.HandleUpgrade)
 	mux.HandleFunc("/health", handler.HandleHealthCheck)
-
-	server := &http.Server{
-		Addr:              ":8080",
-		Handler:           nethttpmw.Recover(mux),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.ErrorAsync("Fatal error in net/http server listen", "error", err)
-		}
-	}()
-
-	waitForShutdown(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.ErrorAsync("Failed to shut down net/http server", "error", err)
-		}
-	})
+	mux.HandleFunc("/admin/stats", a.netHTTPAdmin(handler.HandleStats))
+	mux.HandleFunc("/admin/shard", a.netHTTPAdmin(handler.HandleShardManagement))
+	server := &http.Server{Addr: address, Handler: nethttpmw.Recover(mux), ReadHeaderTimeout: 5 * time.Second}
+	return a.serveHTTP(server)
 }
 
-// =====================================================================
-// 2. Fiber WebSocket Adapter Example
-// =====================================================================
-func RunFiberExample() {
-	logger.InfoAsync("Starting Fiber WebSocket Adapter...")
-
-	adapterConfig := wsFiber.Config{
-		Authenticate: func(c *fiber.Ctx) (string, error) {
-			return authenticateDemo(c.Query("user_id"), c.Get("Authorization"))
-		},
+func (a *application) netHTTPAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.adminAuthorized(r.Header.Get("Authorization")) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
-
-	handler := wsFiber.NewHandler(adapterConfig)
-	server := wsFiber.NewServer(8080, handler)
-	server.App().Use(fibermw.Recover())
-	server.SetupRoutes()
-
-	if err := server.Start(); err != nil {
-		logger.ErrorAsync("Fatal error starting WebSocket server", "error", err)
-		os.Exit(1)
-	}
-
-	waitForShutdown(func() {
-		server.Shutdown()
-	})
 }
 
-// =====================================================================
-// 3. Gin WebSocket Adapter Example
-// =====================================================================
-func RunGinExample() {
-	logger.InfoAsync("Starting Gin WebSocket Adapter...")
-
+func (a *application) runGin(address string) error {
+	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsGin.NewHandler(wsGin.Config{
-		Authenticate: func(c *gin.Context) (string, error) {
-			return authenticateDemo(c.Query("user_id"), c.GetHeader("Authorization"))
+		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		AuthenticateIdentity: func(c *gin.Context) (core.Identity, error) {
+			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.GetHeader("Authorization"))
 		},
 	})
-
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(ginmw.Recover())
-
-	r.GET("/ws", handler.HandleUpgrade)
-	r.GET("/health", handler.HandleHealthCheck)
-
-	server := &http.Server{
-		Addr:    ":8080",
-		Handler: r,
-	}
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.ErrorAsync("Fatal error in Gin server listen", "error", err)
-			os.Exit(1)
+	router := gin.New()
+	router.Use(ginmw.Recover())
+	router.GET("/ws", handler.HandleUpgrade)
+	router.GET("/health", handler.HandleHealthCheck)
+	admin := router.Group("/admin", func(c *gin.Context) {
+		if !a.adminAuthorized(c.GetHeader("Authorization")) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		}
-	}()
-
-	waitForShutdown(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
 	})
+	admin.GET("/stats", handler.HandleStats)
+	admin.GET("/shard", handler.HandleShardManagement)
+	return a.serveHTTP(&http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second})
 }
 
-// =====================================================================
-// 4. Echo WebSocket Adapter Example
-// =====================================================================
-func RunEchoExample() {
-	logger.InfoAsync("Starting Echo WebSocket Adapter...")
-
+func (a *application) runEcho(address string) error {
+	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsEcho.NewHandler(wsEcho.Config{
-		Authenticate: func(c echo.Context) (string, error) {
-			return authenticateDemo(c.QueryParam("user_id"), c.Request().Header.Get("Authorization"))
+		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		AuthenticateIdentity: func(c echo.Context) (core.Identity, error) {
+			return a.authenticate(c.QueryParam("user_id"), c.QueryParam("tenant_id"), c.QueryParam("account_id"), c.QueryParam("session_id"), c.Request().Header.Get("Authorization"))
 		},
 	})
-
 	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
+	e.HideBanner, e.HidePort = true, true
 	e.Use(echomw.Recover())
-
 	e.GET("/ws", handler.HandleUpgrade)
 	e.GET("/health", handler.HandleHealthCheck)
-
-	go func() {
-		if err := e.Start(":8080"); err != nil && err != http.ErrServerClosed {
-			logger.ErrorAsync("Fatal error in Echo server listen", "error", err)
-			os.Exit(1)
+	admin := e.Group("/admin", func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if !a.adminAuthorized(c.Request().Header.Get("Authorization")) {
+				return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			}
+			return next(c)
 		}
-	}()
-
-	waitForShutdown(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		e.Shutdown(shutdownCtx)
 	})
+	admin.GET("/stats", handler.HandleStats)
+	admin.GET("/shard", handler.HandleShardManagement)
+	errChan := make(chan error, 1)
+	go func() { errChan <- e.Start(address) }()
+	return a.waitAndShutdown(errChan, func(ctx context.Context) error { return e.Shutdown(ctx) })
 }
 
-func authenticateDemo(userID, authorization string) (string, error) {
-	expectedToken := os.Getenv("WS_DEMO_TOKEN")
-	if expectedToken == "" {
-		return "", fmt.Errorf("WS_DEMO_TOKEN is required")
-	}
-	scheme, token, ok := strings.Cut(authorization, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" ||
-		subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
-		return "", fmt.Errorf("invalid demo token")
-	}
-	if userID == "" {
-		return "", fmt.Errorf("user_id query parameter is required")
-	}
-	return userID, nil
+func (a *application) runFiber(address string) error {
+	rateLimiter, connectionLimiter := a.adapterLimiters()
+	handler := wsFiber.NewHandler(wsFiber.Config{
+		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		AuthenticateIdentity: func(c *fiber.Ctx) (core.Identity, error) {
+			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.Get("Authorization"))
+		},
+	})
+	app := fiber.New(fiber.Config{ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second})
+	app.Use(fibermw.Recover())
+	app.Get("/ws", handler.HandleUpgrade)
+	app.Get("/health", handler.HandleHealthCheck)
+	admin := app.Group("/admin", func(c *fiber.Ctx) error {
+		if !a.adminAuthorized(c.Get("Authorization")) {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		}
+		return c.Next()
+	})
+	admin.Get("/stats", handler.HandleStats)
+	admin.Get("/shard", handler.HandleShardManagement)
+	errChan := make(chan error, 1)
+	go func() { errChan <- app.Listen(address) }()
+	return a.waitAndShutdown(errChan, func(context.Context) error { return app.Shutdown() })
 }
 
-// waitForShutdown blocks until SIGINT/SIGTERM, shuts down the HTTP server, and terminates the global websocket manager.
-func waitForShutdown(shutdownHttp func()) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+func (a *application) serveHTTP(server *http.Server) error {
+	errChan := make(chan error, 1)
+	go func() {
+		err := server.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		errChan <- err
+	}()
+	return a.waitAndShutdown(errChan, server.Shutdown)
+}
 
-	logger.InfoAsync("Initiating graceful shutdown sequence...")
+func (a *application) waitAndShutdown(serverErrors <-chan error, shutdownHTTP func(context.Context) error) error {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
 
-	// 1. Shutdown HTTP Server
-	shutdownHttp()
+	select {
+	case err := <-serverErrors:
+		return err
+	case signalValue := <-signals:
+		logger.InfoAsync("Shutdown signal received", "signal", signalValue.String())
+	}
 
-	// 2. Terminate WebSocket Manager (CRITICAL)
-	// This cascades the shutdown signal to all Shards to disconnect clients cleanly.
-	core.GetGlobalManager().Shutdown()
-	logger.InfoAsync("Service shutdown completed gracefully.")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := shutdownHTTP(ctx); err != nil {
+		logger.ErrorAsync("HTTP shutdown failed", "error", err)
+	}
+	return a.manager.Shutdown(ctx)
+}
 
-	// Close resources
+func (a *application) close() {
+	if a.manager != nil && a.manager.State() != core.StateStopped {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = a.manager.Shutdown(ctx)
+		cancel()
+	}
+	if a.redisClient != nil {
+		_ = a.redisClient.Close()
+	}
+	if a.natsClient != nil {
+		_ = a.natsClient.Close()
+	}
 	logger.Close()
-	redis.Close()
-	nats.Close()
 }

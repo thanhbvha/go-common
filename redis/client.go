@@ -299,10 +299,9 @@ func (c *Client) runHealthCheck() {
 		case <-ticker.C:
 			c.mu.RLock()
 			rc := c.rc
-			connected := c.connected
 			c.mu.RUnlock()
 
-			if !connected || rc == nil {
+			if rc == nil {
 				continue
 			}
 
@@ -310,10 +309,10 @@ func (c *Client) runHealthCheck() {
 			_, err := rc.Ping(hcCtx).Result()
 			cancel()
 
+			c.mu.Lock()
+			c.connected = err == nil
+			c.mu.Unlock()
 			if err != nil {
-				c.mu.Lock()
-				c.connected = false
-				c.mu.Unlock()
 				if c.cfg.Logger != nil {
 					// Async: health-check runs in background goroutine; must not block.
 					c.cfg.Logger.ErrorAsync("redis: health check failed", "err", err.Error())

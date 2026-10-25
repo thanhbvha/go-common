@@ -1,301 +1,390 @@
-// Package main implements a premium interactive command-line client to test and verify
-// the high-performance clustered WebSocket service. It works seamlessly with any of the
-// supported adapters (net/http, Fiber, Echo, Gin) running on the local workspace.
 package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"github.com/goccy/go-json"
 	"io"
-	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
 )
 
-// IncomingMessage represents the envelope for incoming payloads sent to the WS server.
-type IncomingMessage struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
+type clientConfig struct {
+	serverURL  string
+	userID     string
+	tenantID   string
+	accountID  string
+	sessionID  string
+	token      string
+	adminToken string
+	mode       string
+	roomID     string
+	message    string
+	targetUser string
+	probe      bool
 }
 
-// OutgoingMessage represents the envelope for outgoing payloads received from the WS server.
-type OutgoingMessage struct {
-	Type      string      `json:"type"`
-	Data      interface{} `json:"data"`
-	RequestID string      `json:"request_id,omitempty"`
+type incomingEnvelope struct {
+	Type      string `json:"type"`
+	Data      any    `json:"data"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
-// EchoPayload represents the schema returned by the custom chat_message handler in the servers.
-type EchoPayload struct {
-	Sender  string    `json:"sender"`
-	Payload string    `json:"payload"`
-	SentAt  time.Time `json:"sent_at"`
+type outgoingEnvelope struct {
+	Type string `json:"type"`
+	Data any    `json:"data"`
+}
+
+type demoClient struct {
+	config   clientConfig
+	conn     *websocket.Conn
+	writeMu  sync.Mutex
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func main() {
-	// Parse CLI flags
-	hostFlag := flag.String("host", "localhost", "WebSocket server hostname")
-	portFlag := flag.Int("port", 8080, "WebSocket server port")
-	userFlag := flag.String("user", "", "User ID for authentication (defaults to randomized ID)")
-	tokenFlag := flag.String("token", os.Getenv("WS_DEMO_TOKEN"), "Bearer token (defaults to WS_DEMO_TOKEN)")
-	interactiveFlag := flag.Bool("interactive", true, "Enable interactive mode to type messages in real time")
-	probeFlag := flag.Bool("probe", true, "Perform HTTP health & stats pre-flight checks")
-	flag.Parse()
-
-	// Seed random generator for user ID
-	rand.Seed(time.Now().UnixNano())
-	userID := *userFlag
-	if userID == "" {
-		userID = fmt.Sprintf("client_%d", rand.Intn(9000)+1000)
-	}
-	if *tokenFlag == "" {
-		fmt.Println("[CONFIG ERROR] Set WS_DEMO_TOKEN or pass -token")
-		os.Exit(2)
-	}
-
-	fmt.Printf("=== CLUSTERED WEBSOCKET INTEGRATION TEST CLIENT ===\n")
-	fmt.Printf("Target Host: %s\n", *hostFlag)
-	fmt.Printf("Target Port: %d\n", *portFlag)
-	fmt.Printf("User ID:    %s\n", userID)
-	fmt.Println(strings.Repeat("-", 60))
-
-	// 1. Pre-flight checks (HTTP endpoints)
-	if *probeFlag {
-		runPreflightChecks(*hostFlag, *portFlag)
-	}
-
-	// 2. Establish WebSocket connection
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-
-	u := url.URL{
-		Scheme:   "ws",
-		Host:     fmt.Sprintf("%s:%d", *hostFlag, *portFlag),
-		Path:     "/ws",
-		RawQuery: "user_id=" + url.QueryEscape(userID),
-	}
-
-	fmt.Printf("\n[CONNECTING] Handshaking with %s...\n", u.String())
-	requestHeader := make(http.Header)
-	requestHeader.Set("Authorization", "Bearer "+*tokenFlag)
-	c, resp, err := websocket.DefaultDialer.Dial(u.String(), requestHeader)
+	config, err := parseFlags()
 	if err != nil {
-		fmt.Printf("[CONNECTION ERROR] Upgrade failed: %v\n", err)
-		if resp != nil {
-			fmt.Printf("HTTP response status: %d\n", resp.StatusCode)
-			body, _ := io.ReadAll(resp.Body)
-			fmt.Printf("Response details: %s\n", string(body))
-		}
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	defer c.Close()
-	fmt.Printf("[CONNECTED] Established connection to WebSocket cluster node successfully!\n\n")
+	if err := run(config); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
 
-	done := make(chan struct{})
+func parseFlags() (clientConfig, error) {
+	configPath := exampleconfig.Path(os.Args[1:])
+	loaded, err := exampleconfig.Load(configPath)
+	if err != nil {
+		return clientConfig{}, fmt.Errorf("load config %q: %w", configPath, err)
+	}
+	configFile := flag.String("config", configPath, "YAML or .env configuration file")
+	serverURL := flag.String("url", loaded.ClientURL, "WebSocket URL")
+	userID := flag.String("user", loaded.ClientUser, "Identity user ID")
+	tenantID := flag.String("tenant", loaded.ClientTenant, "Identity tenant ID")
+	accountID := flag.String("account", loaded.ClientAccount, "Identity account ID; use admin for cluster.broadcast")
+	sessionID := flag.String("session", loaded.ClientSession, "Identity session ID; generated when omitted")
+	token := flag.String("token", loaded.ClientToken, "Client bearer token")
+	adminToken := flag.String("admin-token", loaded.AdminToken, "Admin bearer token for /admin endpoints")
+	mode := flag.String("mode", loaded.ClientMode, "Mode: interactive, script, or single")
+	roomID := flag.String("room", loaded.ClientRoom, "Room used by script and chat commands")
+	message := flag.String("message", loaded.ClientMessage, "Message used by script and single mode")
+	targetUser := flag.String("target-user", loaded.ClientTargetUser, "Target user for notification command")
+	probe := flag.Bool("probe", loaded.ClientProbe, "Probe /health and /admin/stats before connecting")
+	flag.Parse()
+	_ = configFile
 
-	// Goroutine for handling incoming WebSocket messages
-	go func() {
-		defer close(done)
-		for {
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					fmt.Printf("\n[DISCONNECTED] Server initiated graceful connection close.\n")
-				} else {
-					fmt.Printf("\n[DISCONNECTED] Connection terminated: %v\n", err)
-				}
-				return
-			}
+	if *sessionID == "" {
+		*sessionID = fmt.Sprintf("%s-%d", *userID, time.Now().UnixNano())
+	}
+	if *adminToken == "" {
+		*adminToken = *token
+	}
+	return clientConfig{serverURL: *serverURL, userID: *userID, tenantID: *tenantID, accountID: *accountID, sessionID: *sessionID, token: *token, adminToken: *adminToken, mode: *mode, roomID: *roomID, message: *message, targetUser: *targetUser, probe: *probe}, nil
+}
 
-			// Parse envelope
-			var out OutgoingMessage
-			if err := json.Unmarshal(message, &out); err != nil {
-				fmt.Printf("[RAW INCOMING] %s\n", string(message))
-				continue
-			}
+func run(config clientConfig) error {
+	if config.token == "" {
+		return errors.New("client_token is required in config, environment, or -token")
+	}
+	if config.userID == "" || config.tenantID == "" {
+		return errors.New("user and tenant are required")
+	}
+	if config.mode != "interactive" && config.mode != "script" && config.mode != "single" {
+		return fmt.Errorf("invalid mode %q", config.mode)
+	}
+	if config.probe {
+		probeHTTP(config)
+	}
 
-			// Format and print received events beautifully
-			switch out.Type {
-			case "chat_echo":
-				// Re-marshal and unmarshal into EchoPayload to guarantee field parsing
-				dataBytes, err := json.Marshal(out.Data)
-				if err == nil {
-					var echo EchoPayload
-					if err := json.Unmarshal(dataBytes, &echo); err == nil {
-						fmt.Printf("\n[ECHO RESPONSE]\n")
-						fmt.Printf("  Sender : %s\n", echo.Sender)
-						fmt.Printf("  Message: %s\n", echo.Payload)
-						fmt.Printf("  Time   : %s\n", echo.SentAt.Format(time.RFC3339Nano))
-						if out.RequestID != "" {
-							fmt.Printf("  Req ID : %s\n", out.RequestID)
-						}
-						// Print inline prompt again if in interactive mode
-						if *interactiveFlag {
-							fmt.Print("\nSend chat message -> ")
-						}
-						continue
-					}
-				}
-				// Fallback if data doesn't match EchoPayload structure exactly
-				fmt.Printf("\n[INCOMING EVENT] Type: %s, Data: %+v\n", out.Type, out.Data)
-			default:
-				fmt.Printf("\n[INCOMING EVENT] Type: %s, Data: %+v\n", out.Type, out.Data)
-			}
-			if *interactiveFlag {
-				fmt.Print("\nSend chat message -> ")
-			}
+	client, err := connect(config)
+	if err != nil {
+		return err
+	}
+	defer client.close("client exit")
+	go client.readLoop()
+
+	fmt.Printf("connected user=%s tenant=%s account=%s session=%s\n", config.userID, config.tenantID, config.accountID, config.sessionID)
+	switch config.mode {
+	case "interactive":
+		return client.runInteractive()
+	case "script":
+		return client.runScript()
+	case "single":
+		if err := client.send("chat.send", map[string]any{"room_id": config.roomID, "text": config.message}); err != nil {
+			return err
 		}
+		return client.wait(2 * time.Second)
+	}
+	return nil
+}
+
+func connect(config clientConfig) (*demoClient, error) {
+	target, err := url.Parse(config.serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse URL: %w", err)
+	}
+	query := target.Query()
+	query.Set("user_id", config.userID)
+	query.Set("tenant_id", config.tenantID)
+	query.Set("account_id", config.accountID)
+	query.Set("session_id", config.sessionID)
+	target.RawQuery = query.Encode()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+config.token)
+	headers.Set("X-Request-ID", "client-"+config.sessionID)
+	conn, response, err := websocket.DefaultDialer.Dial(target.String(), headers)
+	if err != nil {
+		if response != nil {
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			return nil, fmt.Errorf("upgrade failed: %w; status=%d body=%s", err, response.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	return &demoClient{config: config, conn: conn, done: make(chan struct{})}, nil
+}
+
+func (c *demoClient) readLoop() {
+	defer c.doneOnce.Do(func() { close(c.done) })
+	for {
+		_, payload, err := c.conn.ReadMessage()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				fmt.Println("connection closed:", err)
+			}
+			return
+		}
+		var envelope incomingEnvelope
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			fmt.Printf("<- raw %s\n", payload)
+			continue
+		}
+		encoded, _ := json.MarshalIndent(envelope.Data, "", "  ")
+		fmt.Printf("<- %s request_id=%s\n%s\n", envelope.Type, envelope.RequestID, encoded)
+	}
+}
+
+func (c *demoClient) send(eventType string, data any) error {
+	payload, err := json.Marshal(outgoingEnvelope{Type: eventType, Data: data})
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		return err
+	}
+	fmt.Printf("-> %s %s\n", eventType, payload)
+	return nil
+}
+
+func (c *demoClient) runScript() error {
+	steps := []struct {
+		eventType string
+		data      any
+		wait      time.Duration
+	}{
+		{"session.info", map[string]any{}, 250 * time.Millisecond},
+		{"system.ping", map[string]any{}, 250 * time.Millisecond},
+		{"room.join", map[string]any{"room_id": c.config.roomID}, 250 * time.Millisecond},
+		{"chat.send", map[string]any{"room_id": c.config.roomID, "text": c.config.message}, 500 * time.Millisecond},
+		{"user.notify", map[string]any{"user_id": c.config.targetUser, "text": "direct notification from " + c.config.userID}, 500 * time.Millisecond},
+	}
+	if c.config.accountID == "admin" {
+		steps = append(steps, struct {
+			eventType string
+			data      any
+			wait      time.Duration
+		}{"cluster.broadcast", map[string]any{"text": "cluster broadcast from " + c.config.userID}, 500 * time.Millisecond})
+	}
+	steps = append(steps, struct {
+		eventType string
+		data      any
+		wait      time.Duration
+	}{"room.leave", map[string]any{"room_id": c.config.roomID}, 250 * time.Millisecond})
+	for _, step := range steps {
+		if err := c.send(step.eventType, step.data); err != nil {
+			return err
+		}
+		if err := c.wait(step.wait); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *demoClient) runInteractive() error {
+	printHelp()
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(interrupt)
+
+	lines := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
 	}()
 
-	// 3. Send initial ping event
-	sendChatMessage(c, "Initial handshake message from test client!")
-
-	// 4. Handle input or keep alive
-	if *interactiveFlag {
-		fmt.Printf("[INTERACTIVE MODE] Type any message below and press Enter to transmit to the server cluster.\n")
-		fmt.Printf("Press Ctrl+C to exit gracefully.\n\n")
-
-		scanner := bufio.NewScanner(os.Stdin)
-		fmt.Print("Send chat message -> ")
-
-		// Set up goroutine for stdin processing so we can interrupt it cleanly via channel selection
-		inputChan := make(chan string)
-		go func() {
-			for scanner.Scan() {
-				inputChan <- scanner.Text()
+	for {
+		fmt.Print("ws> ")
+		select {
+		case <-interrupt:
+			return nil
+		case <-c.done:
+			return nil
+		case line, ok := <-lines:
+			if !ok {
+				return nil
 			}
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("[INPUT ERROR] Error reading from stdin: %v\n", err)
+			quit, err := c.handleCommand(strings.TrimSpace(line))
+			if err != nil {
+				fmt.Println("command error:", err)
 			}
-		}()
-
-		for {
-			select {
-			case text := <-inputChan:
-				trimmed := strings.TrimSpace(text)
-				if trimmed == "" {
-					fmt.Print("Send chat message -> ")
-					continue
-				}
-				if strings.ToLower(trimmed) == "/exit" || strings.ToLower(trimmed) == "/quit" {
-					gracefulClose(c)
-					return
-				}
-				if err := sendChatMessage(c, trimmed); err != nil {
-					fmt.Printf("[SEND ERROR] Failed to send message: %v\n", err)
-				}
-			case <-interrupt:
-				fmt.Printf("\n[SHUTDOWN] Ctrl+C received, terminating session...\n")
-				gracefulClose(c)
-				return
-			case <-done:
-				return
-			}
-		}
-	} else {
-		// Non-interactive mode: Send a few periodic messages and exit
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		count := 1
-		for {
-			select {
-			case <-done:
-				return
-			case t := <-ticker.C:
-				count++
-				msg := fmt.Sprintf("Periodic test message #%d sent at %s", count, t.Format("15:04:05"))
-				if err := sendChatMessage(c, msg); err != nil {
-					fmt.Printf("[SEND ERROR] Failed to send message: %v\n", err)
-					return
-				}
-				if count >= 5 {
-					fmt.Printf("\n[FINISHED] Completed 5 message transmissions. Closing connection.\n")
-					gracefulClose(c)
-					return
-				}
-			case <-interrupt:
-				fmt.Printf("\n[SHUTDOWN] Ctrl+C received, terminating session...\n")
-				gracefulClose(c)
-				return
+			if quit {
+				return nil
 			}
 		}
 	}
 }
 
-// sendChatMessage packages and sends a chat_message event.
-func sendChatMessage(c *websocket.Conn, content string) error {
-	dataBytes, err := json.Marshal(content)
-	if err != nil {
-		return err
+func (c *demoClient) handleCommand(line string) (bool, error) {
+	if line == "" {
+		return false, nil
 	}
-
-	msg := IncomingMessage{
-		Type: "chat_message",
-		Data: dataBytes,
+	command, arguments, _ := strings.Cut(line, " ")
+	arguments = strings.TrimSpace(arguments)
+	switch strings.ToLower(command) {
+	case "/help":
+		printHelp()
+	case "/quit", "/exit":
+		return true, nil
+	case "/info":
+		return false, c.send("session.info", map[string]any{})
+	case "/ping":
+		return false, c.send("system.ping", map[string]any{})
+	case "/join":
+		if arguments == "" {
+			return false, errors.New("usage: /join <tenant:room>")
+		}
+		return false, c.send("room.join", map[string]any{"room_id": arguments})
+	case "/leave":
+		if arguments == "" {
+			return false, errors.New("usage: /leave <tenant:room>")
+		}
+		return false, c.send("room.leave", map[string]any{"room_id": arguments})
+	case "/chat":
+		roomID, text, ok := strings.Cut(arguments, " ")
+		if !ok || roomID == "" || strings.TrimSpace(text) == "" {
+			return false, errors.New("usage: /chat <tenant:room> <text>")
+		}
+		return false, c.send("chat.send", map[string]any{"room_id": roomID, "text": strings.TrimSpace(text)})
+	case "/notify":
+		userID, text, ok := strings.Cut(arguments, " ")
+		if !ok || userID == "" || strings.TrimSpace(text) == "" {
+			return false, errors.New("usage: /notify <user> <text>")
+		}
+		return false, c.send("user.notify", map[string]any{"user_id": userID, "text": strings.TrimSpace(text)})
+	case "/broadcast":
+		if arguments == "" {
+			return false, errors.New("usage: /broadcast <text>; account must be admin")
+		}
+		return false, c.send("cluster.broadcast", map[string]any{"text": arguments})
+	case "/raw":
+		var envelope outgoingEnvelope
+		if err := json.Unmarshal([]byte(arguments), &envelope); err != nil {
+			return false, fmt.Errorf("invalid JSON: %w", err)
+		}
+		return false, c.send(envelope.Type, envelope.Data)
+	default:
+		return false, c.send("chat.send", map[string]any{"room_id": c.config.roomID, "text": line})
 	}
-
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("[SENDING] chat_message: %s\n", content)
-	return c.WriteMessage(websocket.TextMessage, payload)
+	return false, nil
 }
 
-// gracefulClose sends a WebSocket close control frame and waits briefly for server confirmation.
-func gracefulClose(c *websocket.Conn) {
-	fmt.Printf("[CLOSING] Sending close frame to cluster...\n")
-	err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Client disconnecting"))
+func printHelp() {
+	fmt.Println(`commands:
+  /info                              show structured identity and shard
+  /ping                              request system.pong
+  /join <tenant:room>                join an authorized room
+  /leave <tenant:room>               leave a room
+  /chat <tenant:room> <text>         fan out a room message
+  /notify <user> <text>              notify all local/cluster sessions for a user
+  /broadcast <text>                  shard-wide cluster broadcast; account=admin required
+  /raw {"type":"...","data":{}}     send an arbitrary envelope
+  /help                              print this help
+  /quit                              close the session
+
+Any line without a slash is sent as chat.send to the default -room.`)
+}
+
+func (c *demoClient) wait(duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-c.done:
+		return errors.New("connection closed")
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *demoClient) close(reason string) {
+	c.writeMu.Lock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
+	_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason))
+	c.writeMu.Unlock()
+	_ = c.conn.Close()
+}
+
+func probeHTTP(config clientConfig) {
+	websocketURL, err := url.Parse(config.serverURL)
 	if err != nil {
-		fmt.Printf("Error sending close frame: %v\n", err)
 		return
 	}
-	<-time.After(1 * time.Second)
-	fmt.Println("Closing local TCP socket.")
+	scheme := "http"
+	if websocketURL.Scheme == "wss" {
+		scheme = "https"
+	}
+	baseURL := scheme + "://" + websocketURL.Host
+	client := &http.Client{Timeout: 3 * time.Second}
+	probeEndpoint(client, baseURL+"/health", config.token)
+	probeEndpoint(client, baseURL+"/admin/stats", config.adminToken)
 }
 
-// runPreflightChecks performs GET queries to `/health` and `/stats` endpoints.
-func runPreflightChecks(host string, port int) {
-	client := &http.Client{Timeout: 2 * time.Second}
-	baseURL := fmt.Sprintf("http://%s:%d", host, port)
-
-	fmt.Printf("[PROBING] Performing pre-flight health check on %s...\n", baseURL)
-
-	// 1. Probe health
-	healthResp, err := client.Get(baseURL + "/health")
+func probeEndpoint(client *http.Client, endpoint, token string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
 	if err != nil {
-		fmt.Printf("  [WARNING] Health endpoint unreachable: %v\n", err)
-	} else {
-		defer healthResp.Body.Close()
-		body, _ := io.ReadAll(healthResp.Body)
-		fmt.Printf("  Health Status: %d %s (Body: %s)\n", healthResp.StatusCode, http.StatusText(healthResp.StatusCode), strings.TrimSpace(string(body)))
+		fmt.Printf("probe %s failed: %v\n", endpoint, err)
+		return
 	}
-
-	// 2. Probe stats (Try standard endpoint and Fiber-specific API group)
-	statsURL := baseURL + "/stats"
-	statsResp, err := client.Get(statsURL)
-	if err != nil || statsResp.StatusCode == http.StatusNotFound {
-		// Try Fiber Group Path
-		statsURL = baseURL + "/api/ws/stats"
-		statsResp, err = client.Get(statsURL)
-	}
-
-	if err != nil {
-		fmt.Printf("  [WARNING] Stats endpoint unreachable: %v\n", err)
-	} else {
-		defer statsResp.Body.Close()
-		body, _ := io.ReadAll(statsResp.Body)
-		fmt.Printf("  Server Stats : %s\n", strings.TrimSpace(string(body)))
-	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	fmt.Printf("probe %s -> %d %s\n", endpoint, response.StatusCode, strings.TrimSpace(string(body)))
 }

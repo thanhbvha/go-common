@@ -1,0 +1,34 @@
+# Shared local configuration for the server, protocol client, and load generator.
+# OS environment variables prefixed with WS_EXAMPLE_ override these values.
+server_stack: nethttp
+server_broker: standalone
+server_addr: ":8080"
+server_redis: "127.0.0.1:6379"
+server_nats: "nats://127.0.0.1:4222"
+server_tenant: demo
+
+# Demonstration credentials only. Do not use these values in production.
+client_token: local-demo-token
+admin_token: local-admin-token
+
+client_url: "ws://127.0.0.1:8080/ws"
+client_user: alice
+client_tenant: demo
+client_account: admin
+client_session: ""
+client_mode: script
+client_room: demo:lobby
+client_message: hello from config.yaml
+client_target_user: alice
+client_probe: true
+
+loadtest_target: "ws://127.0.0.1:8080/ws"
+loadtest_connections: 10
+loadtest_messages: 10
+loadtest_hold: 0s
+loadtest_slow_readers: 0
+loadtest_event: system.ping
+loadtest_scenario: message
+loadtest_reconnects: 3
+loadtest_churn_delay: 100ms
+loadtest_output: ""

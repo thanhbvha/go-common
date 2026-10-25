@@ -2,7 +2,6 @@
 package fiber
 
 import (
-	"io"
 	"time"
 
 	"github.com/gofiber/websocket/v2"
@@ -27,11 +26,6 @@ func (a *ConnAdapter) ReadMessage() (messageType int, p []byte, err error) {
 // WriteMessage delegates to the wrapped Fiber connection.
 func (a *ConnAdapter) WriteMessage(messageType int, data []byte) error {
 	return a.conn.WriteMessage(messageType, data)
-}
-
-// NextWriter delegates to the wrapped Fiber connection.
-func (a *ConnAdapter) NextWriter(messageType int) (io.WriteCloser, error) {
-	return a.conn.NextWriter(messageType)
 }
 
 // SetReadLimit delegates to the wrapped Fiber connection.

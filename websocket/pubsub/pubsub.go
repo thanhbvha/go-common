@@ -1,14 +1,26 @@
 // Package pubsub provides a distributed publish-subscribe abstraction for the WebSocket server.
 //
 // It allows multiple WebSocket nodes to form a cluster and broadcast messages across
-// the entire network. Built-in implementations include Redis (via pub/sub) and NATS (JetStream).
+// the entire network. Built-in best-effort implementations include Redis Pub/Sub and Core NATS.
 package pubsub
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
+)
+
+// ClusterFailurePolicy defines behavior when a configured cluster broker is unavailable.
+type ClusterFailurePolicy string
+
+const (
+	FailStartup     ClusterFailurePolicy = "fail_startup"
+	StayUnready     ClusterFailurePolicy = "stay_unready"
+	AllowStandalone ClusterFailurePolicy = "allow_standalone"
 )
 
 // Message types for cross-node communication.
@@ -26,6 +38,8 @@ const (
 
 // CrossNodeMessage represents the payload wrapper sent between different cluster nodes.
 type CrossNodeMessage struct {
+	ID        string                 `json:"id"`
+	Version   int                    `json:"version"`
 	Type      string                 `json:"type"`
 	NodeID    string                 `json:"node_id"`
 	ShardID   string                 `json:"shard_id,omitempty"`
@@ -33,6 +47,28 @@ type CrossNodeMessage struct {
 	RoomID    string                 `json:"room_id,omitempty"`
 	Data      map[string]interface{} `json:"data,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
+}
+
+// ReadinessProvider is implemented by cluster backends that expose connection
+// and desired-subscription convergence state.
+type ReadinessProvider interface {
+	Ready() bool
+}
+
+type WaitReadyProvider interface {
+	WaitReady(context.Context) error
+}
+
+var ErrManagerClosed = errors.New("websocket pubsub manager closed")
+
+// HandlerRegistration identifies one callback registration on a pub/sub manager.
+type HandlerRegistration uint64
+
+var nextHandlerRegistration atomic.Uint64
+
+// NewHandlerRegistration allocates an opaque registration identifier.
+func NewHandlerRegistration() HandlerRegistration {
+	return HandlerRegistration(nextHandlerRegistration.Add(1))
 }
 
 // GenerateNodeID generates a unique identifier for this server instance in the cluster.
@@ -47,7 +83,8 @@ func GenerateNodeID() string {
 
 // Manager defines the interface for cross-node coordination.
 type Manager interface {
-	RegisterHandler(messageType string, handler func(*CrossNodeMessage))
+	RegisterHandler(messageType string, handler func(*CrossNodeMessage)) HandlerRegistration
+	UnregisterHandler(HandlerRegistration)
 	Subscribe(channels ...string) error
 	Unsubscribe(channels ...string) error
 	Publish(channel string, message *CrossNodeMessage) error
@@ -100,11 +137,14 @@ func NewNoopManager() *NoopManager {
 	return &NoopManager{nodeID: GenerateNodeID()}
 }
 
-func (m *NoopManager) RegisterHandler(messageType string, handler func(*CrossNodeMessage)) {}
-func (m *NoopManager) Subscribe(channels ...string) error                                   { return nil }
-func (m *NoopManager) Unsubscribe(channels ...string) error                                 { return nil }
-func (m *NoopManager) Publish(channel string, message *CrossNodeMessage) error              { return nil }
-func (m *NoopManager) BroadcastMessage(shardID string, data map[string]interface{}) error   { return nil }
+func (m *NoopManager) RegisterHandler(messageType string, handler func(*CrossNodeMessage)) HandlerRegistration {
+	return NewHandlerRegistration()
+}
+func (m *NoopManager) UnregisterHandler(HandlerRegistration)                              {}
+func (m *NoopManager) Subscribe(channels ...string) error                                 { return nil }
+func (m *NoopManager) Unsubscribe(channels ...string) error                               { return nil }
+func (m *NoopManager) Publish(channel string, message *CrossNodeMessage) error            { return nil }
+func (m *NoopManager) BroadcastMessage(shardID string, data map[string]interface{}) error { return nil }
 func (m *NoopManager) BroadcastUserNotification(shardID, userID string, data map[string]interface{}) error {
 	return nil
 }
@@ -122,3 +162,5 @@ func (m *NoopManager) SendNodeStatus(data map[string]interface{}) error      { r
 func (m *NoopManager) GetNodeID() string                                     { return m.nodeID }
 func (m *NoopManager) GetStats() map[string]interface{}                      { return nil }
 func (m *NoopManager) Shutdown() error                                       { return nil }
+func (m *NoopManager) Ready() bool                                           { return true }
+func (m *NoopManager) WaitReady(context.Context) error                       { return nil }

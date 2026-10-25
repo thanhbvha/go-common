@@ -241,18 +241,27 @@ func (c *Client) buildOptions() ([]gonats.Option, error) {
 		gonats.ReconnectWait(cfg.ReconnectWait),
 		gonats.MaxReconnects(cfg.MaxReconnects),
 		gonats.DisconnectErrHandler(func(nc *gonats.Conn, err error) {
+			c.mu.Lock()
+			c.connected = false
+			c.mu.Unlock()
 			if cfg.Logger != nil && err != nil {
 				// Async: disconnect callback runs in NATS internal goroutine.
 				cfg.Logger.WarnAsync("nats: disconnected", "err", err.Error())
 			}
 		}),
 		gonats.ReconnectHandler(func(nc *gonats.Conn) {
+			c.mu.Lock()
+			c.connected = true
+			c.mu.Unlock()
 			if cfg.Logger != nil {
 				// Async: reconnect callback runs in NATS internal goroutine.
 				cfg.Logger.InfoAsync("nats: reconnected", "url", nc.ConnectedUrl())
 			}
 		}),
 		gonats.ClosedHandler(func(nc *gonats.Conn) {
+			c.mu.Lock()
+			c.connected = false
+			c.mu.Unlock()
 			if cfg.Logger != nil {
 				// Async: closed callback runs in NATS internal goroutine.
 				cfg.Logger.InfoAsync("nats: connection closed permanently")

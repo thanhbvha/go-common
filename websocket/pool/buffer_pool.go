@@ -61,68 +61,10 @@ func (bp *BufferPool) GetStats() map[string]interface{} {
 	}
 }
 
-// ConnectionPool manages pre-allocated message channels to improve memory efficiency per connection.
-type ConnectionPool struct {
-	pool      sync.Pool
-	totalGets int64
-	totalPuts int64
-}
-
-// NewConnectionPool creates a new ConnectionPool.
-func NewConnectionPool() *ConnectionPool {
-	cp := &ConnectionPool{}
-
-	cp.pool = sync.Pool{
-		New: func() interface{} {
-			return make(chan []byte, 256) // Buffered channel for messages
-		},
-	}
-
-	return cp
-}
-
-// GetChannel retrieves an empty buffered byte slice channel from the pool.
-func (cp *ConnectionPool) GetChannel() chan []byte {
-	atomic.AddInt64(&cp.totalGets, 1)
-	ch := cp.pool.Get().(chan []byte)
-
-	// Drain any remaining messages
-	for len(ch) > 0 {
-		<-ch
-	}
-
-	return ch
-}
-
-// PutChannel returns a channel to the pool. Closed or nil channels are ignored.
-func (cp *ConnectionPool) PutChannel(ch chan []byte) {
-	if ch == nil {
-		return
-	}
-
-	// Drain remaining messages before returning channel to pool
-	for len(ch) > 0 {
-		<-ch
-	}
-
-	atomic.AddInt64(&cp.totalPuts, 1)
-	cp.pool.Put(ch)
-}
-
-// GetStats returns statistics about the ConnectionPool.
-func (cp *ConnectionPool) GetStats() map[string]interface{} {
-	return map[string]interface{}{
-		"gets": atomic.LoadInt64(&cp.totalGets),
-		"puts": atomic.LoadInt64(&cp.totalPuts),
-	}
-}
-
-// Global pool instances.
+// Global pool instance.
 var (
-	globalBufferPool     *BufferPool
-	globalConnectionPool *ConnectionPool
-	bufferPoolOnce       sync.Once
-	connectionPoolOnce   sync.Once
+	globalBufferPool *BufferPool
+	bufferPoolOnce   sync.Once
 )
 
 // GetGlobalBufferPool returns the default singleton BufferPool with 4KB buffers.
@@ -131,12 +73,4 @@ func GetGlobalBufferPool() *BufferPool {
 		globalBufferPool = NewBufferPool(4096) // 4KB buffers
 	})
 	return globalBufferPool
-}
-
-// GetGlobalConnectionPool returns the default singleton ConnectionPool.
-func GetGlobalConnectionPool() *ConnectionPool {
-	connectionPoolOnce.Do(func() {
-		globalConnectionPool = NewConnectionPool()
-	})
-	return globalConnectionPool
 }

@@ -18,9 +18,13 @@ import (
 
 // Config holds the configuration options for the Gin WebSocket adapter.
 type Config struct {
+	// Manager is the core manager used by this adapter.
+	Manager *core.Manager
 	// Authenticate resolves user identifiers from the Gin context.
 	// Returns the UserID, or an error if unauthorized.
 	Authenticate func(c *gin.Context) (string, error)
+	// AuthenticateIdentity resolves a structured identity and takes precedence over Authenticate.
+	AuthenticateIdentity func(c *gin.Context) (core.Identity, error)
 	// Upgrader defines the websocket Upgrade configuration. If nil, standard Upgrader is used.
 	Upgrader *websocket.Upgrader
 	// RateLimiter specifies a custom RateLimiter. Falls back to global instance if nil.
@@ -34,7 +38,8 @@ type Config struct {
 
 // Handler manages the Gin HTTP endpoints and upgrades connections to the core WebSocket manager.
 type Handler struct {
-	config Config
+	config  Config
+	manager *core.Manager
 }
 
 // NewHandler instantiates a new Gin adapter Handler. It accepts optional variadic Config options,
@@ -66,25 +71,36 @@ func NewHandler(customConfig ...Config) *Handler {
 		config.ConnectionKey = func(c *gin.Context, _ string) string { return c.ClientIP() }
 	}
 
-	// Pre-initialize the core global manager with the specified pubsub adapter
-	core.GetGlobalManager()
-
-	return &Handler{config: config}
+	if config.Manager == nil {
+		config.Manager = core.GetGlobalManager()
+	}
+	return &Handler{config: config, manager: config.Manager}
 }
 
 // HandleUpgrade handles the Gin WebSocket connection upgrade process and registers session inside the core manager.
 func (h *Handler) HandleUpgrade(c *gin.Context) {
+	if !h.manager.IsAcceptingConnections() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "service draining"})
+		return
+	}
 	if !websocket.IsWebSocketUpgrade(c.Request) {
 		c.JSON(http.StatusUpgradeRequired, gin.H{"error": "upgrade required"})
 		return
 	}
 
-	userID, err := h.config.Authenticate(c)
-	if err != nil || userID == "" {
+	identity := core.Identity{}
+	var err error
+	if h.config.AuthenticateIdentity != nil {
+		identity, err = h.config.AuthenticateIdentity(c)
+	} else {
+		identity.UserID, err = h.config.Authenticate(c)
+	}
+	if err != nil || identity.UserID == "" {
 		logger.WarnAsync("WebSocket connection upgrade unauthorized", "error", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
+	userID := identity.UserID
 
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
@@ -124,10 +140,9 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 			RequestID: requestID,
 		}))
 
-		manager := core.GetGlobalManager()
-		shardID := manager.GetShardID(userID)
+		shardID := h.manager.GetShardID(userID)
 
-		if err := manager.HandleConnection(conn, shardID, userID, clientIP, requestID); err != nil {
+		if err := h.manager.HandleIdentityConnection(conn, shardID, identity, clientIP, requestID); err != nil {
 			logger.ErrorAsync("Failed to handle WebSocket connection in manager", "error", err, "userID", userID)
 		}
 	}()
@@ -147,13 +162,10 @@ func getRequestID(c *gin.Context) string {
 
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.
 func (h *Handler) HandleStats(c *gin.Context) {
-	manager := core.GetGlobalManager()
-	pubsubManager := manager.GetPubSubManager()
-
 	c.JSON(http.StatusOK, gin.H{
-		"manager":     manager.GetStats(),
+		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
-		"pubsub":      pubsubManager.GetStats(),
+		"pubsub":      h.manager.GetPubSubManager().GetStats(),
 		"timestamp":   time.Now(),
 	})
 }
@@ -166,8 +178,7 @@ func (h *Handler) HandleShardManagement(c *gin.Context) {
 		return
 	}
 
-	manager := core.GetGlobalManager()
-	if shard, exists := manager.GetShard(shardID); exists {
+	if shard, exists := h.manager.GetShard(shardID); exists {
 		c.JSON(http.StatusOK, gin.H{
 			"shardID":     shardID,
 			"connections": shard.GetConnectionCount(),
@@ -181,16 +192,10 @@ func (h *Handler) HandleShardManagement(c *gin.Context) {
 
 // HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
 func (h *Handler) HandleHealthCheck(c *gin.Context) {
-	manager := core.GetGlobalManager()
-	stats := manager.GetStats()
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":           "healthy",
-		"timestamp":        time.Now(),
-		"totalConnections": stats["totalConnections"],
-		"totalShards":      stats["totalShards"],
-		"memoryLimit":      stats["maxTotalConnections"],
-		"shardLimit":       stats["maxShards"],
-		"nodeID":           manager.GetPubSubManager().GetNodeID(),
-	})
+	readiness := h.manager.Readiness()
+	status := http.StatusOK
+	if !readiness.Ready {
+		status = http.StatusServiceUnavailable
+	}
+	c.JSON(status, gin.H{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
 }
