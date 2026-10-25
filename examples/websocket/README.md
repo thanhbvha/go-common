@@ -803,7 +803,7 @@ Replace these demonstration choices:
 | Public health route | Internal listener or infrastructure authorization |
 | Static authorizer | Domain permission service or cached policy |
 | Node-local quotas only | Distributed reservation if strict cluster quota is required |
-| Redis Pub/Sub/Core NATS | Durable backend for messages that cannot be lost |
+| Redis Pub/Sub/Core NATS | Domain persistence plus outbox/inbox or a dedicated queue for messages that cannot be lost |
 | Hard-coded limits | Values established by Linux/TLS load and soak testing |
 
 ## Build and Test
@@ -825,7 +825,3 @@ git diff --check
 ## Related Documentation
 
 - `websocket/README.md`: complete module architecture, configuration, security, delivery, and tuning guide.
-- `WEBSOCKET_P0_REPORT.md`: dependency ownership, supervision, shard synchronization, and room cleanup.
-- `WEBSOCKET_P1_REPORT.md`: payload ownership, quotas, observers, broker recovery, and durable contract.
-- `WEBSOCKET_P2_REPORT.md`: latency, tracing, logging, profiles, and load scenarios.
-- `WEBSOCKET_DEFINITION_OF_DONE_REPORT.md`: local completion versus external production evidence.

@@ -32,7 +32,7 @@ The recommended production path is explicit dependency injection through `core.N
 
 Redis Pub/Sub and Core NATS are best-effort transports. They do not provide acknowledgement, replay, consumer offsets, offline delivery, or exactly-once semantics. Persist business data before fan-out and let reconnecting clients resynchronize from the system of record.
 
-Use the separate `websocket/durable` contract when delivery must be persistent. Backend implementations such as Redis Streams or NATS JetStream are intentionally separate from `pubsub.Manager`.
+When delivery must be persistent, store the business event in the system of record and use an outbox, inbox, or one of the repository's queue packages. Keep persistent processing separate from `pubsub.Manager` and let reconnecting clients resynchronize from durable application state.
 
 Typical architecture:
 
@@ -40,7 +40,7 @@ Typical architecture:
 database or service API = source of truth
 websocket core          = live client transport
 Redis/NATS pubsub       = best-effort cross-node fan-out
-durable.Bus backend     = persistent delivery when required
+outbox/inbox or queue   = persistent processing when required
 ```
 
 Do not use best-effort WebSocket delivery as the only record for payments, ledgers, audits, critical commands, or guaranteed offline messages.
@@ -485,7 +485,7 @@ Room join and leave are idempotent. Joining requires the connection to be active
 - No global ordering is promised across connections, shards, processes, or broker nodes.
 - A full send queue drops the current message and may close the slow consumer according to `SlowConsumerDropThreshold`.
 - Inbound queue or executor overload drops/rejects work instead of growing memory without a bound.
-- Applications requiring retries must implement idempotency and retry at the business layer or use durable delivery.
+- Applications requiring retries must implement idempotency and retry at the business layer or use an outbox, inbox, or dedicated queue package.
 
 ## Single-Node Mode
 
@@ -586,23 +586,6 @@ if readyProvider, ok := config.PubSub.(pubsub.WaitReadyProvider); ok {
 
 Broker states include `standalone`, `disconnected`, `recovering_subscriptions`, `ready`, and `closed`.
 
-## Durable Delivery Contract
-
-Persistent backends implement:
-
-```go
-type Bus interface {
-    Publish(context.Context, string, []byte, PublishOptions) (Message, error)
-    Consume(context.Context, string, ConsumerOptions) (Consumer, error)
-    WaitReady(context.Context) error
-    Close() error
-}
-```
-
-Consumers support `Receive`, `Ack`, `Nack`, and `Close`. `PublishOptions` includes a deduplication ID; `ConsumerOptions` includes name, batch size, and acknowledgement timeout.
-
-The package currently defines the contract. A Redis Streams or JetStream implementation must be supplied separately.
-
 ## Observability
 
 `AtomicObserver` records manager-local cumulative counters:
@@ -695,7 +678,7 @@ Manager shutdown:
 - Keep administrative health, stats, and shard endpoints private or authenticated.
 - Never log frames, credentials, tokens, or broker payload contents.
 - Persist critical data before best-effort fan-out.
-- Use idempotency and durable delivery for operations that cannot be lost or duplicated.
+- Use idempotency with domain persistence, an outbox/inbox, or a dedicated queue for operations that cannot be lost or duplicated.
 
 ## Error and Overload Behavior
 
@@ -854,7 +837,6 @@ Fuzz regression corpora under `websocket/core/testdata/fuzz` are source-controll
 | `pubsub.Manager` | Best-effort cross-node routing abstraction |
 | `redispubsub.Manager` | Redis Pub/Sub backend |
 | `natspubsub.Manager` | Core NATS backend |
-| `durable.Bus` | Persistent delivery contract for separate backend implementations |
 
 ## Further Documentation
 
