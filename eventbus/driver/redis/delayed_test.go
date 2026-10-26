@@ -312,3 +312,41 @@ func TestRedisSchedulerHealthRecordsFailureAndRecovery(t *testing.T) {
 		t.Fatalf("recovered status = %#v", status)
 	}
 }
+
+func TestDelaySweeperPanicRecordsHealthCancelsAndCompletes(t *testing.T) {
+	backend, _ := delayedBackend(t)
+	topo := transport.Topology{Namespace: "test", JobType: "sweeper-panic"}
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.mu.Lock()
+	backend.sweepers[topologyPrefix(topo)] = cancel
+	backend.mu.Unlock()
+	backend.sweeperWG.Add(1)
+
+	backend.runDelaySweeper(cancel, topo, func() { panic("synthetic sweeper panic") })
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("sweeper ownership was not canceled")
+	}
+	done := make(chan struct{})
+	go func() {
+		backend.sweeperWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweeper WaitGroup was not released")
+	}
+	status := backend.SchedulerHealth(topo)
+	if len(status) != 1 || !status[0].Degraded || status[0].LastErrorOperation != "panic" {
+		t.Fatalf("panic status = %#v", status)
+	}
+	backend.mu.Lock()
+	_, owned := backend.sweepers[topologyPrefix(topo)]
+	backend.mu.Unlock()
+	if owned {
+		t.Fatal("panicked sweeper retained topology ownership")
+	}
+}

@@ -273,6 +273,25 @@ func TestDelayedSchedulerAutomaticallyDispatchesAndReportsBackpressure(t *testin
 	}
 }
 
+func TestSchedulerPanicRecordsErrorAndClosesDone(t *testing.T) {
+	backend := &memoryTransport{
+		delayedCounts: make(map[string]int),
+		done:          make(chan struct{}),
+	}
+
+	backend.runScheduler(func() { panic("synthetic scheduler panic") })
+
+	select {
+	case <-backend.done:
+	default:
+		t.Fatal("scheduler completion channel was not closed")
+	}
+	status := backend.SchedulerStatus()
+	if status.LastError != transport.ErrRecoveredPanic.Error() || status.Retries != 1 {
+		t.Fatalf("scheduler status = %+v", status)
+	}
+}
+
 func TestCancellationRedeliversUnsettledMessage(t *testing.T) {
 	backend := New().(*memoryTransport)
 	t.Cleanup(func() { _ = backend.Close(context.Background()) })

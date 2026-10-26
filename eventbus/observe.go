@@ -69,13 +69,13 @@ func cloneHeaders(headers Headers) Headers {
 
 func (e *engine) traceOutcome(ctx context.Context, name, outcome string) {
 	if recorder, ok := e.cfg.Tracer.(TraceRecorder); ok {
-		recorder.RecordEvent(ctx, name, map[string]string{"outcome": outcome})
+		safeTraceRecord(recorder, ctx, name, map[string]string{"outcome": outcome})
 	}
 }
 
 func (e *engine) traceSettlement(ctx context.Context, decision, outcome string) {
 	if recorder, ok := e.cfg.Tracer.(TraceRecorder); ok {
-		recorder.RecordEvent(ctx, "settlement", map[string]string{"decision": decision, "outcome": outcome})
+		safeTraceRecord(recorder, ctx, "settlement", map[string]string{"decision": decision, "outcome": outcome})
 	}
 }
 
@@ -94,10 +94,48 @@ type observedDelivery struct {
 	ctx     context.Context
 }
 
+type sessionDelivery struct {
+	transport.Delivery
+	cancel context.CancelFunc
+}
+
+type sessionLeaseDelivery struct {
+	*sessionDelivery
+	lease transport.LeaseDelivery
+}
+
+func (d *sessionLeaseDelivery) HeartbeatInterval() time.Duration {
+	return d.lease.HeartbeatInterval()
+}
+
+func withSessionCancel(delivery transport.Delivery, cancel context.CancelFunc) transport.Delivery {
+	wrapped := &sessionDelivery{Delivery: delivery, cancel: cancel}
+	if lease, ok := delivery.(transport.LeaseDelivery); ok {
+		return &sessionLeaseDelivery{sessionDelivery: wrapped, lease: lease}
+	}
+	return wrapped
+}
+
+func (d *sessionDelivery) cancelSession() {
+	if d.cancel != nil {
+		d.cancel()
+	}
+}
+
+type sessionCanceler interface {
+	cancelSession()
+}
+
 func (d *observedDelivery) Message() transport.Message {
 	msg := d.message
 	msg.Headers = cloneHeaders(msg.Headers)
 	return msg
+}
+
+func (d *observedDelivery) cancelSession() {
+	if canceler, ok := d.Delivery.(sessionCanceler); ok {
+		canceler.cancelSession()
+	}
 }
 
 // Unknown broker-wide age/lag must not be replaced with engine-local samples.
@@ -108,9 +146,79 @@ func (e *engine) observeQueueAge(name string, env *Envelope) {
 	}
 	if readyAt > 0 {
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.ObserveQueueAge(name, max(0, time.Since(time.UnixMilli(readyAt)).Seconds()))
+			safeRuntimeMetric(func() { metrics.ObserveQueueAge(name, max(0, time.Since(time.UnixMilli(readyAt)).Seconds())) })
 		}
 	}
+}
+
+func safeMetric(call func()) {
+	guardCall(panicScopeMetrics, "metrics hook", nil, call)
+}
+
+func safeRuntimeMetric(call func()) {
+	guardCall(panicScopeMetrics, "runtime metrics hook", nil, call)
+}
+
+func safeTraceStart(tracer Tracer, ctx context.Context, operation string, carrier Headers) (context.Context, func()) {
+	if tracer == nil {
+		return ctx, noopRelease
+	}
+	type result struct {
+		ctx context.Context
+		end func()
+	}
+	started, err := guardValue(panicScopeTracer, "trace start", nil, func() (result, error) {
+		spanCtx, end := tracer.Start(ctx, operation, carrier)
+		return result{ctx: spanCtx, end: end}, nil
+	})
+	if err != nil || started.ctx == nil {
+		return ctx, noopRelease
+	}
+	if started.end == nil {
+		started.end = noopRelease
+	}
+	return started.ctx, func() {
+		guardCall(panicScopeTracer, "trace end", nil, started.end)
+	}
+}
+
+func safeTraceInject(injector TraceInjector, ctx context.Context, carrier Headers) {
+	guardCall(panicScopeTracer, "trace inject", nil, func() { injector.Inject(ctx, carrier) })
+}
+
+func safeTraceRecord(recorder TraceRecorder, ctx context.Context, name string, attributes map[string]string) {
+	guardCall(panicScopeTracer, "trace record", nil, func() { recorder.RecordEvent(ctx, name, attributes) })
+}
+
+type safeLogger struct{ base Logger }
+
+func wrapSafeLogger(logger Logger) Logger {
+	if logger == nil {
+		return noopLogger{}
+	}
+	if _, ok := logger.(safeLogger); ok {
+		return logger
+	}
+	return safeLogger{base: logger}
+}
+
+func (l safeLogger) Info(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger info", nil, func() { l.base.Info(msg, args...) })
+}
+func (l safeLogger) Warn(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger warn", nil, func() { l.base.Warn(msg, args...) })
+}
+func (l safeLogger) Error(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger error", nil, func() { l.base.Error(msg, args...) })
+}
+func (l safeLogger) InfoAsync(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger info async", nil, func() { l.base.InfoAsync(msg, args...) })
+}
+func (l safeLogger) WarnAsync(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger warn async", nil, func() { l.base.WarnAsync(msg, args...) })
+}
+func (l safeLogger) ErrorAsync(msg string, args ...any) {
+	guardCall(panicScopeLogger, "logger error async", nil, func() { l.base.ErrorAsync(msg, args...) })
 }
 
 // noop components

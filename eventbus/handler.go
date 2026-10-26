@@ -3,8 +3,6 @@ package eventbus
 import (
 	"context"
 	"fmt"
-	"runtime"
-	"strings"
 )
 
 // TypedHandler is a generic handler function that takes a strongly-typed payload.
@@ -48,6 +46,7 @@ func Enqueue[T any](ctx context.Context, b Bus, jobType string, payload T, opts 
 // The engine already provides this protection by default. Recovery does not
 // expose the panic value; stack logs contain only bounded source locations.
 func Recoverer(logger Logger) Middleware {
+	logger = wrapSafeLogger(logger)
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job Job) error {
 			return invokeHandler(ctx, job, next, logger)
@@ -67,31 +66,10 @@ func invokeHandler(ctx context.Context, job Job, handler Handler, logger Logger)
 		_ = recover()
 		err = ErrHandlerPanic
 		if logger != nil {
-			logger.ErrorAsync("panic recovered in job handler", "job_id", job.ID(), "type", job.Type(), "stack", panicStack())
+			logger.ErrorAsync("panic recovered in job handler", "job_id", job.ID(), "type", job.Type(), "stack", capturePanicStack(4))
 		}
 	}()
 	err = handler(ctx, job)
 	completed = true
 	return err
-}
-
-// Unlike debug.Stack, CallersFrames does not include function argument values.
-// Bound both frame collection and serialized output; never put this in Cause.
-func panicStack() string {
-	var pcs [32]uintptr
-	n := runtime.Callers(3, pcs[:])
-	frames := runtime.CallersFrames(pcs[:n])
-	var stack strings.Builder
-	for {
-		frame, more := frames.Next()
-		line := fmt.Sprintf("%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line)
-		if stack.Len()+len(line) > 8*1024 {
-			break
-		}
-		stack.WriteString(line)
-		if !more {
-			break
-		}
-	}
-	return stack.String()
 }

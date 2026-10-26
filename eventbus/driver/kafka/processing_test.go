@@ -120,6 +120,39 @@ type blockingCommitter struct {
 	release chan error
 }
 
+type panicCommitter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *panicCommitter) CommitRecords(context.Context, ...*kgo.Record) error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	panic("must not escape")
+}
+
+func TestOffsetCoordinatorPanicStopsCommitsAndSurfacesFailure(t *testing.T) {
+	committer := &panicCommitter{}
+	coordinator := newOffsetCoordinator(committer, 1)
+	record := processingRecord(0, 1)
+	if err := coordinator.register(context.Background(), []*kgo.Record{record}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.settle(context.Background(), record); !errors.Is(err, transport.ErrRecoveredPanic) {
+		t.Fatalf("settlement error = %v, want recovered panic", err)
+	}
+	if err := coordinator.register(context.Background(), []*kgo.Record{processingRecord(0, 2)}); !errors.Is(err, transport.ErrRecoveredPanic) {
+		t.Fatalf("registration error = %v, want recovered panic", err)
+	}
+	coordinator.close()
+	committer.mu.Lock()
+	defer committer.mu.Unlock()
+	if committer.calls != 1 {
+		t.Fatalf("commit calls = %d, want 1", committer.calls)
+	}
+}
+
 func (c *blockingCommitter) CommitRecords(_ context.Context, records ...*kgo.Record) error {
 	c.started <- records[len(records)-1]
 	return <-c.release

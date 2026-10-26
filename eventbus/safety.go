@@ -140,13 +140,17 @@ func safeAs[T error](err error) (target T, ok bool) {
 }
 
 func safeRetryBackoff(policy RetryPolicy, attempt int) (delay time.Duration, policyErr error) {
+	completed := false
 	defer func() {
-		if recover() != nil {
-			delay = 0
-			policyErr = ErrRetryPolicyPanic
+		if completed {
+			return
 		}
+		_ = recover()
+		delay = 0
+		policyErr = ErrRetryPolicyPanic
 	}()
 	delay = policy.NextBackoff(attempt)
+	completed = true
 	return normalizeRetryDelay(delay), nil
 }
 

@@ -1,11 +1,14 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
+
+var ErrFactoryPanic = errors.New("eventbus: transport factory panic")
 
 // Factory is a function that creates a new Transport driver instance.
 type Factory func() (transport.Transport, error)
@@ -30,7 +33,7 @@ func Register(name string, factory Factory) {
 }
 
 // Get creates a new transport instance by its registered name.
-func Get(name string) (transport.Transport, error) {
+func Get(name string) (instance transport.Transport, err error) {
 	mu.RLock()
 	factory, ok := factories[name]
 	mu.RUnlock()
@@ -39,5 +42,15 @@ func Get(name string) (transport.Transport, error) {
 		return nil, fmt.Errorf("eventbus: unknown driver %q (forgot to import?)", name)
 	}
 
-	return factory()
+	completed := false
+	defer func() {
+		if !completed {
+			_ = recover()
+			instance = nil
+			err = ErrFactoryPanic
+		}
+	}()
+	instance, err = factory()
+	completed = true
+	return instance, err
 }

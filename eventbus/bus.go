@@ -196,7 +196,13 @@ func (b *bus) Ping(ctx context.Context) error {
 		return err
 	}
 	defer release()
-	return b.transport.Ping(ctx)
+	if err := guardError(panicScopeAdmin, "transport ping", nil, func() error { return b.transport.Ping(ctx) }); err != nil {
+		return err
+	}
+	if b.engine.isDegraded() {
+		return fmt.Errorf("%w: recovered panics=%d", ErrBusDegraded, b.engine.recoveredPanicCount())
+	}
+	return nil
 }
 
 func (b *bus) Pause(ctx context.Context, name string) error {

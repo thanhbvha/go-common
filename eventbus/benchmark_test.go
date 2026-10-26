@@ -16,6 +16,15 @@ type benchmarkPayload struct {
 	Enabled bool   `json:"enabled"`
 }
 
+func BenchmarkGuardNoPanic(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if guardCall(panicScopeMetrics, "benchmark", nil, func() {}) {
+			b.Fatal("unexpected panic")
+		}
+	}
+}
+
 func BenchmarkCodecEncode(b *testing.B) {
 	codec := NewCodec(nil)
 	payload := benchmarkPayload{ID: 9_007_199_254_740_993, Name: "benchmark", Enabled: true}

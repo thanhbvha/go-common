@@ -575,6 +575,28 @@ func TestDelayTierPollIsBoundedAndShutdownJoins(t *testing.T) {
 	})
 }
 
+func TestDelayTierPanicUpdatesHealthAndClosesConsumer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		topo := transport.Topology{Namespace: "test", JobType: "panic-health"}
+		backend := &kafkaTransport{}
+		client := &fakeDelayConsumer{pollFn: func(context.Context, int) kgo.Fetches {
+			panic("must not escape")
+		}}
+		backend.runDelayTierGuarded(ctx, cancel, topo, delayTiers[0], false, client)
+		if !client.closed {
+			t.Fatal("delay consumer was not closed after panic")
+		}
+		if ctx.Err() == nil {
+			t.Fatal("scheduler ownership was not canceled after panic")
+		}
+		health := backend.SchedulerHealth(topo)
+		if len(health) != 1 || !health[0].Degraded || health[0].LastErrorOperation != "panic" {
+			t.Fatalf("scheduler health = %#v", health)
+		}
+	})
+}
+
 func TestDelayTierFullBatchUsesFastFollowUp(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

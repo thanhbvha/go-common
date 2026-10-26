@@ -572,6 +572,32 @@ Retry delays are normalized to the range from immediate retry through 30 days.
 A panicking custom retry policy is isolated and becomes an immediate retry with
 a fixed error classification.
 
+### Panic isolation
+
+Handler and middleware panics are recovered inside the worker, classified as
+`ErrHandlerPanic`, and follow the same retry and final-attempt DLQ rules as other
+retryable failures. The worker remains available for later deliveries.
+
+Panic boundaries also protect EventBus-owned consumer, heartbeat, settlement,
+shutdown, observability, and built-in driver goroutines. Infrastructure panics
+never reuse the handler retry classification:
+
+- consumer and worker panics cancel the current session and leave uncertain
+  sources unsettled for broker redelivery;
+- heartbeat panic cancels processing and the owning consumer session, then
+  suppresses settlement;
+- settlement panic is not automatically repeated because broker outcome may be
+  ambiguous;
+- logger, metrics, and tracer panic is isolated from delivery behavior;
+- repeated consumer panics stop the affected consumer and make `Ping` return an
+  error matching `ErrBusDegraded`;
+- synchronous transport panics return an error matching `ErrRecoveredPanic`.
+
+Recovered diagnostics contain fixed classifications and bounded source
+locations. Panic values, payloads, headers, and raw handler errors are not
+stored. Goroutines owned internally by third-party broker clients remain outside
+EventBus recovery boundaries.
+
 ## Scheduling
 
 Schedule a task or event with one of:
@@ -781,6 +807,8 @@ Unsupported optional operations return an error matching `ErrNotSupported`.
 Set `Config.Logger`, `Config.Metrics`, and `Config.Tracer` before `Open`.
 Implementations are called synchronously from concurrent producers and workers,
 so they must be concurrency-safe, bounded, and nonblocking.
+EventBus isolates a panic from these hooks, but it cannot prevent a slow or
+blocking implementation from reducing producer or worker throughput.
 
 Core metrics hooks report:
 

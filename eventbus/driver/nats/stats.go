@@ -101,6 +101,8 @@ func (t *natsTransport) Stats(ctx context.Context, topology transport.Topology) 
 }
 
 func (t *natsTransport) addPrivateRetryStats(ctx context.Context, topology transport.Topology, stats *transport.TopologyStats) error {
+	helperCtx, cancelHelpers := context.WithCancel(ctx)
+	defer cancelHelpers()
 	seen := make(map[string]struct{})
 	var durables []string
 	err := t.walkKVSnapshot(ctx, topology, "subscriber."+retryLaneVersionFor(topology)+".>", func(entry gonats.KeyValueEntry) error {
@@ -124,40 +126,54 @@ func (t *natsTransport) addPrivateRetryStats(ctx context.Context, topology trans
 		err      error
 	}
 	jobs := make(chan string)
-	results := make(chan retryStats, len(durables))
 	workers := min(privateRetryStatsConcurrency, len(durables))
+	results := make(chan retryStats, len(durables)+workers)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for range workers {
 		go func() {
 			defer wg.Done()
-			for durable := range jobs {
-				info, err := t.js.ConsumerInfo(t.retryStreamName(topology, durable), t.retryConsumerName(topology, durable), gonats.Context(ctx))
-				if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
-					results <- retryStats{}
-					continue
+			transport.Guard(func() {
+				select {
+				case results <- retryStats{err: transport.ErrRecoveredPanic}:
+				case <-helperCtx.Done():
 				}
-				if err != nil {
-					results <- retryStats{err: fmt.Errorf("nats: inspect private retry consumer: %w", err)}
-					continue
+			}, func() {
+				for durable := range jobs {
+					info, err := t.js.ConsumerInfo(t.retryStreamName(topology, durable), t.retryConsumerName(topology, durable), gonats.Context(helperCtx))
+					if errors.Is(err, gonats.ErrConsumerNotFound) || errors.Is(err, gonats.ErrStreamNotFound) {
+						results <- retryStats{}
+						continue
+					}
+					if err != nil {
+						results <- retryStats{err: fmt.Errorf("nats: inspect private retry consumer: %w", err)}
+						continue
+					}
+					results <- retryStats{pending: info.NumPending, inFlight: info.NumAckPending}
 				}
-				results <- retryStats{pending: info.NumPending, inFlight: info.NumAckPending}
-			}
+			})
 		}()
 	}
 	go func() {
 		defer close(jobs)
-		for _, durable := range durables {
+		transport.Guard(func() {
 			select {
-			case jobs <- durable:
-			case <-ctx.Done():
-				return
+			case results <- retryStats{err: transport.ErrRecoveredPanic}:
+			case <-helperCtx.Done():
 			}
-		}
+		}, func() {
+			for _, durable := range durables {
+				select {
+				case jobs <- durable:
+				case <-helperCtx.Done():
+					return
+				}
+			}
+		})
 	}()
 	go func() {
-		wg.Wait()
-		close(results)
+		defer close(results)
+		transport.Guard(nil, wg.Wait)
 	}()
 	for result := range results {
 		if result.err != nil {

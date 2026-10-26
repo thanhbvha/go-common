@@ -109,6 +109,10 @@ func (*rejectingTopologyTransport) ValidateTopology(transport.Topology) error {
 	return fmt.Errorf("driver rejected topology")
 }
 
+type panickingTopologyTransport struct{ benchmarkTransport }
+
+func (*panickingTopologyTransport) ValidateTopology(transport.Topology) error { panic("validator") }
+
 func TestDeclarationInvokesDriverTopologyValidator(t *testing.T) {
 	instance, err := Open(DefaultConfig(), WithTransport(&rejectingTopologyTransport{}))
 	if err != nil {
@@ -116,6 +120,17 @@ func TestDeclarationInvokesDriverTopologyValidator(t *testing.T) {
 	}
 	if err := instance.DeclareTask("task"); !errors.Is(err, ErrInvalidOption) {
 		t.Fatalf("DeclareTask error = %v, want ErrInvalidOption", err)
+	}
+}
+
+func TestTopologyValidatorPanicPreservesErrorChain(t *testing.T) {
+	instance, err := Open(DefaultConfig(), WithTransport(&panickingTopologyTransport{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = instance.DeclareTask("task")
+	if !errors.Is(err, ErrInvalidOption) || !errors.Is(err, ErrRecoveredPanic) {
+		t.Fatalf("DeclareTask error = %v", err)
 	}
 }
 

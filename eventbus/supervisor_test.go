@@ -77,6 +77,94 @@ func TestSupervisorReconnectAndCancellation(t *testing.T) {
 	}
 }
 
+func TestSupervisorRecoversConsumePanicAndReconnects(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		backend := &supervisorTransport{consume: func(ctx context.Context, _ transport.Subscription, _ func(transport.Delivery)) error {
+			if calls.Add(1) == 1 {
+				panic("synthetic consume panic")
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		e, done := startTestSupervisor(t, backend, func(context.Context, Job) error { return nil })
+		synctest.Wait()
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("sessions before backoff = %d, want 1", got)
+		}
+		time.Sleep(150 * time.Millisecond)
+		synctest.Wait()
+		if got := calls.Load(); got != 2 {
+			t.Fatalf("sessions after panic = %d, want 2", got)
+		}
+		e.cancel()
+		synctest.Wait()
+		<-done
+	})
+}
+
+type panickingMessageDelivery struct{ workerPoolDelivery }
+
+func (*panickingMessageDelivery) Message() transport.Message { panic("synthetic worker panic") }
+
+func TestWorkerInfrastructurePanicCancelsSessionAndReconnects(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var sessions atomic.Int32
+		delivery := &panickingMessageDelivery{workerPoolDelivery: workerPoolDelivery{settled: make(chan struct{})}}
+		backend := &supervisorTransport{consume: func(ctx context.Context, _ transport.Subscription, deliver func(transport.Delivery)) error {
+			if sessions.Add(1) == 1 {
+				deliver(delivery)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		e, done := startTestSupervisor(t, backend, func(context.Context, Job) error { return nil })
+		synctest.Wait()
+		time.Sleep(150 * time.Millisecond)
+		synctest.Wait()
+		if got := sessions.Load(); got != 2 {
+			t.Fatalf("sessions = %d, want 2", got)
+		}
+		select {
+		case <-delivery.settled:
+			t.Fatal("panicking worker settled an uncertain delivery")
+		default:
+		}
+		e.cancel()
+		synctest.Wait()
+		<-done
+	})
+}
+
+func TestConsumerPanicStormStopsRestartAndDegradesHealth(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		backend := &supervisorTransport{consume: func(context.Context, transport.Subscription, func(transport.Delivery)) error {
+			calls.Add(1)
+			panic("storm")
+		}}
+		e, done := startTestSupervisor(t, backend, func(context.Context, Job) error { return nil })
+		for calls.Load() < maxConsecutiveConsumerPanics {
+			synctest.Wait()
+			time.Sleep(5 * time.Second)
+		}
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("consumer did not stop after panic storm")
+		}
+		if got := calls.Load(); got != maxConsecutiveConsumerPanics {
+			t.Fatalf("consume calls = %d", got)
+		}
+		if !e.isDegraded() || e.recoveredPanicCount() < maxConsecutiveConsumerPanics {
+			t.Fatal("panic storm was not reflected in health")
+		}
+	})
+}
+
 func stringError(err error) string {
 	if err == nil {
 		return "nil"

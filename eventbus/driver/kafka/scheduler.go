@@ -149,14 +149,29 @@ func (t *kafkaTransport) startDelayScheduler(topo transport.Topology) (*delaySch
 	for _, consumer := range consumers {
 		go func(tier time.Duration, targeted bool, client *kgo.Client) {
 			defer workers.Done()
-			t.runDelayTier(ctx, topo, tier, targeted, client)
+			t.runDelayTierGuarded(ctx, cancel, topo, tier, targeted, client)
 		}(consumer.tier, consumer.targeted, consumer.client)
 	}
 	go func() {
-		workers.Wait()
-		close(handle.done)
+		transport.Guard(func() {
+			t.recordSchedulerError(topo, "controller", "panic", transport.ErrRecoveredPanic, time.Now())
+			cancel()
+		}, func() {
+			defer close(handle.done)
+			workers.Wait()
+		})
 	}()
 	return handle, nil
+}
+
+func (t *kafkaTransport) runDelayTierGuarded(ctx context.Context, cancel context.CancelFunc, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient) {
+	worker := schedulerWorker(tier, targeted)
+	transport.Guard(func() {
+		t.recordSchedulerError(topo, worker, "panic", transport.ErrRecoveredPanic, time.Now())
+		cancel()
+	}, func() {
+		t.runDelayTier(ctx, topo, tier, targeted, client)
+	})
 }
 
 func (t *kafkaTransport) runDelayTier(ctx context.Context, topo transport.Topology, tier time.Duration, targeted bool, client delayConsumerClient) {
@@ -471,6 +486,9 @@ func (t *kafkaTransport) SchedulerHealth(topo transport.Topology) []transport.Sc
 		if status := workers[schedulerWorker(tier, true)]; status != nil {
 			result = append(result, *status)
 		}
+	}
+	if status := workers["controller"]; status != nil {
+		result = append(result, *status)
 	}
 	return result
 }

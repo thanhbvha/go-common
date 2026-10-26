@@ -9,6 +9,23 @@ import (
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
+type panickingAdminTransport struct{ benchmarkTransport }
+
+func (*panickingAdminTransport) Stats(context.Context, transport.Topology) (transport.TopologyStats, error) {
+	panic("stats")
+}
+func (*panickingAdminTransport) List(context.Context, transport.Topology, int, int) ([]transport.DeadLetter, error) {
+	panic("list")
+}
+func (*panickingAdminTransport) Requeue(context.Context, transport.Topology, []string) error {
+	panic("requeue")
+}
+func (*panickingAdminTransport) Purge(context.Context, transport.Topology) error { panic("purge") }
+func (*panickingAdminTransport) Count(context.Context, transport.Topology) (int64, error) {
+	panic("count")
+}
+func (*panickingAdminTransport) Ping(context.Context) error { panic("ping") }
+
 func TestBusAdminUsesExplicitTopologyKinds(t *testing.T) {
 	backend := memory.New()
 	instance, err := Open(DefaultConfig(), WithTransport(backend))
@@ -88,5 +105,29 @@ func TestBusSubscriberStatsUsesExplicitGroup(t *testing.T) {
 	}
 	if _, err := instance.SubscriberStats(context.Background(), "event", "missing"); !errors.Is(err, ErrUndeclaredTopology) {
 		t.Fatalf("missing subscriber error = %v", err)
+	}
+}
+
+func TestAdminPanicsReturnRecoveredPanic(t *testing.T) {
+	instance, err := Open(DefaultConfig(), WithTransport(&panickingAdminTransport{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.DeclareTask("admin"); err != nil {
+		t.Fatal(err)
+	}
+	ref := TaskRef("admin")
+	checks := []func() error{
+		func() error { return instance.Ping(context.Background()) },
+		func() error { _, err := instance.TopologyStats(context.Background(), ref); return err },
+		func() error { _, err := instance.ListDeadLetters(context.Background(), ref, "", 1); return err },
+		func() error { _, err := instance.CountDeadLetters(context.Background(), ref); return err },
+		func() error { return instance.RequeueDeadLetters(context.Background(), ref, []string{"id"}) },
+		func() error { return instance.PurgeDeadLetters(context.Background(), ref) },
+	}
+	for i, check := range checks {
+		if err := check(); !errors.Is(err, ErrRecoveredPanic) {
+			t.Fatalf("check %d error = %v", i, err)
+		}
 	}
 }

@@ -20,6 +20,10 @@ type panicRetryPolicy struct{}
 
 func (panicRetryPolicy) NextBackoff(int) time.Duration { panic("must recover retry policy panic") }
 
+type nilPanicRetryPolicy struct{}
+
+func (nilPanicRetryPolicy) NextBackoff(int) time.Duration { panic(nil) }
+
 type fixedRetryPolicy time.Duration
 
 func (p fixedRetryPolicy) NextBackoff(int) time.Duration { return time.Duration(p) }
@@ -81,6 +85,7 @@ func TestHostileErrorsAndRetryPoliciesCannotPanicProcessing(t *testing.T) {
 	}{
 		{name: "hostile error", policy: ConstantBackoff{Delay: time.Second}, handlerErr: hostileError{}, wantDelay: time.Second, wantCode: "error_render_panic"},
 		{name: "policy panic", policy: panicRetryPolicy{}, handlerErr: errors.New("synthetic"), wantDelay: 0, wantCode: "retry_policy_panic"},
+		{name: "policy panic nil", policy: nilPanicRetryPolicy{}, handlerErr: errors.New("synthetic"), wantDelay: 0, wantCode: "retry_policy_panic"},
 		{name: "negative retry after", policy: fixedRetryPolicy(time.Hour), handlerErr: MarkRetryAfter(errors.New("synthetic"), -time.Second), wantDelay: 0, wantCode: "handler_error"},
 		{name: "oversized policy delay", policy: fixedRetryPolicy(time.Duration(1<<63 - 1)), handlerErr: errors.New("synthetic"), wantDelay: maxRetryDelay, wantCode: "handler_error"},
 	}

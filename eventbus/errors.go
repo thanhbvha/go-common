@@ -8,6 +8,15 @@ import (
 )
 
 var (
+	// ErrRecoveredPanic identifies a panic recovered at an EventBus runtime
+	// boundary. The original panic value is deliberately excluded.
+	ErrRecoveredPanic = errors.New("eventbus: recovered panic")
+
+	// ErrBusDegraded means a runtime component recovered an infrastructure panic.
+	// Degraded state is sticky for the lifetime of the bus so transient recovery
+	// cannot hide an uncertain broker or component outcome.
+	ErrBusDegraded = errors.New("eventbus: bus degraded")
+
 	// ErrHandlerPanic identifies a recovered handler or middleware panic. Its
 	// original value is deliberately excluded from errors, logs, and DLQ records.
 	ErrHandlerPanic = errors.New("eventbus: panic in handler")

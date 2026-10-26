@@ -127,6 +127,7 @@ func (c *Config) Validate() error {
 	if c.Logger == nil {
 		c.Logger = noopLogger{}
 	}
+	c.Logger = wrapSafeLogger(c.Logger)
 	if c.Metrics == nil {
 		c.Metrics = noopMetrics{}
 	}

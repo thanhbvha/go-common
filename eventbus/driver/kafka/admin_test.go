@@ -38,6 +38,28 @@ type fakeKafkaAdmin struct {
 	createTopicCalls   []createTopicCall
 }
 
+func TestDLQLeaseMonitorPanicReleasesOwnershipAndSignalsCleanup(t *testing.T) {
+	lease := newDLQAdminLease(context.Background(), &kgo.Client{})
+	lease.assign()
+	lease.startMonitor()
+	select {
+	case <-lease.done:
+	case <-time.After(time.Second):
+		t.Fatal("lease monitor did not finish after panic")
+	}
+	select {
+	case <-lease.closed:
+	case <-time.After(time.Second):
+		t.Fatal("lease client close did not signal completion")
+	}
+	if _, _, err := lease.operation(); !errors.Is(err, errKafkaDLQAdminLeaseLost) {
+		t.Fatalf("operation error = %v, want lost ownership", err)
+	}
+	if err := lease.check(1); !errors.Is(err, transport.ErrRecoveredPanic) {
+		t.Fatalf("lease error = %v, want recovered panic", err)
+	}
+}
+
 type createTopicCall struct {
 	partitions int32
 	topics     []string

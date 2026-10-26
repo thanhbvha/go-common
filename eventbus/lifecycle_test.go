@@ -240,6 +240,27 @@ func TestConcurrentShutdownSharesResult(t *testing.T) {
 	}
 }
 
+func TestShutdownPanicStillFinalizesBus(t *testing.T) {
+	backend := &lifecycleTransport{close: func(context.Context) error { panic("close") }}
+	b := lifecycleBus(t, backend)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := b.Close(context.Background())
+	if !errors.Is(err, ErrRecoveredPanic) {
+		t.Fatalf("Close = %v, want ErrRecoveredPanic", err)
+	}
+	if err := b.Close(context.Background()); !errors.Is(err, ErrRecoveredPanic) {
+		t.Fatalf("repeated Close = %v", err)
+	}
+	if err := b.Start(context.Background()); !errors.Is(err, ErrBusClosed) {
+		t.Fatalf("Start after panicking Close = %v", err)
+	}
+	if backend.closes.Load() != 1 {
+		t.Fatalf("transport closes = %d, want 1", backend.closes.Load())
+	}
+}
+
 func TestCanceledStartIsRetryable(t *testing.T) {
 	b := lifecycleBus(t, &lifecycleTransport{})
 	ctx, cancel := context.WithCancel(context.Background())

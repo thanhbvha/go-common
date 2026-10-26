@@ -250,8 +250,29 @@ func (t *redisTransport) registerRetentionTopology(topo transport.Topology) {
 	}
 }
 
-func (t *redisTransport) retentionLoop(ctx context.Context) {
+func (t *redisTransport) runRetentionLoop(ctx context.Context, loop func(context.Context)) {
 	defer close(t.retentionDone)
+	transport.Guard(func() {
+		t.recordRetentionPanic()
+		t.retentionCancel()
+	}, func() {
+		loop(ctx)
+	})
+}
+
+func (t *redisTransport) recordRetentionPanic() {
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.retentionTopologies {
+		status := t.retentionStatuses[key]
+		status.LastRun = now
+		status.LastError = transport.ErrRecoveredPanic.Error()
+		t.retentionStatuses[key] = status
+	}
+}
+
+func (t *redisTransport) retentionLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	last := make(map[string]time.Time)
@@ -264,12 +285,7 @@ func (t *redisTransport) retentionLoop(ctx context.Context) {
 		case <-ticker.C:
 		}
 		now := time.Now()
-		t.mu.Lock()
-		topologies := make(map[string]transport.Topology, len(t.retentionTopologies))
-		for key, topo := range t.retentionTopologies {
-			topologies[key] = topo
-		}
-		t.mu.Unlock()
+		topologies := t.retentionTopologySnapshot()
 		keys := make([]string, 0, len(topologies))
 		for key := range topologies {
 			keys = append(keys, key)
@@ -299,6 +315,16 @@ func (t *redisTransport) retentionLoop(ctx context.Context) {
 		}
 		cursor = (cursor + cycleSize) % len(keys)
 	}
+}
+
+func (t *redisTransport) retentionTopologySnapshot() map[string]transport.Topology {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	topologies := make(map[string]transport.Topology, len(t.retentionTopologies))
+	for key, topo := range t.retentionTopologies {
+		topologies[key] = topo
+	}
+	return topologies
 }
 
 func (t *redisTransport) compactReadyStream(ctx context.Context, topo transport.Topology) (int64, error) {

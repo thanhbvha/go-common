@@ -98,6 +98,9 @@ type offsetCoordinator struct {
 	commands  chan any
 	done      chan struct{}
 	closeOnce sync.Once
+	doneOnce  sync.Once
+	mu        sync.Mutex
+	failure   error
 }
 
 func newOffsetCoordinator(committer recordCommitter, capacity int) *offsetCoordinator {
@@ -109,8 +112,28 @@ func newOffsetCoordinator(committer recordCommitter, capacity int) *offsetCoordi
 		commands:  make(chan any, capacity),
 		done:      make(chan struct{}),
 	}
-	go c.run()
+	go func() {
+		transport.Guard(func() { c.stop(transport.ErrRecoveredPanic) }, c.run)
+	}()
 	return c
+}
+
+func (c *offsetCoordinator) stop(err error) {
+	c.mu.Lock()
+	if c.failure == nil {
+		c.failure = err
+	}
+	c.mu.Unlock()
+	c.doneOnce.Do(func() { close(c.done) })
+}
+
+func (c *offsetCoordinator) stoppedError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failure != nil {
+		return c.failure
+	}
+	return context.Canceled
 }
 
 func (c *offsetCoordinator) register(ctx context.Context, records []*kgo.Record) error {
@@ -120,7 +143,7 @@ func (c *offsetCoordinator) register(ctx context.Context, records []*kgo.Record)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 	select {
 	case err := <-request.result:
@@ -128,7 +151,7 @@ func (c *offsetCoordinator) register(ctx context.Context, records []*kgo.Record)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 }
 
@@ -139,7 +162,7 @@ func (c *offsetCoordinator) settle(ctx context.Context, record *kgo.Record) erro
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 	select {
 	case err := <-request.result:
@@ -151,7 +174,7 @@ func (c *offsetCoordinator) settle(ctx context.Context, record *kgo.Record) erro
 		}
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 }
 
@@ -160,7 +183,10 @@ func (c *offsetCoordinator) close() {
 		request := offsetCloseRequest{result: make(chan struct{})}
 		select {
 		case c.commands <- request:
-			<-request.result
+			select {
+			case <-request.result:
+			case <-c.done:
+			}
 		case <-c.done:
 		}
 	})
@@ -170,7 +196,10 @@ func (c *offsetCoordinator) trackOwnership() {
 	request := offsetTrackOwnershipRequest{result: make(chan struct{})}
 	select {
 	case c.commands <- request:
-		<-request.result
+		select {
+		case <-request.result:
+		case <-c.done:
+		}
 	case <-c.done:
 	}
 }
@@ -190,7 +219,7 @@ func (c *offsetCoordinator) changeOwnership(ctx context.Context, partitions map[
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 	select {
 	case err := <-request.result:
@@ -198,12 +227,11 @@ func (c *offsetCoordinator) changeOwnership(ctx context.Context, partitions map[
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return context.Canceled
+		return c.stoppedError()
 	}
 }
 
 func (c *offsetCoordinator) run() {
-	defer close(c.done)
 	partitions := make(map[partitionKey][]*pendingOffset)
 	entries := make(map[*kgo.Record]*pendingOffset)
 	fenced := make(map[*kgo.Record]error)
@@ -341,6 +369,7 @@ func (c *offsetCoordinator) run() {
 				respond(entry.request, context.Canceled)
 			}
 			close(request.result)
+			c.stop(context.Canceled)
 			return
 		}
 	}

@@ -19,6 +19,8 @@ const (
 	stateStopping int32 = 2
 	stateStopped  int32 = 3
 	stateStarting int32 = 4
+
+	maxConsecutiveConsumerPanics = 5
 )
 
 type engine struct {
@@ -44,7 +46,18 @@ type engine struct {
 	startDone    chan struct{}
 	stopDone     chan struct{}
 	stopErr      error
+	panicCount   atomic.Uint64
+	degraded     atomic.Bool
 }
+
+func (e *engine) recordInfrastructurePanic() {
+	e.panicCount.Add(1)
+	e.degraded.Store(true)
+}
+
+func (e *engine) recoveredPanicCount() uint64 { return e.panicCount.Load() }
+
+func (e *engine) isDegraded() bool { return e.degraded.Load() }
 
 func (e *engine) beginOperation() (func(), error) {
 	e.operationMu.RLock()
@@ -300,24 +313,26 @@ func (e *engine) Start(ctx context.Context) (err error) {
 	}()
 
 	for jobType, topo := range e.taskTopologies {
-		if err := e.transport.EnsureTopology(startCtx, topo); err != nil {
+		if err := guardError(panicScopeProvisioning, "ensure task topology", nil, func() error { return e.transport.EnsureTopology(startCtx, topo) }); err != nil {
 			return fmt.Errorf("ensure task topology for %s failed: %w", jobType, err)
 		}
 	}
 	for eventName, topo := range e.eventTopologies {
-		if err := e.transport.EnsureTopology(startCtx, topo); err != nil {
+		if err := guardError(panicScopeProvisioning, "ensure event topology", nil, func() error { return e.transport.EnsureTopology(startCtx, topo) }); err != nil {
 			return fmt.Errorf("ensure event topology for %s failed: %w", eventName, err)
 		}
 	}
 	if provisioner, ok := e.transport.(transport.SubscriptionProvisioner); ok {
 		for jobType, topo := range e.taskTopologies {
-			if err := provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo}); err != nil {
+			if err := guardError(panicScopeProvisioning, "ensure task subscription", nil, func() error { return provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo}) }); err != nil {
 				return fmt.Errorf("ensure task subscription for %s failed: %w", jobType, err)
 			}
 		}
 		for eventName, subscribers := range e.subTopologies {
 			for group, topo := range subscribers {
-				if err := provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo, Group: group}); err != nil {
+				if err := guardError(panicScopeProvisioning, "ensure event subscription", nil, func() error {
+					return provisioner.EnsureSubscription(startCtx, transport.Subscription{Topology: topo, Group: group})
+				}); err != nil {
 					return fmt.Errorf("ensure event subscription for %s/%s failed: %w", eventName, group, err)
 				}
 			}
@@ -340,7 +355,7 @@ func (e *engine) Start(ctx context.Context) (err error) {
 		e.controls[key] = newConsumerControl()
 		e.policies[key] = newProcessingPolicy(e.taskTopologies[jobType])
 		e.wg.Add(1)
-		go e.consumeLoop(TaskTopology, jobType, "", handler)
+		go e.runConsumerLoop(TaskTopology, jobType, "", handler)
 	}
 
 	// Start consumers for Pub-Sub
@@ -350,11 +365,25 @@ func (e *engine) Start(ctx context.Context) (err error) {
 			e.controls[key] = newConsumerControl()
 			e.policies[key] = newProcessingPolicy(e.subTopologies[eventName][handlerName])
 			e.wg.Add(1)
-			go e.consumeLoop(EventTopology, eventName, handlerName, handler)
+			go e.runConsumerLoop(EventTopology, eventName, handlerName, handler)
 		}
 	}
 
 	return nil
+}
+
+func (e *engine) runConsumerLoop(kind TopologyKind, jobType, handlerName string, handler Handler) {
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		_ = recover()
+		e.recordInfrastructurePanic()
+		e.cfg.Logger.ErrorAsync("eventbus: consumer supervisor panic recovered", "job_type", jobType, "handler_name", handlerName, "stack", capturePanicStack(4))
+	}()
+	e.consumeLoop(kind, jobType, handlerName, handler)
+	completed = true
 }
 
 func (e *engine) validateCapacityPlan() error {
@@ -392,6 +421,7 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 		Factor:  2,
 		Jitter:  true,
 	}
+	consecutivePanics := 0
 	for attempt := 1; e.ctx.Err() == nil; {
 		if !control.waitReady(e.ctx) {
 			return
@@ -403,6 +433,16 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 		}
 		if control.isPaused() {
 			continue
+		}
+		if errors.Is(err, ErrRecoveredPanic) {
+			consecutivePanics++
+			e.recordInfrastructurePanic()
+			if consecutivePanics >= maxConsecutiveConsumerPanics {
+				e.cfg.Logger.ErrorAsync("eventbus: consumer stopped after panic storm", "job_type", jobType, "handler_name", handlerName)
+				return
+			}
+		} else if time.Since(started) >= time.Minute {
+			consecutivePanics = 0
 		}
 		// A session-local cancellation is reconnectable while the engine is
 		// alive. Even a nil return needs backoff to avoid a hot reconnect loop.
@@ -421,7 +461,7 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 			return
 		}
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.IncReconnect(metricsName(jobType, handlerName))
+			safeRuntimeMetric(func() { metrics.IncReconnect(metricsName(jobType, handlerName)) })
 		}
 		// Bound exponent calculation as well as the resulting delay.
 		if attempt < 10 {
@@ -483,7 +523,21 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 					if e.workerCtx.Err() != nil {
 						return
 					}
-					e.processDelivery(kind, jobType, handlerName, handler, delivery, maxAttempts)
+					delivery = withSessionCancel(delivery, cancel)
+					panicked := guardCall(panicScopeWorker, "process delivery", func(record panicRecord) {
+						e.cfg.Logger.ErrorAsync("eventbus: worker panic recovered",
+							"job_type", jobType,
+							"handler_name", handlerName,
+							"stack", record.Stack,
+						)
+					}, func() {
+						e.processDelivery(kind, jobType, handlerName, handler, delivery, maxAttempts)
+					})
+					if panicked {
+						e.recordInfrastructurePanic()
+						cancel()
+						return
+					}
 				}
 			}
 		}()
@@ -510,7 +564,7 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 		started := time.Now()
 		defer func() {
 			if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-				metrics.ObserveSaturation(metricsName(jobType, handlerName), time.Since(started).Seconds())
+				safeRuntimeMetric(func() { metrics.ObserveSaturation(metricsName(jobType, handlerName), time.Since(started).Seconds()) })
 			}
 		}()
 		select {
@@ -520,7 +574,15 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 		}
 	}
 
-	err := e.transport.Consume(ctx, sub, deliverFn)
+	err := guardError(panicScopeConsumer, "transport consume", func(record panicRecord) {
+		e.cfg.Logger.ErrorAsync("eventbus: consumer panic recovered",
+			"job_type", jobType,
+			"handler_name", handlerName,
+			"stack", record.Stack,
+		)
+	}, func() error {
+		return e.transport.Consume(ctx, sub, deliverFn)
+	})
 	cancel()
 	return err
 }
@@ -531,7 +593,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	}
 	msg := delivery.Message()
 	metricsJobType := metricsName(jobType, handlerName)
-	e.cfg.Metrics.IncDequeue(metricsJobType)
+	safeMetric(func() { e.cfg.Metrics.IncDequeue(metricsJobType) })
 	maxPayloadBytes := e.maxPayloadBytesFor(consumerKey{kind: kind, name: jobType, group: handlerName})
 	if len(msg.Payload) > maxPayloadBytes {
 		err := payloadTooLargeError(len(msg.Payload), maxPayloadBytes)
@@ -551,7 +613,15 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	if lease, ok := delivery.(transport.LeaseDelivery); ok {
 		leaseInterval = lease.HeartbeatInterval()
 		opCtx, cancel := context.WithTimeout(e.workerCtx, min(5*time.Second, leaseInterval))
-		err := delivery.Heartbeat(opCtx)
+		err := guardError(panicScopeHeartbeat, "initial delivery heartbeat", func(record panicRecord) {
+			e.recordInfrastructurePanic()
+			if canceler, ok := delivery.(sessionCanceler); ok {
+				canceler.cancelSession()
+			}
+			e.cfg.Logger.ErrorAsync("eventbus: heartbeat panic recovered", "job_type", jobType, "stack", record.Stack)
+		}, func() error {
+			return delivery.Heartbeat(opCtx)
+		})
 		cancel()
 		if err != nil {
 			e.cfg.Logger.WarnAsync("delivery lease unavailable before processing", "error_type", safeErrorType(err))
@@ -592,7 +662,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	msg.DedupeKey = env.DedupeKey
 	msg.Headers = cloneHeaders(env.Headers)
 	e.observeQueueAge(metricsJobType, env)
-	traceCtx, endSpan := e.cfg.Tracer.Start(e.workerCtx, "eventbus.process", cloneHeaders(env.Headers))
+	traceCtx, endSpan := safeTraceStart(e.cfg.Tracer, e.workerCtx, "eventbus.process", cloneHeaders(env.Headers))
 	defer endSpan()
 	delivery = &observedDelivery{Delivery: delivery, message: msg, ctx: traceCtx}
 	policy := e.policyFor(consumerKey{kind: kind, name: jobType, group: handlerName})
@@ -633,7 +703,22 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		heartbeatDone = make(chan struct{})
 		go func() {
 			defer close(heartbeatDone)
+			completed := false
+			defer func() {
+				if completed {
+					return
+				}
+				_ = recover()
+				heartbeatFailed.Store(true)
+				e.recordInfrastructurePanic()
+				executionCancel()
+				if canceler, ok := delivery.(sessionCanceler); ok {
+					canceler.cancelSession()
+				}
+				e.cfg.Logger.ErrorAsync("eventbus: heartbeat panic recovered", "job_type", jobType, "id", job.ID(), "stack", capturePanicStack(4))
+			}()
 			e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); executionCancel() })
+			completed = true
 		}()
 		defer func() {
 			executionCancel()
@@ -648,6 +733,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 
 	// Execution context with timeout begins only when the handler can start.
 	procCtx, procCancel := context.WithTimeout(executionCtx, e.cfg.ProcessTimeout)
+	defer procCancel()
 
 	// Execute handler
 	start := time.Now()
@@ -655,25 +741,24 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 	duration := time.Since(start).Seconds()
 	if safeIs(err, ErrHandlerPanic) {
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.IncHandlerFailure(metricsJobType, "panic")
+			safeRuntimeMetric(func() { metrics.IncHandlerFailure(metricsJobType, "panic") })
 		}
 		e.traceOutcome(procCtx, "handler.panic", "panic")
 	}
 	if errors.Is(procCtx.Err(), context.DeadlineExceeded) {
 		if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.IncHandlerFailure(metricsJobType, "timeout")
+			safeRuntimeMetric(func() { metrics.IncHandlerFailure(metricsJobType, "timeout") })
 		}
 		e.traceOutcome(procCtx, "handler.timeout", "timeout")
 		err = context.DeadlineExceeded
 	}
-	procCancel()
 	releaseKey()
 	if hasLease {
 		executionCancel()
 		<-heartbeatDone
 	}
 
-	e.cfg.Metrics.ObserveDuration(metricsJobType, duration)
+	safeMetric(func() { e.cfg.Metrics.ObserveDuration(metricsJobType, duration) })
 	if heartbeatFailed.Load() {
 		return
 	}
@@ -782,20 +867,34 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	} else {
 		carrier = cloneHeaders(delivery.Message().Headers)
 	}
-	spanCtx, endSpan := e.cfg.Tracer.Start(parent, settlementSpanName(decision.Kind), carrier)
+	spanCtx, endSpan := safeTraceStart(e.cfg.Tracer, parent, settlementSpanName(decision.Kind), carrier)
 	defer endSpan()
 	opCtx, cancel := context.WithTimeout(spanCtx, 5*time.Second)
 	defer cancel()
 
 	started := time.Now()
 	decision.Reason, decision.ErrorCode = transport.NormalizeDecisionMetadata(decision)
-	err := delivery.Settle(opCtx, decision)
+	err := guardError(panicScopeSettlement, "delivery settlement", func(record panicRecord) {
+		e.recordInfrastructurePanic()
+		if canceler, ok := delivery.(sessionCanceler); ok {
+			canceler.cancelSession()
+		}
+		e.cfg.Logger.ErrorAsync("eventbus: settlement panic recovered",
+			"job_id", jobID,
+			"decision", decision.Kind.String(),
+			"stack", record.Stack,
+		)
+	}, func() error {
+		return delivery.Settle(opCtx, decision)
+	})
 	outcome := "success"
 	if err != nil {
 		outcome = "error"
 	}
 	if metrics, ok := e.cfg.Metrics.(RuntimeMetrics); ok {
-		metrics.ObserveSettlement(metricsJobType, decision.Kind.String(), outcome, time.Since(started).Seconds())
+		safeRuntimeMetric(func() {
+			metrics.ObserveSettlement(metricsJobType, decision.Kind.String(), outcome, time.Since(started).Seconds())
+		})
 	}
 	e.traceSettlement(opCtx, decision.Kind.String(), outcome)
 	if err != nil {
@@ -807,7 +906,7 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 		)
 		return
 	}
-	e.cfg.Metrics.IncComplete(metricsJobType, decision.Kind.String())
+	safeMetric(func() { e.cfg.Metrics.IncComplete(metricsJobType, decision.Kind.String()) })
 }
 
 func settlementSpanName(kind transport.DecisionKind) string {
@@ -897,29 +996,57 @@ func (e *engine) Drain(ctx context.Context) error {
 // The first shutdown caller owns cleanup; all later callers join it with their
 // own waiting deadline. Provisioning and WaitGroup.Add must finish before Wait.
 func (e *engine) shutdown(ctx context.Context, startDone <-chan struct{}) {
+	var shutdownErr error
+	completed := false
+	defer func() {
+		if !completed {
+			_ = recover()
+			shutdownErr = errors.Join(shutdownErr, newRecoveredPanicError(panicScopeShutdown, "shutdown"))
+		}
+		e.finishShutdown(shutdownErr)
+	}()
+	shutdownErr = e.performShutdown(ctx, startDone)
+	completed = true
+}
+
+func (e *engine) performShutdown(ctx context.Context, startDone <-chan struct{}) error {
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		completed := false
+		defer func() {
+			if completed {
+				return
+			}
+			_ = recover()
+			e.recordInfrastructurePanic()
+		}()
 		if startDone != nil {
 			<-startDone
 		}
 		e.wg.Wait()
-		close(done)
+		completed = true
 	}()
-	var err error
 	select {
 	case <-done:
 		e.workerCancel()
-		err = e.transport.Close(ctx)
+		return guardError(panicScopeShutdown, "transport close", nil, func() error { return e.transport.Close(ctx) })
 	case <-ctx.Done():
 		e.workerCancel()
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err = errors.Join(ctx.Err(), e.transport.Close(closeCtx))
-		cancel()
+		defer cancel()
+		closeErr := guardError(panicScopeShutdown, "transport close", nil, func() error { return e.transport.Close(closeCtx) })
+		return errors.Join(ctx.Err(), closeErr)
 	}
+}
+
+func (e *engine) finishShutdown(err error) {
 	e.mu.Lock()
 	e.stopErr = err
 	atomic.StoreInt32(&e.state, stateStopped)
-	close(e.stopDone)
+	if e.stopDone != nil {
+		close(e.stopDone)
+	}
 	e.mu.Unlock()
 }
 
@@ -1014,14 +1141,14 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 	if err := validateName("topology name", name); err != nil {
 		return PublicationResult{}, err
 	}
-	ctx, endSpan := e.cfg.Tracer.Start(ctx, "eventbus.publish", nil)
+	ctx, endSpan := safeTraceStart(e.cfg.Tracer, ctx, "eventbus.publish", nil)
 	defer endSpan()
 	status := "success"
 	defer func() {
 		if result != nil {
 			status = "error"
 		}
-		e.cfg.Metrics.IncEnqueue(name, status)
+		safeMetric(func() { e.cfg.Metrics.IncEnqueue(name, status) })
 		e.traceOutcome(ctx, "publish", status)
 	}()
 	e.mu.RLock()
@@ -1054,7 +1181,7 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		if env.Headers == nil {
 			env.Headers = make(Headers)
 		}
-		injector.Inject(ctx, env.Headers)
+		safeTraceInject(injector, ctx, env.Headers)
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
@@ -1078,8 +1205,16 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		Headers:        cloneHeaders(env.Headers),
 	}
 
-	if msg.OrderingKey != "" && !e.transport.Capabilities().SupportsBrokerOrdering() {
-		return PublicationResult{}, ErrNotSupported
+	if msg.OrderingKey != "" {
+		capabilities, err := guardValue(panicScopePublish, "transport capabilities", nil, func() (transport.Capabilities, error) {
+			return e.transport.Capabilities(), nil
+		})
+		if err != nil {
+			return PublicationResult{}, err
+		}
+		if !capabilities.SupportsBrokerOrdering() {
+			return PublicationResult{}, ErrNotSupported
+		}
 	}
 
 	// Handle Deduplication (Bug C11)
@@ -1089,7 +1224,9 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			dedupeTTL = 24 * time.Hour
 		}
 		if deduper, ok := e.transport.(transport.PublicationDeduperWithResult); ok {
-			reservation, err := deduper.BeginPublicationWithResult(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			reservation, err := guardValue(panicScopeDedupe, "dedupe begin publication", nil, func() (transport.PublicationReservation, error) {
+				return deduper.BeginPublicationWithResult(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			})
 			if err != nil {
 				return PublicationResult{}, fmt.Errorf("dedupe begin: %w", err)
 			}
@@ -1110,18 +1247,20 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			if pubErr != nil {
-				if abortErr := deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); abortErr != nil {
-					return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
+				if abortErr := guardError(panicScopeDedupe, "dedupe abort publication", nil, func() error { return deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID) }); abortErr != nil {
+					return PublicationResult{}, errors.Join(pubErr, ErrDedupeAmbiguous, fmt.Errorf("dedupe cleanup: %w", abortErr))
 				}
 				return PublicationResult{}, pubErr
 			}
-			if err := deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); err != nil {
-				return PublicationResult{}, fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
+			if err := guardError(panicScopeDedupe, "dedupe confirm publication", nil, func() error { return deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID) }); err != nil {
+				return PublicationResult{}, errors.Join(ErrDedupeAmbiguous, fmt.Errorf("durable publish confirmation: %w", err))
 			}
 			return PublicationResult{ID: msg.ID}, nil
 		}
 		if deduper, ok := e.transport.(transport.PublicationDeduper); ok {
-			state, err := deduper.BeginPublication(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			state, err := guardValue(panicScopeDedupe, "dedupe begin publication", nil, func() (transport.DedupeReservationState, error) {
+				return deduper.BeginPublication(ctx, topo, msg.DedupeKey, msg.ID, dedupeTTL)
+			})
 			if err != nil {
 				return PublicationResult{}, fmt.Errorf("dedupe begin: %w", err)
 			}
@@ -1143,13 +1282,13 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			if pubErr != nil {
-				if abortErr := deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); abortErr != nil {
-					return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, abortErr))
+				if abortErr := guardError(panicScopeDedupe, "dedupe abort publication", nil, func() error { return deduper.AbortPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID) }); abortErr != nil {
+					return PublicationResult{}, errors.Join(pubErr, ErrDedupeAmbiguous, fmt.Errorf("dedupe cleanup: %w", abortErr))
 				}
 				return PublicationResult{}, pubErr
 			}
-			if err := deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID); err != nil {
-				return PublicationResult{}, fmt.Errorf("%w: durable publish confirmation: %v", ErrDedupeAmbiguous, err)
+			if err := guardError(panicScopeDedupe, "dedupe confirm publication", nil, func() error { return deduper.ConfirmPublication(cleanupCtx, topo, msg.DedupeKey, msg.ID) }); err != nil {
+				return PublicationResult{}, errors.Join(ErrDedupeAmbiguous, fmt.Errorf("durable publish confirmation: %w", err))
 			}
 			return PublicationResult{ID: msg.ID}, nil
 		}
@@ -1167,7 +1306,7 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			return PublicationResult{}, ErrDedupeUnavailable
 		}
 
-		acquired, err := reserve(ctx, msg.DedupeKey, dedupeTTL)
+		acquired, err := guardValue(panicScopeDedupe, "dedupe reserve", nil, func() (bool, error) { return reserve(ctx, msg.DedupeKey, dedupeTTL) })
 		if err != nil {
 			return PublicationResult{}, fmt.Errorf("dedupe reserve: %w", err)
 		}
@@ -1182,8 +1321,8 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 			// Release lock if publish fails so it can be retried
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			if cleanupErr := release(cleanupCtx, msg.DedupeKey); cleanupErr != nil {
-				return PublicationResult{}, errors.Join(pubErr, fmt.Errorf("%w: dedupe cleanup: %v", ErrDedupeAmbiguous, cleanupErr))
+			if cleanupErr := guardError(panicScopeDedupe, "dedupe release", nil, func() error { return release(cleanupCtx, msg.DedupeKey) }); cleanupErr != nil {
+				return PublicationResult{}, errors.Join(pubErr, ErrDedupeAmbiguous, fmt.Errorf("dedupe cleanup: %w", cleanupErr))
 			}
 			return PublicationResult{}, pubErr
 		}
@@ -1202,9 +1341,13 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 
 func (e *engine) publishMessage(ctx context.Context, topo Topology, msg transport.Message, runAt int64) error {
 	if runAt > 0 {
-		return e.transport.PublishAt(ctx, topo, msg, time.UnixMilli(runAt))
+		return guardError(panicScopePublish, "transport publish at", nil, func() error {
+			return e.transport.PublishAt(ctx, topo, msg, time.UnixMilli(runAt))
+		})
 	}
-	return e.transport.Publish(ctx, topo, msg)
+	return guardError(panicScopePublish, "transport publish", nil, func() error {
+		return e.transport.Publish(ctx, topo, msg)
+	})
 }
 
 func payloadTooLargeError(size, limit int) error {

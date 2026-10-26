@@ -1,6 +1,7 @@
 package eventbus
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -145,15 +146,21 @@ func validateTopology(topology Topology, backend transport.Transport) error {
 				return fmt.Errorf("%w: unknown core option %q", ErrInvalidOption, key)
 			}
 			prefix, _, hasPrefix := strings.Cut(key, ".")
-			if hasPrefix && isBuiltInDriver(prefix) && backend != nil && prefix != backend.Name() {
-				return fmt.Errorf("%w: option %q is incompatible with %s transport", ErrInvalidOption, key, backend.Name())
+			if hasPrefix && isBuiltInDriver(prefix) && backend != nil {
+				backendName, err := guardValue(panicScopeProvisioning, "transport name", nil, func() (string, error) { return backend.Name(), nil })
+				if err != nil {
+					return err
+				}
+				if prefix != backendName {
+					return fmt.Errorf("%w: option %q is incompatible with %s transport", ErrInvalidOption, key, backendName)
+				}
 			}
 		}
 	}
 
 	if validator, ok := backend.(transport.TopologyValidator); ok {
-		if err := validator.ValidateTopology(topology); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidOption, err)
+		if err := guardError(panicScopeProvisioning, "validate topology", nil, func() error { return validator.ValidateTopology(topology) }); err != nil {
+			return errors.Join(ErrInvalidOption, err)
 		}
 	}
 	return nil

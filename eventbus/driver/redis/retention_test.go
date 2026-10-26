@@ -23,6 +23,35 @@ func stoppedRetentionBackend(t *testing.T) (*redisTransport, *goredis.Client) {
 	return backend, rc
 }
 
+func TestRetentionLoopPanicRecordsHealthCancelsAndClosesDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	topo := transport.Topology{Namespace: "test", JobType: "retention-panic"}
+	key := topologyPrefix(topo)
+	backend := &redisTransport{
+		retentionTopologies: map[string]transport.Topology{key: topo},
+		retentionStatuses:   make(map[string]RetentionStatus),
+		retentionCancel:     cancel,
+		retentionDone:       make(chan struct{}),
+	}
+
+	backend.runRetentionLoop(ctx, func(context.Context) { panic("synthetic retention panic") })
+
+	select {
+	case <-backend.retentionDone:
+	default:
+		t.Fatal("retention completion channel was not closed")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("retention ownership was not canceled")
+	}
+	status := backend.RetentionStatus(topo)
+	if status.LastError != transport.ErrRecoveredPanic.Error() || status.LastRun.IsZero() {
+		t.Fatalf("retention status = %+v", status)
+	}
+}
+
 func TestEnsureSubscriptionDurablyRegistersGroupAndEpoch(t *testing.T) {
 	backend, rc := stoppedRetentionBackend(t)
 	ctx := context.Background()

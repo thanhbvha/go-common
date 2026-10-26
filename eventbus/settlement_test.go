@@ -16,6 +16,22 @@ type settlementTestDelivery struct {
 	calls    int
 }
 
+type panickingSettlementDelivery struct {
+	calls int
+}
+
+func (*panickingSettlementDelivery) Message() transport.Message {
+	return transport.Message{ID: "panic"}
+}
+func (*panickingSettlementDelivery) DeliveryAttempt() int { return 1 }
+func (*panickingSettlementDelivery) Heartbeat(context.Context) error {
+	return nil
+}
+func (d *panickingSettlementDelivery) Settle(context.Context, transport.Decision) error {
+	d.calls++
+	panic("settlement")
+}
+
 func (*settlementTestDelivery) Message() transport.Message { return transport.Message{ID: "job-id"} }
 func (*settlementTestDelivery) DeliveryAttempt() int       { return 1 }
 func (*settlementTestDelivery) Heartbeat(context.Context) error {
@@ -84,5 +100,27 @@ func TestEngineRecordsMetricsOnlyAfterSettlementSuccess(t *testing.T) {
 	}
 	if delivery.calls != 2 {
 		t.Fatalf("settlement attempts = %d, want 2", delivery.calls)
+	}
+}
+
+func TestSettlementPanicIsNotRetriedOrCompleted(t *testing.T) {
+	metrics := &settlementTestMetrics{complete: make(map[string]int)}
+	cfg := DefaultConfig()
+	cfg.Metrics = metrics
+	e := newEngine(cfg, nil, NewCodec(nil))
+	defer e.cancel()
+	defer e.workerCancel()
+	base := &panickingSettlementDelivery{}
+	canceled := false
+	delivery := &observedDelivery{Delivery: &sessionDelivery{Delivery: base, cancel: func() { canceled = true }}, ctx: context.Background()}
+	e.settleDelivery(delivery, transport.Decision{Kind: transport.DecisionAck}, "task", "panic")
+	if base.calls != 1 {
+		t.Fatalf("settlement calls = %d, want 1", base.calls)
+	}
+	if metrics.complete[transport.DecisionAck.String()] != 0 {
+		t.Fatal("panicking settlement was counted as complete")
+	}
+	if !canceled || !e.isDegraded() {
+		t.Fatal("settlement panic did not cancel and degrade its session")
 	}
 }

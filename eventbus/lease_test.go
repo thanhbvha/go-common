@@ -15,6 +15,19 @@ type leaseTestDelivery struct {
 	failAt int
 }
 
+type panickingHeartbeatDelivery struct {
+	leaseTestDelivery
+	panicAt int
+}
+
+func (d *panickingHeartbeatDelivery) Heartbeat(context.Context) error {
+	d.beats++
+	if d.beats == d.panicAt {
+		panic("heartbeat")
+	}
+	return nil
+}
+
 type completionRaceDelivery struct {
 	metadataDelivery
 	beats int
@@ -76,5 +89,56 @@ func TestLeaseFailurePreventsHandlerOrCancelsExecution(t *testing.T) {
 				t.Fatal("lease failure executed/settled stale work or ignored short cadence")
 			}
 		})
+	}
+}
+
+func TestHeartbeatPanicPreventsSettlement(t *testing.T) {
+	for _, panicAt := range []int{1, 2} {
+		synctest.Test(t, func(t *testing.T) {
+			e := newEngine(DefaultConfig(), nil, NewCodec(nil))
+			defer e.cancel()
+			defer e.workerCancel()
+			payload, _, err := e.codec.EncodeTopology(TaskTopology, "lease", 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := &panickingHeartbeatDelivery{
+				leaseTestDelivery: leaseTestDelivery{metadataDelivery: metadataDelivery{message: transport.Message{Payload: payload}}},
+				panicAt:           panicAt,
+			}
+			canceled := false
+			d := withSessionCancel(base, func() { canceled = true })
+			called := false
+			e.processDelivery(TaskTopology, "lease", "", func(ctx context.Context, _ Job) error {
+				called = true
+				if panicAt == 2 {
+					time.Sleep(15 * time.Millisecond)
+					<-ctx.Done()
+				}
+				return nil
+			}, d, 0)
+			if called != (panicAt == 2) || base.decision.Kind != 0 {
+				t.Fatal("heartbeat panic executed or settled stale work")
+			}
+			if !e.isDegraded() || !canceled {
+				t.Fatal("heartbeat panic did not cancel and degrade its session")
+			}
+		})
+	}
+}
+
+func TestSessionWrapperPreservesLeaseCapability(t *testing.T) {
+	lease := &leaseTestDelivery{failAt: 10}
+	wrapped := withSessionCancel(lease, func() {})
+	got, ok := wrapped.(transport.LeaseDelivery)
+	if !ok {
+		t.Fatal("lease capability was stripped")
+	}
+	if got.HeartbeatInterval() != lease.HeartbeatInterval() {
+		t.Fatalf("heartbeat interval = %v", got.HeartbeatInterval())
+	}
+	plain := withSessionCancel(&metadataDelivery{}, func() {})
+	if _, ok := plain.(transport.LeaseDelivery); ok {
+		t.Fatal("plain delivery gained lease capability")
 	}
 }

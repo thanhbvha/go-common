@@ -111,6 +111,14 @@ func newSubscriberLaneLease(t *natsTransport, kv gonats.KeyValue, key, durable, 
 
 func (l *subscriberLaneLeaseHandle) renew() {
 	defer close(l.done)
+	transport.Guard(func() {
+		l.fence(transport.ErrRecoveredPanic)
+		l.closeStop()
+		transport.Guard(nil, l.releaseOwnershipAfterPanic)
+	}, l.renewLoop)
+}
+
+func (l *subscriberLaneLeaseHandle) renewLoop() {
 	ticker := time.NewTicker(l.t.subscriberLaneLeaseDuration() / 3)
 	defer ticker.Stop()
 	for {
@@ -141,11 +149,33 @@ func (l *subscriberLaneLeaseHandle) renew() {
 	}
 }
 
+func (l *subscriberLaneLeaseHandle) releaseOwnershipAfterPanic() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry, err := l.kv.Get(l.key)
+	if err != nil {
+		return
+	}
+	var state subscriberLaneState
+	if json.Unmarshal(entry.Value(), &state) != nil || state.Version != subscriberLaneVersion || state.Owner != l.owner {
+		return
+	}
+	state.Owner = ""
+	state.LeaseUntil = 0
+	data, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	_, _ = l.kv.Update(l.key, data, entry.Revision())
+}
+
 func (l *subscriberLaneLeaseHandle) fence(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.lostErr == nil {
-		if errors.Is(err, errSubscriberLaneLeaseLost) {
+		if errors.Is(err, transport.ErrRecoveredPanic) {
+			l.lostErr = errors.Join(errSubscriberLaneLeaseLost, transport.ErrRecoveredPanic)
+		} else if errors.Is(err, errSubscriberLaneLeaseLost) {
 			l.lostErr = err
 		} else {
 			l.lostErr = fmt.Errorf("%w: %v", errSubscriberLaneLeaseLost, err)
@@ -240,12 +270,16 @@ func (l *subscriberLaneLeaseHandle) release(ctx context.Context) {
 }
 
 func (l *subscriberLaneLeaseHandle) stopRenewal() {
+	l.closeStop()
+	<-l.done
+}
+
+func (l *subscriberLaneLeaseHandle) closeStop() {
 	select {
 	case <-l.stop:
 	default:
 		close(l.stop)
 	}
-	<-l.done
 }
 
 func (t *natsTransport) ensureSubscriberLaneIdle(ctx context.Context, sub transport.Subscription, durable string) error {

@@ -160,18 +160,22 @@ func (l *dlqAdminLease) assign() uint64 {
 }
 
 func (l *dlqAdminLease) lose() {
+	l.loseWithCause(errKafkaDLQAdminLeaseLost)
+	if l.client != nil {
+		// Closing from a partition callback can deadlock the group loop. Start
+		// shutdown after the callback returns so a fenced member cannot rejoin.
+		go l.guardedCloseClient()
+	}
+}
+
+func (l *dlqAdminLease) loseWithCause(cause error) {
 	l.mu.Lock()
 	if l.owned {
 		l.generation++
 		l.owned = false
 	}
 	l.mu.Unlock()
-	l.cancel(errKafkaDLQAdminLeaseLost)
-	if l.client != nil {
-		// Closing from a partition callback can deadlock the group loop. Start
-		// shutdown after the callback returns so a fenced member cannot rejoin.
-		go l.closeClient()
-	}
+	l.cancel(cause)
 }
 
 func (l *dlqAdminLease) operation() (context.Context, uint64, error) {
@@ -184,8 +188,8 @@ func (l *dlqAdminLease) operation() (context.Context, uint64, error) {
 }
 
 func (l *dlqAdminLease) check(generation uint64) error {
-	if errors.Is(context.Cause(l.ctx), errKafkaDLQAdminLeaseLost) {
-		return errKafkaDLQAdminLeaseLost
+	if cause := context.Cause(l.ctx); errors.Is(cause, errKafkaDLQAdminLeaseLost) || errors.Is(cause, transport.ErrRecoveredPanic) {
+		return cause
 	}
 	if err := l.ctx.Err(); err != nil {
 		return err
@@ -199,7 +203,6 @@ func (l *dlqAdminLease) check(generation uint64) error {
 }
 
 func (l *dlqAdminLease) monitor() {
-	defer close(l.done)
 	for {
 		// LeaveGroupContext does not wake a parked poll. Bound each poll so a
 		// queued revoke/lost callback is serviced without waiting for records.
@@ -226,16 +229,30 @@ func (l *dlqAdminLease) release() {
 		if l.client == nil {
 			return
 		}
-		l.closeClient()
+		l.guardedCloseClient()
 		<-l.done
 	})
 }
 
+func (l *dlqAdminLease) guardedCloseClient() {
+	transport.Guard(func() { l.loseWithCause(transport.ErrRecoveredPanic) }, l.closeClient)
+}
+
 func (l *dlqAdminLease) closeClient() {
 	l.closeOnce.Do(func() {
+		defer close(l.closed)
 		l.client.CloseAllowingRebalance()
-		close(l.closed)
 	})
+}
+
+func (l *dlqAdminLease) startMonitor() {
+	go func() {
+		defer close(l.done)
+		transport.Guard(func() {
+			l.loseWithCause(transport.ErrRecoveredPanic)
+			l.closeClient()
+		}, l.monitor)
+	}()
 }
 
 var (
@@ -300,7 +317,7 @@ func (t *kafkaTransport) acquireBrokerDLQAdminLease(ctx context.Context, topolog
 		select {
 		case owns := <-assigned:
 			if owns {
-				go lease.monitor()
+				lease.startMonitor()
 				return lease, nil
 			}
 			client.CloseAllowingRebalance()
@@ -321,7 +338,7 @@ func (t *kafkaTransport) acquireBrokerDLQAdminLease(ctx context.Context, topolog
 		select {
 		case owns := <-assigned:
 			if owns {
-				go lease.monitor()
+				lease.startMonitor()
 				return lease, nil
 			}
 			client.CloseAllowingRebalance()

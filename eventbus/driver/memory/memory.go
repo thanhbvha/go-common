@@ -143,7 +143,7 @@ func New() transport.Transport {
 		done:          make(chan struct{}),
 	}
 	heap.Init(&m.delayed)
-	go m.scheduler()
+	go m.runScheduler(m.scheduler)
 	return m
 }
 
@@ -309,25 +309,23 @@ func (m *memoryTransport) scheduleLocked(topology transport.Topology, groups []s
 	return nil
 }
 
-func (m *memoryTransport) scheduler() {
+func (m *memoryTransport) runScheduler(scheduler func()) {
 	defer close(m.done)
+	transport.Guard(func() {
+		m.recordSchedulerPanic()
+	}, scheduler)
+}
+
+func (m *memoryTransport) scheduler() {
 	var timer *time.Timer
 	for {
-		m.mu.Lock()
-		if m.closed {
-			m.mu.Unlock()
+		wait, closed := m.schedulerWait()
+		if closed {
 			if timer != nil {
 				timer.Stop()
 			}
 			return
 		}
-		var wait time.Duration
-		if len(m.delayed) == 0 {
-			wait = time.Hour
-		} else {
-			wait = max(0, time.Until(m.delayed[0].runAt))
-		}
-		m.mu.Unlock()
 		if timer == nil {
 			timer = time.NewTimer(wait)
 		} else {
@@ -356,6 +354,18 @@ func (m *memoryTransport) scheduler() {
 			}
 		}
 	}
+}
+
+func (m *memoryTransport) schedulerWait() (time.Duration, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, true
+	}
+	if len(m.delayed) == 0 {
+		return time.Hour, false
+	}
+	return max(0, time.Until(m.delayed[0].runAt)), false
 }
 
 func (m *memoryTransport) dispatchDue(ctx context.Context, now time.Time) (int64, error) {
@@ -395,6 +405,14 @@ func (m *memoryTransport) recordSchedulerError(err error) {
 		return
 	}
 	m.schedulerStatus.LastError = err.Error()
+	m.schedulerStatus.Retries++
+	m.schedulerStatus.Pending = len(m.delayed)
+}
+
+func (m *memoryTransport) recordSchedulerPanic() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.schedulerStatus.LastError = transport.ErrRecoveredPanic.Error()
 	m.schedulerStatus.Retries++
 	m.schedulerStatus.Pending = len(m.delayed)
 }

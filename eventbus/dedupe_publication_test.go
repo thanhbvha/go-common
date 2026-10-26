@@ -18,6 +18,8 @@ type publicationDedupeTransport struct {
 	publishErr       error
 	abortErr         error
 	confirmErr       error
+	panicPublish     bool
+	panicConfirm     bool
 	abortHasDeadline bool
 	publishes        int
 }
@@ -26,6 +28,9 @@ func (t *publicationDedupeTransport) Publish(context.Context, transport.Topology
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.publishes++
+	if t.panicPublish {
+		panic("publish")
+	}
 	return t.publishErr
 }
 
@@ -55,6 +60,9 @@ func (t *publicationDedupeTransport) ConfirmPublication(ctx context.Context, _ t
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_, t.abortHasDeadline = ctx.Deadline()
+	if t.panicConfirm {
+		panic("confirm")
+	}
 	if t.confirmErr != nil {
 		return t.confirmErr
 	}
@@ -159,4 +167,23 @@ func TestDedupeConfirmationFailureRemainsObservable(t *testing.T) {
 	if !backend.abortHasDeadline || backend.publishes != 1 {
 		t.Fatalf("bounded=%v publishes=%d", backend.abortHasDeadline, backend.publishes)
 	}
+}
+
+func TestPublishAndDedupePanicsRemainObservable(t *testing.T) {
+	t.Run("publish", func(t *testing.T) {
+		backend := &publicationDedupeTransport{panicPublish: true}
+		b := openPublicationDedupeBus(t, backend)
+		err := b.Enqueue(context.Background(), "task", 1)
+		if !errors.Is(err, ErrRecoveredPanic) {
+			t.Fatalf("publish panic error = %v", err)
+		}
+	})
+	t.Run("confirm", func(t *testing.T) {
+		backend := &publicationDedupeTransport{panicConfirm: true}
+		b := openPublicationDedupeBus(t, backend)
+		err := b.Enqueue(context.Background(), "task", 1, WithDedupeKey("same"))
+		if !errors.Is(err, ErrRecoveredPanic) || !errors.Is(err, ErrDedupeAmbiguous) {
+			t.Fatalf("confirm panic error = %v", err)
+		}
+	})
 }

@@ -186,7 +186,7 @@ func New(rc goredis.UniversalClient) transport.Transport {
 		retentionCancel:     cancel, retentionDone: make(chan struct{}), retentionWake: make(chan struct{}, 1),
 	}
 	t.sweepDelay = t.dispatchDue
-	go t.retentionLoop(ctx)
+	go t.runRetentionLoop(ctx, t.retentionLoop)
 	return t
 }
 
@@ -248,10 +248,9 @@ func (t *redisTransport) EnsureTopology(ctx context.Context, topo transport.Topo
 			sweepCtx, cancel := context.WithCancel(context.Background())
 			t.sweepers[topoName] = cancel
 			t.sweeperWG.Add(1)
-			go func() {
-				defer t.sweeperWG.Done()
+			go t.runDelaySweeper(cancel, topo, func() {
 				t.delaySweeper(sweepCtx, topo)
-			}()
+			})
 		}
 	}
 	t.retentionTopologies[topoName] = topo
@@ -342,6 +341,17 @@ func (t *redisTransport) delaySweeper(ctx context.Context, topo transport.Topolo
 	}
 }
 
+func (t *redisTransport) runDelaySweeper(cancel context.CancelFunc, topo transport.Topology, sweeper func()) {
+	defer t.sweeperWG.Done()
+	transport.Guard(func() {
+		t.recordSchedulerError(topo, "panic", transport.ErrRecoveredPanic, time.Now())
+		cancel()
+		t.mu.Lock()
+		delete(t.sweepers, topologyPrefix(topo))
+		t.mu.Unlock()
+	}, sweeper)
+}
+
 var (
 	moveDelayedScript    = goredis.NewScript(luaMoveDelayed)
 	publishReadyScript   = goredis.NewScript(luaPublishReady)
@@ -368,9 +378,7 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 	type lane struct{ delayed, ready string }
 	lanes := make([]lane, 0, schedulerLaneScanMax+1)
 	key := topologyPrefix(topo)
-	t.mu.Lock()
-	cursor, shared := t.dispatchCursors[key], t.dispatchShared[key]
-	t.mu.Unlock()
+	cursor, shared := t.dispatchState(key)
 	if topo.Kind != transport.EventTopology || shared {
 		lanes = append(lanes, lane{t.delayedKey(topo), t.streamKey(topo)})
 	}
@@ -394,14 +402,7 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 		for _, group := range groups {
 			lanes = append(lanes, lane{t.subscriberRetryDelayedKey(topo, group), t.subscriberRetryStreamKey(topo, group)})
 		}
-		t.mu.Lock()
-		if len(groups) > 0 {
-			t.dispatchCursors[key] = groups[len(groups)-1]
-		} else {
-			t.dispatchCursors[key] = ""
-		}
-		t.dispatchShared[key] = !shared
-		t.mu.Unlock()
+		t.updateDispatchState(key, groups, !shared)
 	}
 	var moved int64
 	for index, current := range lanes {
@@ -429,6 +430,23 @@ func (t *redisTransport) dispatchDue(ctx context.Context, topo transport.Topolog
 	}
 	t.recordSchedulerSuccess(topo, moved, now)
 	return moved, nil
+}
+
+func (t *redisTransport) dispatchState(key string) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dispatchCursors[key], t.dispatchShared[key]
+}
+
+func (t *redisTransport) updateDispatchState(key string, groups []string, shared bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(groups) > 0 {
+		t.dispatchCursors[key] = groups[len(groups)-1]
+	} else {
+		t.dispatchCursors[key] = ""
+	}
+	t.dispatchShared[key] = shared
 }
 
 func (t *redisTransport) recordSchedulerPoll(topo transport.Topology, now time.Time) {
@@ -778,9 +796,11 @@ func (t *redisTransport) Close(ctx context.Context) error {
 	retentionCancel()
 	done := make(chan struct{})
 	go func() {
-		t.sweeperWG.Wait()
-		<-retentionDone
-		close(done)
+		defer close(done)
+		transport.Guard(retentionCancel, func() {
+			t.sweeperWG.Wait()
+			<-retentionDone
+		})
 	}()
 	select {
 	case <-done:

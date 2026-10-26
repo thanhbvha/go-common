@@ -68,10 +68,10 @@ func (b *bus) TopologyStats(ctx context.Context, ref TopologyRef) (transport.Top
 	if !ok {
 		return transport.TopologyStats{}, fmt.Errorf("eventbus: stats: %w", ErrNotSupported)
 	}
-	stats, err := reader.Stats(ctx, topo)
+	stats, err := guardValue(panicScopeAdmin, "topology stats", nil, func() (transport.TopologyStats, error) { return reader.Stats(ctx, topo) })
 	if err == nil {
 		if metrics, ok := b.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.ObserveStats(metricsName(ref.Name, ""), stats)
+			safeRuntimeMetric(func() { metrics.ObserveStats(metricsName(ref.Name, ""), stats) })
 		}
 	}
 	return stats, err
@@ -91,10 +91,12 @@ func (b *bus) SubscriberStats(ctx context.Context, event, subscriber string) (tr
 	if !ok {
 		return transport.TopologyStats{}, fmt.Errorf("eventbus: subscriber stats: %w", ErrNotSupported)
 	}
-	stats, err := reader.SubscriptionStats(ctx, transport.Subscription{Topology: topo, Group: subscriber})
+	stats, err := guardValue(panicScopeAdmin, "subscriber stats", nil, func() (transport.TopologyStats, error) {
+		return reader.SubscriptionStats(ctx, transport.Subscription{Topology: topo, Group: subscriber})
+	})
 	if err == nil {
 		if metrics, ok := b.cfg.Metrics.(RuntimeMetrics); ok {
-			metrics.ObserveStats(metricsName(event, subscriber), stats)
+			safeRuntimeMetric(func() { metrics.ObserveStats(metricsName(event, subscriber), stats) })
 		}
 	}
 	return stats, err
@@ -111,7 +113,7 @@ func (b *bus) ListDeadLetters(ctx context.Context, ref TopologyRef, cursor strin
 		return transport.DLQPage{}, err
 	}
 	if cursorAdmin, ok := b.transport.(transport.CursorDLQAdmin); ok {
-		return cursorAdmin.ListPage(ctx, topo, cursor, limit)
+		return guardValue(panicScopeAdmin, "DLQ list page", nil, func() (transport.DLQPage, error) { return cursorAdmin.ListPage(ctx, topo, cursor, limit) })
 	}
 	if cursor != "" {
 		return transport.DLQPage{}, fmt.Errorf("eventbus: DLQ cursor pagination: %w", ErrNotSupported)
@@ -120,7 +122,7 @@ func (b *bus) ListDeadLetters(ctx context.Context, ref TopologyRef, cursor strin
 	if !ok {
 		return transport.DLQPage{}, fmt.Errorf("eventbus: DLQ list: %w", ErrNotSupported)
 	}
-	records, err := admin.List(ctx, topo, 0, limit)
+	records, err := guardValue(panicScopeAdmin, "DLQ list", nil, func() ([]transport.DeadLetter, error) { return admin.List(ctx, topo, 0, limit) })
 	return transport.DLQPage{Records: records}, err
 }
 
@@ -138,7 +140,7 @@ func (b *bus) CountDeadLetters(ctx context.Context, ref TopologyRef) (int64, err
 	if !ok {
 		return 0, fmt.Errorf("eventbus: DLQ count: %w", ErrNotSupported)
 	}
-	return admin.Count(ctx, topo)
+	return guardValue(panicScopeAdmin, "DLQ count", nil, func() (int64, error) { return admin.Count(ctx, topo) })
 }
 
 func (b *bus) RequeueDeadLetters(ctx context.Context, ref TopologyRef, ids []string) error {
@@ -155,7 +157,7 @@ func (b *bus) RequeueDeadLetters(ctx context.Context, ref TopologyRef, ids []str
 	if !ok {
 		return fmt.Errorf("eventbus: DLQ requeue: %w", ErrNotSupported)
 	}
-	return admin.Requeue(ctx, topo, ids)
+	return guardError(panicScopeAdmin, "DLQ requeue", nil, func() error { return admin.Requeue(ctx, topo, ids) })
 }
 
 func (b *bus) PurgeDeadLetters(ctx context.Context, ref TopologyRef) error {
@@ -172,5 +174,5 @@ func (b *bus) PurgeDeadLetters(ctx context.Context, ref TopologyRef) error {
 	if !ok {
 		return fmt.Errorf("eventbus: DLQ purge: %w", ErrNotSupported)
 	}
-	return admin.Purge(ctx, topo)
+	return guardError(panicScopeAdmin, "DLQ purge", nil, func() error { return admin.Purge(ctx, topo) })
 }

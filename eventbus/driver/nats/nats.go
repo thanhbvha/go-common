@@ -206,10 +206,7 @@ func (t *natsTransport) EnsureTopology(ctx context.Context, topo transport.Topol
 			sweepCtx, cancel := context.WithCancel(context.Background())
 			t.sweepers[topoName] = cancel
 			t.sweeperWG.Add(1)
-			go func() {
-				defer t.sweeperWG.Done()
-				t.delaySweeper(sweepCtx, topo, kv)
-			}()
+			go t.runDelaySweeper(sweepCtx, topo, kv)
 		}
 	}
 	t.mu.Unlock()
@@ -585,8 +582,8 @@ func (t *natsTransport) Close(ctx context.Context) error {
 	t.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		t.sweeperWG.Wait()
-		close(done)
+		defer close(done)
+		transport.Guard(nil, t.sweeperWG.Wait)
 	}()
 	select {
 	case <-done:

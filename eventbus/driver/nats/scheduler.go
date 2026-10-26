@@ -256,6 +256,15 @@ func (t *natsTransport) delaySweeper(ctx context.Context, topo transport.Topolog
 	}
 }
 
+func (t *natsTransport) runDelaySweeper(ctx context.Context, topo transport.Topology, kv gonats.KeyValue) {
+	defer t.sweeperWG.Done()
+	transport.Guard(func() {
+		t.recordSchedulerError(topo, "panic", transport.ErrRecoveredPanic, t.now())
+	}, func() {
+		t.delaySweeper(ctx, topo, kv)
+	})
+}
+
 // dispatchDue performs bounded publication work without retaining the delayed
 // backlog in process memory. Ephemeral pull snapshots fetch fixed-size batches.
 func (t *natsTransport) dispatchDue(ctx context.Context, topo transport.Topology, kv gonats.KeyValue, now time.Time) (int, error) {
@@ -632,6 +641,9 @@ func (t *natsTransport) SchedulerHealth(topo transport.Topology) []transport.Sch
 func natsSchedulerError(err error) string {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, transport.ErrRecoveredPanic) {
+		return transport.ErrRecoveredPanic.Error()
 	}
 	text := fmt.Sprintf("%T", err)
 	if len(text) > transport.MaxSchedulerErrorBytes {

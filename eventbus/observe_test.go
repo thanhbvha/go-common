@@ -112,6 +112,24 @@ type traceTestRecorder struct {
 	events       []string
 }
 
+type panickingObservability struct {
+	noopMetrics
+	noopLogger
+}
+
+func (panickingObservability) IncEnqueue(string, string)       { panic("metrics") }
+func (panickingObservability) IncDequeue(string)               { panic("metrics") }
+func (panickingObservability) IncComplete(string, string)      { panic("metrics") }
+func (panickingObservability) ObserveDuration(string, float64) { panic("metrics") }
+func (panickingObservability) Start(context.Context, string, Headers) (context.Context, func()) {
+	panic("tracer start")
+}
+func (panickingObservability) Inject(context.Context, Headers) { panic("tracer inject") }
+func (panickingObservability) RecordEvent(context.Context, string, map[string]string) {
+	panic("tracer record")
+}
+func (panickingObservability) ErrorAsync(string, ...any) { panic("logger") }
+
 func (r *traceTestRecorder) Start(ctx context.Context, name string, carrier Headers) (context.Context, func()) {
 	r.mu.Lock()
 	r.starts++
@@ -155,6 +173,51 @@ func TestRuntimeSettlementMetrics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestObservabilityPanicsDoNotChangeDeliveryOutcome(t *testing.T) {
+	observer := panickingObservability{}
+	cfg := DefaultConfig()
+	cfg.Logger = observer
+	cfg.Metrics = observer
+	cfg.Tracer = observer
+	backend := &observationTransport{}
+	b, err := Open(cfg, WithTransport(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close(context.Background())
+	if err := b.DeclareTask("task"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Enqueue(context.Background(), "task", 1); err != nil {
+		t.Fatalf("publish failed because observability panicked: %v", err)
+	}
+
+	eng := b.(*bus).engine
+	payload, _, err := eng.codec.EncodeTopology(TaskTopology, "task", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := &attemptDelivery{message: transport.Message{Payload: payload}, deliveryCount: 1}
+	eng.processDelivery(TaskTopology, "task", "", func(context.Context, Job) error { return nil }, delivery, 0)
+	if delivery.acks != 1 {
+		t.Fatalf("acks = %d, want 1", delivery.acks)
+	}
+}
+
+func TestSafeTraceEndPanicIsContained(t *testing.T) {
+	tracer := tracerFunc(func(ctx context.Context, _ string, _ Headers) (context.Context, func()) {
+		return ctx, func() { panic("end") }
+	})
+	_, end := safeTraceStart(tracer, context.Background(), "test", nil)
+	end()
+}
+
+type tracerFunc func(context.Context, string, Headers) (context.Context, func())
+
+func (f tracerFunc) Start(ctx context.Context, operation string, carrier Headers) (context.Context, func()) {
+	return f(ctx, operation, carrier)
 }
 
 func TestTracingAndHeadersSurvivePublishRetryAndDLQ(t *testing.T) {
