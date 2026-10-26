@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	stats, err := bus.Stats(ctx, demo.TaskName)
+	stats, err := bus.TopologyStats(ctx, eventbus.TaskRef(demo.TaskName))
 	if err != nil {
 		return fmt.Errorf("read stats: %w", err)
 	}

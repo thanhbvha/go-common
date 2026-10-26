@@ -882,7 +882,7 @@ func sampleResources(ctx context.Context, stop <-chan struct{}, bus eventbus.Bus
 			defer ticker.Stop()
 			sample := func() {
 				statsCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, interval))
-				topologyStats, err := bus.Stats(statsCtx, topology)
+				topologyStats, err := bus.TopologyStats(statsCtx, eventbus.TaskRef(topology))
 				cancel()
 				if err != nil {
 					return

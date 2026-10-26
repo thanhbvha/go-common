@@ -11,7 +11,7 @@ func TestBug_C6_DelayUnder1Second(t *testing.T) {
 	codec := NewCodec(clock)
 
 	delay := 500 * time.Millisecond
-	_, env, err := codec.Encode("test", "data", 3, WithDelay(delay))
+	_, env, err := codec.EncodeTopology(TaskTopology, "test", "data", 3, WithDelay(delay))
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}

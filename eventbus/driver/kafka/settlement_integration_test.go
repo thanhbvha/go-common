@@ -30,7 +30,7 @@ func TestKafkaSettlementBrokerFaultWindows(t *testing.T) {
 			t.Run(fmt.Sprint(kind)+"/"+failure, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				backend := New(producer, nil).(*kafkaTransport)
+				backend := newTestTransport(producer, nil).(*kafkaTransport)
 				topo := transport.Topology{Namespace: "p55", JobType: fmt.Sprintf("settlement-%d", time.Now().UnixNano())}
 				topic := backend.mainTopic(topo)
 				destination := topic

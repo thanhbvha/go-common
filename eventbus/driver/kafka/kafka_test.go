@@ -68,7 +68,7 @@ func TestKafkaTransport_PublishAndConsume(t *testing.T) {
 		t.Skipf("Kafka not available: %v", err)
 	}
 
-	trans := New(cl, []string{"localhost:9092"})
+	trans := newTestTransport(cl, []string{"localhost:9092"})
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("testjob_kafka_%d", time.Now().UnixNano())}
 
@@ -132,7 +132,7 @@ func TestKafkaTransport_Delay(t *testing.T) {
 		t.Skipf("Kafka not available: %v", err)
 	}
 
-	trans := New(cl, []string{"localhost:9092"})
+	trans := newTestTransport(cl, []string{"localhost:9092"})
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("testjob_delay_%d", time.Now().UnixNano())}
 
@@ -189,7 +189,7 @@ func TestKafkaTransport_PartitionProcessing(t *testing.T) {
 	if err := cl.Ping(ctx); err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
-	backend := New(cl, nil).(*kafkaTransport)
+	backend := newTestTransport(cl, nil).(*kafkaTransport)
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("partition_%d", time.Now().UnixNano())}
 	responses, err := backend.adm.CreateTopics(ctx, 2, 1, nil, topo.Name())
 	if err != nil {
@@ -258,7 +258,7 @@ func TestKafkaOffsetCoordinator_ContiguousBrokerCommit(t *testing.T) {
 		t.Skipf("Kafka not available: %v", err)
 	}
 
-	backend := New(producer, nil).(*kafkaTransport)
+	backend := newTestTransport(producer, nil).(*kafkaTransport)
 	topic := fmt.Sprintf("eventbus-p53-%d", time.Now().UnixNano())
 	group := topic + "-group"
 	created, err := backend.adm.CreateTopics(ctx, 1, 1, nil, topic)
@@ -360,7 +360,7 @@ func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
 		t.Skipf("Kafka not available: %v", err)
 	}
 
-	backend := New(producer, nil).(*kafkaTransport)
+	backend := newTestTransport(producer, nil).(*kafkaTransport)
 	topic := fmt.Sprintf("eventbus-p54-%d", time.Now().UnixNano())
 	group := topic + "-group"
 	created, err := backend.adm.CreateTopics(ctx, 2, 1, nil, topic)

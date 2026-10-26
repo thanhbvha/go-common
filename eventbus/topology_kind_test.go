@@ -17,7 +17,7 @@ func TestTopologyKindConflict(t *testing.T) {
 		{
 			name: "task then event",
 			first: func(bus Bus) error {
-				return bus.Register("shared", func(context.Context, Job) error { return nil })
+				return bus.DeclareTask("shared")
 			},
 			next: func(bus Bus) error {
 				return bus.Subscribe("shared", "subscriber", func(context.Context, Job) error { return nil })
@@ -29,7 +29,7 @@ func TestTopologyKindConflict(t *testing.T) {
 				return bus.Subscribe("shared", "subscriber", func(context.Context, Job) error { return nil })
 			},
 			next: func(bus Bus) error {
-				return bus.Register("shared", func(context.Context, Job) error { return nil })
+				return bus.DeclareTask("shared")
 			},
 		},
 	}
@@ -61,7 +61,7 @@ func TestTaskAndEventPublishUseIsolatedTopologies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := taskBus.Register("shared", func(context.Context, Job) error { return nil }); err != nil {
+	if err := taskBus.DeclareTask("shared"); err != nil {
 		t.Fatal(err)
 	}
 	if err := eventBus.Subscribe("shared", "subscriber", func(context.Context, Job) error { return nil }); err != nil {

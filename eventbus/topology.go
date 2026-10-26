@@ -108,10 +108,3 @@ func delayEnabled(topology Topology) bool {
 func WithLegacyResourceNames() TopologyOption {
 	return WithOption(transport.ResourceNameVersionOption, transport.ResourceNameVersionLegacy)
 }
-
-// WithMaxDeliveries overrides the global MaxAttempts for this specific topology.
-//
-// Deprecated: use WithMaxAttempts.
-func WithMaxDeliveries(max int) TopologyOption {
-	return WithMaxAttempts(max)
-}

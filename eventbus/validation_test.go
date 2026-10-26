@@ -23,7 +23,6 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 		{name: "negative prefetch", mutate: func(c *Config) { c.Prefetch = -1 }},
 		{name: "negative max attempts", mutate: func(c *Config) { c.MaxAttempts = -1 }},
 		{name: "negative max payload bytes", mutate: func(c *Config) { c.MaxPayloadBytes = -1 }},
-		{name: "negative legacy max deliveries", mutate: func(c *Config) { c.MaxDeliveries = -1 }},
 	}
 
 	for _, tt := range tests {
@@ -44,14 +43,14 @@ func TestPublicAPIsRejectInvalidNames(t *testing.T) {
 	}{
 		{name: "declare empty task", call: func(b Bus) error { return b.DeclareTask("") }},
 		{name: "declare blank event", call: func(b Bus) error { return b.DeclareEvent("  ") }},
-		{name: "register padded task", call: func(b Bus) error { return b.Register(" task", func(context.Context, Job) error { return nil }) }},
+		{name: "handle padded task", call: func(b Bus) error { return b.HandleTask(" task", func(context.Context, Job) error { return nil }) }},
 		{name: "subscribe empty event", call: func(b Bus) error {
 			return b.Subscribe("", "subscriber", func(context.Context, Job) error { return nil })
 		}},
 		{name: "subscribe empty subscriber", call: func(b Bus) error { return b.Subscribe("event", "", func(context.Context, Job) error { return nil }) }},
 		{name: "enqueue empty task", call: func(b Bus) error { return b.Enqueue(context.Background(), "", nil) }},
 		{name: "publish blank event", call: func(b Bus) error { return b.Publish(context.Background(), " ", nil) }},
-		{name: "stats empty task", call: func(b Bus) error { _, err := b.Stats(context.Background(), ""); return err }},
+		{name: "stats empty task", call: func(b Bus) error { _, err := b.TopologyStats(context.Background(), TaskRef("")); return err }},
 		{name: "stats empty event", call: func(b Bus) error { _, err := b.TopologyStats(context.Background(), EventRef("")); return err }},
 	}
 
@@ -68,18 +67,12 @@ func TestPublicAPIsRejectInvalidNames(t *testing.T) {
 	}
 }
 
-func TestRegistrationRejectsNilHandlersWithoutMutation(t *testing.T) {
+func TestHandlerRegistrationRejectsNilHandlersWithoutMutation(t *testing.T) {
 	instance, err := Open(DefaultConfig(), WithTransport(&benchmarkTransport{}))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := instance.Register("task", nil); !errors.Is(err, ErrNilHandler) {
-		t.Fatalf("Register error = %v, want ErrNilHandler", err)
-	}
 	concrete := instance.(*bus)
-	if _, exists := concrete.engine.taskTopologies["task"]; exists {
-		t.Fatal("nil Register partially declared the task")
-	}
 	if err := instance.DeclareTask("declared"); err != nil {
 		t.Fatalf("DeclareTask: %v", err)
 	}
@@ -100,8 +93,11 @@ func TestHandlePropagatesNilTypedHandlersToRegistrationValidation(t *testing.T) 
 		t.Fatalf("Open: %v", err)
 	}
 	var typed TypedHandler[string]
-	if err := instance.Register("task", Handle(typed)); !errors.Is(err, ErrNilHandler) {
-		t.Fatalf("Register error = %v, want ErrNilHandler", err)
+	if err := instance.DeclareTask("task"); err != nil {
+		t.Fatalf("DeclareTask: %v", err)
+	}
+	if err := instance.HandleTask("task", Handle(typed)); !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("HandleTask error = %v, want ErrNilHandler", err)
 	}
 }
 
@@ -191,13 +187,13 @@ func TestJobOptionsAreStrictlyValidated(t *testing.T) {
 
 func TestCodecRejectsInvalidTopologyMetadata(t *testing.T) {
 	codec := NewCodec(nil)
-	if _, _, err := codec.Encode("", nil, 1); !errors.Is(err, ErrInvalidName) {
+	if _, _, err := codec.EncodeTopology(TaskTopology, "", nil, 1); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("empty topology error = %v, want ErrInvalidName", err)
 	}
 	if _, _, err := codec.EncodeTopology(TopologyKind(99), "task", nil, 1); !errors.Is(err, ErrInvalidOption) {
 		t.Fatalf("invalid kind error = %v, want ErrInvalidOption", err)
 	}
-	if _, _, err := codec.Encode("task", nil, -1); !errors.Is(err, ErrInvalidOption) {
+	if _, _, err := codec.EncodeTopology(TaskTopology, "task", nil, -1); !errors.Is(err, ErrInvalidOption) {
 		t.Fatalf("negative max attempts error = %v, want ErrInvalidOption", err)
 	}
 }

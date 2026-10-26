@@ -13,20 +13,25 @@ func TestEngine_C8_ShutdownGracefully(t *testing.T) {
 	mem, _ := registry.Get("memory")
 	cfg := DefaultConfig()
 	cfg.ProcessTimeout = 2 * time.Second
-	
+
 	bus, _ := Open(cfg, WithTransport(mem))
 
 	started := make(chan struct{})
 	var handlerCompleted int32
 
-	bus.Register("test-shutdown", func(ctx context.Context, job Job) error {
+	if err := bus.DeclareTask("test-shutdown"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.HandleTask("test-shutdown", func(ctx context.Context, job Job) error {
 		close(started) // signal that we have picked up the job
-		
+
 		// simulate long processing
 		time.Sleep(500 * time.Millisecond)
 		atomic.StoreInt32(&handlerCompleted, 1)
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	bus.Start(ctx)
@@ -52,7 +57,7 @@ func TestEngine_C8_ShutdownGracefully(t *testing.T) {
 	}
 
 	// Verify the job was ACKed successfully
-	stats, _ := bus.Stats(ctx, "test-shutdown")
+	stats, _ := bus.TopologyStats(ctx, TaskRef("test-shutdown"))
 	if stats.Pending != 0 {
 		t.Fatalf("Job was not acked! Pending = %d", stats.Pending)
 	}

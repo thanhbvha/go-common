@@ -131,7 +131,7 @@ func TestLegacyNewCopiesNativeSecurityOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer base.Close()
-	backend := New(base, nil).(*kafkaTransport)
+	backend := newTestTransport(base, nil).(*kafkaTransport)
 	consumer, err := backend.newConsumer(kgo.ConsumerGroup("legacy-group"), kgo.ConsumeTopics("legacy-topic"))
 	if err != nil {
 		t.Fatal(err)

@@ -231,7 +231,7 @@ func TestEnqueueOutcomesAndStatsHooks(t *testing.T) {
 	if err := b.Enqueue(context.Background(), "task", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Stats(context.Background(), "task"); err != nil {
+	if _, err := b.TopologyStats(context.Background(), TaskRef("task")); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.stats) != 1 || m.stats[0] != backend.stats {
@@ -241,7 +241,7 @@ func TestEnqueueOutcomesAndStatsHooks(t *testing.T) {
 	if err := b.Enqueue(context.Background(), "task", 1, WithDedupeKey("synthetic")); err == nil {
 		t.Fatal("publish failure hidden")
 	}
-	if _, err := b.Stats(context.Background(), "task"); err == nil {
+	if _, err := b.TopologyStats(context.Background(), TaskRef("task")); err == nil {
 		t.Fatal("stats failure hidden")
 	}
 	if len(m.stats) != 1 {
@@ -340,7 +340,10 @@ func TestReconnectAndSaturationHooks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.Register("task", func(context.Context, Job) error { <-release; return nil }); err != nil {
+		if err := b.DeclareTask("task"); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.HandleTask("task", func(context.Context, Job) error { <-release; return nil }); err != nil {
 			t.Fatal(err)
 		}
 		if err := b.Start(context.Background()); err != nil {

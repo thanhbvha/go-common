@@ -25,7 +25,10 @@ func startTestSupervisor(t *testing.T, backend *supervisorTransport, handler Han
 	cfg := DefaultConfig()
 	cfg.Concurrency = 1
 	e := newEngine(cfg, backend, NewCodec(nil))
-	if err := e.Register("supervised", handler); err != nil {
+	if err := e.DeclareTask("supervised"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.HandleTask("supervised", handler); err != nil {
 		t.Fatal(err)
 	}
 	atomic.StoreInt32(&e.state, stateRunning)

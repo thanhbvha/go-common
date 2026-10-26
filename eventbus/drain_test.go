@@ -77,7 +77,10 @@ func drainBus(t *testing.T, n int, handler Handler) (Bus, *drainTransport, []*wo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Register("drain", handler); err != nil {
+	if err := b.DeclareTask("drain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.HandleTask("drain", handler); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Start(context.Background()); err != nil {
@@ -234,7 +237,10 @@ func TestDrainWaitsForSettlementOrCancelsAtDeadline(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := b.Register("task", func(context.Context, Job) error { return nil }); err != nil {
+				if err := b.DeclareTask("task"); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.HandleTask("task", func(context.Context, Job) error { return nil }); err != nil {
 					t.Fatal(err)
 				}
 				if err := b.Start(context.Background()); err != nil {

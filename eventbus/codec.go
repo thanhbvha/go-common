@@ -19,13 +19,6 @@ func NewCodec(clock Clock) *Codec {
 	return &Codec{clock: clock}
 }
 
-// Encode builds a task Envelope v3 and serializes it to JSON.
-//
-// Deprecated: use EncodeTopology when the topology kind is known.
-func (c *Codec) Encode(jobType string, payload any, maxAttemptsDefault int, opts ...JobOption) ([]byte, *Envelope, error) {
-	return c.EncodeTopology(TaskTopology, jobType, payload, maxAttemptsDefault, opts...)
-}
-
 // EncodeTopology builds an Envelope v3 and serializes it to JSON.
 func (c *Codec) EncodeTopology(kind TopologyKind, jobType string, payload any, maxAttemptsDefault int, opts ...JobOption) ([]byte, *Envelope, error) {
 	env, err := c.buildEnvelope(kind, jobType, payload, maxAttemptsDefault, opts...)
@@ -97,19 +90,34 @@ func (c *Codec) buildEnvelope(kind TopologyKind, jobType string, payload any, ma
 // Decode parses v3 envelopes and normalizes legacy v2 envelopes to v3
 // attempt semantics.
 func (c *Codec) Decode(data []byte) (*Envelope, error) {
+	var version struct {
+		V int `json:"v"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return nil, fmt.Errorf("failed to decode envelope: %w", err)
+	}
+	if version.V == 2 {
+		var legacy struct {
+			Envelope
+			MaxRetry int `json:"max_retry"`
+		}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return nil, fmt.Errorf("failed to decode envelope: %w", err)
+		}
+		legacy.V = 3
+		legacy.Kind = TaskTopology
+		legacy.Attempt++
+		legacy.MaxAttempts = max(legacy.MaxRetry, 1)
+		legacy.legacy = true
+		return &legacy.Envelope, nil
+	}
+
 	var env Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("failed to decode envelope: %w", err)
 	}
 
 	switch env.V {
-	case 2:
-		env.legacy = true
-		env.V = 3
-		env.Kind = TaskTopology
-		env.Attempt++
-		env.MaxAttempts = max(env.MaxRetry, 1)
-		env.MaxRetry = 0
 	case 3:
 		if env.Attempt < 1 {
 			return nil, fmt.Errorf("invalid envelope attempt: %d", env.Attempt)

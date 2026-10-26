@@ -23,10 +23,6 @@ type Envelope struct {
 	Payload     json.RawMessage `json:"payload"`      // raw json payload
 	Attempt     int             `json:"attempt"`      // current attempt (1-indexed)
 	MaxAttempts int             `json:"max_attempts"` // total permitted handler executions
-	// MaxRetry is populated only while decoding a v2 envelope.
-	//
-	// Deprecated: use MaxAttempts.
-	MaxRetry       int     `json:"max_retry,omitempty"`
 	CreatedAt      int64   `json:"created_at"`                // creation time in unix milliseconds
 	RunAt          int64   `json:"run_at"`                    // scheduled run time in unix milliseconds
 	OrderingKey    string  `json:"ordering_key,omitempty"`    // optional broker partition/ordering key
@@ -54,18 +50,8 @@ func (j *Job) Kind() TopologyKind { return j.env.Kind }
 // Attempt returns the current 1-indexed handler attempt.
 func (j *Job) Attempt() int { return j.env.Attempt }
 
-// GetAttempt returns the current 1-indexed handler attempt.
-//
-// Deprecated: use Attempt.
-func (j *Job) GetAttempt() int { return j.Attempt() }
-
 // MaxAttempts returns the total number of permitted handler executions.
 func (j *Job) MaxAttempts() int { return j.env.MaxAttempts }
-
-// MaxRetry returns the total number of permitted handler executions.
-//
-// Deprecated: use MaxAttempts.
-func (j *Job) MaxRetry() int { return j.MaxAttempts() }
 
 // Decode unmarshals the raw JSON payload into the provided value `v`.
 // Because we use json.RawMessage, large int64 IDs (>2^53) are decoded exactly

@@ -98,41 +98,6 @@ func newEngine(cfg Config, t transport.Transport, codec *Codec) *engine {
 	}
 }
 
-func (e *engine) Register(jobType string, handler Handler, opts ...TopologyOption) error {
-	release, err := e.beginDeclaration()
-	if err != nil {
-		return err
-	}
-	defer release()
-	if err := validateName("task name", jobType); err != nil {
-		return err
-	}
-	if handler == nil {
-		return ErrNilHandler
-	}
-	topo, err := e.buildTopology(TaskTopology, jobType, opts)
-	if err != nil {
-		return err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if atomic.LoadInt32(&e.state) != stateNew {
-		return lifecycleDeclarationError(atomic.LoadInt32(&e.state))
-	}
-	if _, exists := e.eventTopologies[jobType]; exists {
-		return fmt.Errorf("%w: %q is already an event", ErrTopologyKindConflict, jobType)
-	}
-	if existing, exists := e.taskTopologies[jobType]; exists && !reflect.DeepEqual(existing, topo) {
-		return fmt.Errorf("%w: task %q", ErrConflictingDeclaration, jobType)
-	}
-	if _, exists := e.handlers[jobType]; exists {
-		return fmt.Errorf("%w: task %q", ErrDuplicateHandler, jobType)
-	}
-	e.taskTopologies[jobType] = cloneTopology(topo)
-	e.handlers[jobType] = handler
-	return nil
-}
-
 func (e *engine) DeclareTask(jobType string, opts ...TaskOption) error {
 	release, err := e.beginDeclaration()
 	if err != nil {
@@ -1060,30 +1025,17 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		e.traceOutcome(ctx, "publish", status)
 	}()
 	e.mu.RLock()
-	var known bool
 	var topo Topology
 	var hasTopo bool
 	if kind == TaskTopology {
 		topo, hasTopo = e.taskTopologies[name]
-		known = hasTopo
 	} else {
 		topo, hasTopo = e.eventTopologies[name]
-		known = hasTopo
 	}
 	e.mu.RUnlock()
 
 	if !hasTopo {
-		topo = Topology{Namespace: e.cfg.Namespace, JobType: name, Kind: kind}
-	}
-
-	if !known {
-		if !e.cfg.AutoRegister {
-			return PublicationResult{}, ErrUnknownJobType
-		}
-		// Lazy EnsureTopology for unknown types if AutoRegister is true (Bug C5)
-		if err := e.transport.EnsureTopology(ctx, topo); err != nil {
-			return PublicationResult{}, fmt.Errorf("ensure topology: %w", err)
-		}
+		return PublicationResult{}, ErrUnknownJobType
 	}
 
 	maxAttempts := e.cfg.MaxAttempts

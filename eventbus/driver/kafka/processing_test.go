@@ -521,7 +521,10 @@ func TestPartitionProcessingThroughEngineWorkers(t *testing.T) {
 		}
 		started := make(chan int, 4)
 		gates := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})}
-		if err := bus.Register("jobs", func(ctx context.Context, job eventbus.Job) error {
+		if err := bus.DeclareTask("jobs"); err != nil {
+			t.Fatal(err)
+		}
+		if err := bus.HandleTask("jobs", func(ctx context.Context, job eventbus.Job) error {
 			i := positions[job.ID()]
 			started <- i
 			select {

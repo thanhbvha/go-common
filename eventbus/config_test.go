@@ -61,7 +61,7 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-func TestConfigValidateMaxAttemptsCompatibility(t *testing.T) {
+func TestConfigValidateMaxAttempts(t *testing.T) {
 	tests := []struct {
 		name         string
 		cfg          Config
@@ -69,7 +69,6 @@ func TestConfigValidateMaxAttemptsCompatibility(t *testing.T) {
 	}{
 		{name: "default", cfg: DefaultConfig(), wantAttempts: 5},
 		{name: "canonical field", cfg: Config{MaxAttempts: 7}, wantAttempts: 7},
-		{name: "deprecated field", cfg: Config{MaxDeliveries: 3}, wantAttempts: 3},
 	}
 
 	for _, tt := range tests {

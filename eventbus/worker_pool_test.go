@@ -101,8 +101,11 @@ func TestWorkerPoolBoundsConcurrencyAndPrefetch(t *testing.T) {
 		active.Add(-1)
 		return nil
 	}
-	if err := instance.Register("bounded", handler, WithConcurrency(concurrency), WithPrefetch(prefetch)); err != nil {
-		t.Fatalf("Register: %v", err)
+	if err := instance.DeclareTask("bounded", WithConcurrency(concurrency), WithPrefetch(prefetch)); err != nil {
+		t.Fatalf("DeclareTask: %v", err)
+	}
+	if err := instance.HandleTask("bounded", handler); err != nil {
+		t.Fatalf("HandleTask: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

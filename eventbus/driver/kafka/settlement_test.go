@@ -270,7 +270,7 @@ func TestKafkaSettlementRejectsUnsafeProducer(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			backend := New(client, nil)
+			backend := newTestTransport(client, nil)
 			err = backend.(transport.TopologyValidator).ValidateTopology(transport.Topology{JobType: "task"})
 			unsafe := scenario == "no ack" || scenario == "transactional"
 			if unsafe != errors.Is(err, transport.ErrNotSupported) {

@@ -15,7 +15,7 @@ type TestPayload struct {
 
 func TestCodecEncodesAndValidatesDedupeTTL(t *testing.T) {
 	codec := NewCodec(nil)
-	data, env, err := codec.Encode("test", 1, 1, WithDedupeKey("order-1"), WithDedupeTTL(750*time.Millisecond))
+	data, env, err := codec.EncodeTopology(TaskTopology, "test", 1, 1, WithDedupeKey("order-1"), WithDedupeTTL(750*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,10 +29,10 @@ func TestCodecEncodesAndValidatesDedupeTTL(t *testing.T) {
 	if decoded.DedupeTTL != int64(750*time.Millisecond) {
 		t.Fatalf("decoded dedupe TTL = %dns, want 750ms", decoded.DedupeTTL)
 	}
-	if _, _, err := codec.Encode("test", 1, 1, WithDedupeTTL(time.Second)); err == nil {
+	if _, _, err := codec.EncodeTopology(TaskTopology, "test", 1, 1, WithDedupeTTL(time.Second)); err == nil {
 		t.Fatal("dedupe TTL without key was accepted")
 	}
-	if _, _, err := codec.Encode("test", 1, 1, WithDedupeKey("key"), WithDedupeTTL(-time.Second)); err == nil {
+	if _, _, err := codec.EncodeTopology(TaskTopology, "test", 1, 1, WithDedupeKey("key"), WithDedupeTTL(-time.Second)); err == nil {
 		t.Fatal("negative dedupe TTL was accepted")
 	}
 }
@@ -48,7 +48,7 @@ func TestBug_C2_CodecInt64Precision(t *testing.T) {
 		Name: "test-precision",
 	}
 
-	data, env, err := codec.Encode("test", payload, 3)
+	data, env, err := codec.EncodeTopology(TaskTopology, "test", payload, 3)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
@@ -96,7 +96,14 @@ func TestCodecDecodeV2NormalizesAttemptSemantics(t *testing.T) {
 	codec := NewCodec(nil)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data, err := json.Marshal(Envelope{
+			data, err := json.Marshal(struct {
+				V        int             `json:"v"`
+				ID       string          `json:"id"`
+				Type     string          `json:"type"`
+				Payload  json.RawMessage `json:"payload"`
+				Attempt  int             `json:"attempt"`
+				MaxRetry int             `json:"max_retry"`
+			}{
 				V:        2,
 				ID:       "legacy-id",
 				Type:     "legacy-task",

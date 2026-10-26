@@ -20,8 +20,8 @@ func TestUnsupportedOptionalTransportOperations(t *testing.T) {
 		t.Fatalf("DeclareTask: %v", err)
 	}
 
-	if _, err := instance.Stats(context.Background(), "optional"); !errors.Is(err, ErrNotSupported) || !errors.Is(err, transport.ErrNotSupported) {
-		t.Fatalf("Stats error = %v, want stable ErrNotSupported", err)
+	if _, err := instance.TopologyStats(context.Background(), TaskRef("optional")); !errors.Is(err, ErrNotSupported) || !errors.Is(err, transport.ErrNotSupported) {
+		t.Fatalf("TopologyStats error = %v, want stable ErrNotSupported", err)
 	}
 
 	err = instance.Enqueue(context.Background(), "optional", "payload", WithDedupeKey("key"))

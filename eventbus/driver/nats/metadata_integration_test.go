@@ -56,7 +56,10 @@ func TestEngineRetriesPreserveIDsAtSameDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer bus.Close(context.Background())
-	if err := bus.Register(topo.JobType, func(context.Context, eventbus.Job) error {
+	if err := bus.DeclareTask(topo.JobType); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.HandleTask(topo.JobType, func(context.Context, eventbus.Job) error {
 		return eventbus.MarkRetryAfter(fmt.Errorf("synthetic retry"), time.Hour)
 	}); err != nil {
 		t.Fatal(err)

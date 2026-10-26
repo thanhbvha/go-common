@@ -14,7 +14,7 @@ func TestEngine_PubSub(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Namespace = "testpubsub"
 	cfg.Concurrency = 10
-	cfg.MaxDeliveries = 3
+	cfg.MaxAttempts = 3
 	cfg.ProcessTimeout = 2 * time.Second
 	cfg.RetryPolicy = ConstantBackoff{Delay: 1 * time.Second}
 	b, err := Open(cfg, WithTransport(trans))
@@ -64,9 +64,9 @@ func TestEngine_PubSub(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Publish one event
-	err = b.PublishEvent(ctx, "order_created", map[string]string{"order_id": "123"})
+	err = b.Publish(ctx, "order_created", map[string]string{"order_id": "123"})
 	if err != nil {
-		t.Fatalf("PublishEvent: %v", err)
+		t.Fatalf("Publish: %v", err)
 	}
 
 	done := make(chan struct{})

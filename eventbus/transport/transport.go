@@ -282,11 +282,6 @@ type CursorDLQAdmin interface {
 	ListPage(ctx context.Context, topology Topology, cursor string, limit int) (DLQPage, error)
 }
 
-// DLQStore is retained as a source-compatible alias.
-//
-// Deprecated: use DLQAdmin.
-type DLQStore = DLQAdmin
-
 // Deduper provides an interface for deduplication if the transport natively supports it.
 type Deduper interface {
 	// Reserve attempts to acquire a lock for the given dedupe key.

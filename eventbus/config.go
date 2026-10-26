@@ -18,14 +18,6 @@ type Config struct {
 	// Driver is the name of the transport driver to use (e.g., "redis", "kafka", "nats").
 	Driver string
 
-	// AutoRegister automatically registers a job type if a handler is not found
-	// when enqueueing. Useful for producer-only applications.
-	// Default: false.
-	//
-	// Deprecated: declare producer-only topologies with Bus.DeclareTask or
-	// Bus.DeclareEvent. AutoRegister is retained temporarily for compatibility.
-	AutoRegister bool
-
 	// ProcessTimeout is the maximum time allowed for a single job to process
 	// before the context passed to the handler is canceled.
 	// Default: 30s.
@@ -55,12 +47,6 @@ type Config struct {
 	// Zero leaves the corresponding dimension unlimited for compatibility.
 	MaxTopologies  int
 	MaxSubscribers int
-
-	// MaxDeliveries is the legacy name for MaxAttempts. When greater than zero,
-	// it overrides MaxAttempts during validation.
-	//
-	// Deprecated: use MaxAttempts.
-	MaxDeliveries int
 
 	// RetryPolicy defines how backoff is calculated for retries.
 	// Default: ExponentialBackoff.
@@ -122,12 +108,6 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxAttempts < 0 {
 		return fmt.Errorf("%w: max attempts must not be negative", ErrInvalidConfig)
-	}
-	if c.MaxDeliveries < 0 {
-		return fmt.Errorf("%w: max deliveries must not be negative", ErrInvalidConfig)
-	}
-	if c.MaxDeliveries > 0 {
-		c.MaxAttempts = c.MaxDeliveries
 	}
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = 5

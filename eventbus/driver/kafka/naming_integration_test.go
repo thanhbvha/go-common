@@ -23,7 +23,7 @@ func TestEncodedTopologyNamesPreventKafkaCrossDelivery(t *testing.T) {
 	if err := producer.Ping(ctx); err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
-	backend := New(producer, nil).(*kafkaTransport)
+	backend := newTestTransport(producer, nil).(*kafkaTransport)
 	suffix := time.Now().UnixNano()
 	first := transport.Topology{Namespace: fmt.Sprintf("acme_%d", suffix), JobType: "event.foo", Kind: transport.TaskTopology}
 	second := transport.Topology{Namespace: fmt.Sprintf("acme_%d", suffix), JobType: "foo", Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}

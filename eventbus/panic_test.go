@@ -123,7 +123,10 @@ func TestPanicRecoveryKeepsWorkerAlive(t *testing.T) {
 				}
 				h := Handle(func(context.Context, Job, int) error { return nil }, mw)
 				if kind == TaskTopology {
-					err = b.Register("panic", h)
+					err = b.DeclareTask("panic")
+					if err == nil {
+						err = b.HandleTask("panic", h)
+					}
 				} else {
 					err = b.Subscribe("panic", "subscriber", h)
 				}

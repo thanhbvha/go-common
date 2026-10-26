@@ -86,21 +86,3 @@ func TestDeclaredTopologyRequiredForPublish(t *testing.T) {
 		t.Fatalf("Publish error = %v, want ErrUnknownJobType", err)
 	}
 }
-
-func TestRegisterRemainsDeclareAndHandleCompatibilityAdapter(t *testing.T) {
-	instance, err := Open(DefaultConfig(), WithTransport(&topologyRecordingTransport{}))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := instance.Register("legacy", func(context.Context, Job) error { return nil }); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	concrete := instance.(*bus)
-	if _, declared := concrete.engine.taskTopologies["legacy"]; !declared {
-		t.Fatal("Register did not declare task topology")
-	}
-	if _, handled := concrete.engine.handlers["legacy"]; !handled {
-		t.Fatal("Register did not attach task handler")
-	}
-}

@@ -26,14 +26,6 @@ func WithEventLayoutTargeted() eventbus.TopologyOption {
 	return eventbus.WithOption(redisEventLayoutOption, redisTargetedLayoutV1)
 }
 
-// WithMaxLen requests the retired lossy ready-stream cap. Validation rejects
-// this option because MAXLEN can remove accepted work ahead of slow groups.
-//
-// Deprecated: configure broker capacity and explicit safe retention instead.
-func WithMaxLen(maxLen int64) eventbus.TopologyOption {
-	return eventbus.WithOption("redis.maxlen", maxLen)
-}
-
 // WithDLQMaxLen sets the approximate maximum length for the Dead-Letter Queue stream.
 // Default is 50,000.
 func WithDLQMaxLen(maxLen int64) eventbus.TopologyOption {

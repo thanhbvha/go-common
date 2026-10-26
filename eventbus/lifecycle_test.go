@@ -80,7 +80,10 @@ func lifecycleBus(t *testing.T, backend *lifecycleTransport) Bus {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Register("task", func(context.Context, Job) error { return nil }); err != nil {
+	if err := b.DeclareTask("task"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.HandleTask("task", func(context.Context, Job) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = b.Close(context.Background()) })
@@ -149,7 +152,6 @@ func TestConcurrentStartAndRegistrationDuringProvision(t *testing.T) {
 			func() error { return b.DeclareTask("late") },
 			func() error { return b.DeclareEvent("late") },
 			func() error { return b.HandleTask("task", func(context.Context, Job) error { return nil }) },
-			func() error { return b.Register("late", func(context.Context, Job) error { return nil }) },
 			func() error {
 				return b.Subscribe("late", "subscriber", func(context.Context, Job) error { return nil })
 			},
@@ -292,7 +294,6 @@ func TestPublicOperationsReturnBusClosedAfterClose(t *testing.T) {
 	cancel()
 	handler := func(context.Context, Job) error { return nil }
 	operations := map[string]func() error{
-		"register":         func() error { return b.Register("", handler) },
 		"declare task":     func() error { return b.DeclareTask("") },
 		"handle task":      func() error { return b.HandleTask("", handler) },
 		"declare event":    func() error { return b.DeclareEvent("") },
@@ -301,7 +302,6 @@ func TestPublicOperationsReturnBusClosedAfterClose(t *testing.T) {
 		"enqueue batch":    func() error { return b.EnqueueBatch(canceled, "", nil) },
 		"publish":          func() error { return b.Publish(canceled, "", nil) },
 		"ping":             func() error { return b.Ping(canceled) },
-		"stats":            func() error { _, err := b.Stats(canceled, ""); return err },
 		"topology stats":   func() error { _, err := b.TopologyStats(canceled, TopologyRef{}); return err },
 		"subscriber stats": func() error { _, err := b.SubscriberStats(canceled, "", ""); return err },
 		"list DLQ":         func() error { _, err := b.ListDeadLetters(canceled, TopologyRef{}, "", 0); return err },

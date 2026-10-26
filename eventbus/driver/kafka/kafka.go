@@ -60,19 +60,6 @@ var (
 	_ transport.Delivery                = (*kafkaDelivery)(nil)
 )
 
-// New creates a plaintext compatibility transport around base.
-//
-// Deprecated: use NewWithClient or NewWithConfig so internal consumers inherit
-// TLS, SASL, client ID, timeout, and broker configuration.
-func New(base *kgo.Client, brokers []string) transport.Transport {
-	overrides := make([]kgo.Opt, 0, 1)
-	if len(brokers) > 0 {
-		overrides = append(overrides, kgo.SeedBrokers(brokers...))
-	}
-	factory, _ := commonkafka.NewNativeClientFactoryFromClient(base, overrides...)
-	return newKafkaTransport(base, factory, false)
-}
-
 // NewWithClient creates a transport whose producer/admin use the connected
 // wrapper client and whose internal consumers inherit its complete config.
 // The caller retains ownership of client.

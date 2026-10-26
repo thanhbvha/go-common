@@ -115,7 +115,7 @@ func TestRedisStatsAvailableThroughBus(t *testing.T) {
 	if err := instance.Enqueue(context.Background(), "bus-stats", "payload"); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := instance.Stats(context.Background(), "bus-stats")
+	stats, err := instance.TopologyStats(context.Background(), eventbus.TaskRef("bus-stats"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ func BenchmarkCodecEncode(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, _, err := codec.Encode("benchmark.codec", payload, 5); err != nil {
+		if _, _, err := codec.EncodeTopology(TaskTopology, "benchmark.codec", payload, 5); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -31,7 +31,7 @@ func BenchmarkCodecEncode(b *testing.B) {
 func BenchmarkCodecDecode(b *testing.B) {
 	codec := NewCodec(nil)
 	payload := benchmarkPayload{ID: 9_007_199_254_740_993, Name: "benchmark", Enabled: true}
-	data, _, err := codec.Encode("benchmark.codec", payload, 5)
+	data, _, err := codec.EncodeTopology(TaskTopology, "benchmark.codec", payload, 5)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -52,7 +52,10 @@ func BenchmarkEnqueue(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	if err := bus.Register("benchmark.enqueue", func(context.Context, Job) error { return nil }); err != nil {
+	if err := bus.DeclareTask("benchmark.enqueue"); err != nil {
+		b.Fatal(err)
+	}
+	if err := bus.HandleTask("benchmark.enqueue", func(context.Context, Job) error { return nil }); err != nil {
 		b.Fatal(err)
 	}
 	payload := benchmarkPayload{ID: 42, Name: "benchmark", Enabled: true}
@@ -78,7 +81,10 @@ func BenchmarkEngineDispatch(b *testing.B) {
 	}
 
 	completed := make(chan struct{})
-	if err := bus.Register("benchmark.dispatch", func(context.Context, Job) error {
+	if err := bus.DeclareTask("benchmark.dispatch"); err != nil {
+		b.Fatal(err)
+	}
+	if err := bus.HandleTask("benchmark.dispatch", func(context.Context, Job) error {
 		completed <- struct{}{}
 		return nil
 	}); err != nil {

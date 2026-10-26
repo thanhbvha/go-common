@@ -17,10 +17,6 @@ type Bus interface {
 	// HandleTask attaches a handler to an explicitly declared task topology.
 	HandleTask(name string, handler Handler) error
 
-	// Register registers a handler for a specific job type.
-	// Deprecated: use DeclareTask followed by HandleTask.
-	Register(jobType string, handler Handler, opts ...TopologyOption) error
-
 	// DeclareEvent declares a fan-out event topology. Events can be published
 	// without any local subscribers.
 	DeclareEvent(name string, opts ...EventOption) error
@@ -55,11 +51,6 @@ type Bus interface {
 	EnqueueBatch(ctx context.Context, jobType string, jobs []BatchJob) error
 	EnqueueBatchWithResult(ctx context.Context, jobType string, jobs []BatchJob) (BatchPublicationResult, error)
 
-	// PublishEvent publishes an event to multiple subscribers.
-	//
-	// Deprecated: use Publish.
-	PublishEvent(ctx context.Context, eventName string, payload any, opts ...JobOption) error
-
 	// Publish publishes an event to its independent subscriber groups.
 	Publish(ctx context.Context, eventName string, payload any, opts ...JobOption) error
 	PublishWithResult(ctx context.Context, eventName string, payload any, opts ...JobOption) (PublicationResult, error)
@@ -69,9 +60,6 @@ type Bus interface {
 	// call DeclareEvent first.
 	Subscribe(eventName, handlerName string, handler Handler, opts ...SubscriberOption) error
 
-	// Stats returns the statistics for a job type.
-	// Deprecated: use TopologyStats with TaskRef or EventRef.
-	Stats(ctx context.Context, jobType string) (transport.TopologyStats, error)
 	TopologyStats(ctx context.Context, topology TopologyRef) (transport.TopologyStats, error)
 	SubscriberStats(ctx context.Context, event, subscriber string) (transport.TopologyStats, error)
 	ListDeadLetters(ctx context.Context, topology TopologyRef, cursor string, limit int) (transport.DLQPage, error)
@@ -146,10 +134,6 @@ func Open(cfg Config, opts ...Option) (Bus, error) {
 	return b, nil
 }
 
-func (b *bus) Register(jobType string, handler Handler, opts ...TopologyOption) error {
-	return b.engine.Register(jobType, handler, opts...)
-}
-
 func (b *bus) DeclareTask(name string, opts ...TaskOption) error {
 	return b.engine.DeclareTask(name, opts...)
 }
@@ -194,13 +178,6 @@ func (b *bus) EnqueueBatchWithResult(ctx context.Context, jobType string, jobs [
 	return b.engine.EnqueueBatchWithResult(ctx, jobType, jobs)
 }
 
-// PublishEvent publishes an event to multiple subscribers.
-//
-// Deprecated: use Publish.
-func (b *bus) PublishEvent(ctx context.Context, eventName string, payload any, opts ...JobOption) error {
-	return b.Publish(ctx, eventName, payload, opts...)
-}
-
 func (b *bus) Publish(ctx context.Context, eventName string, payload any, opts ...JobOption) error {
 	return b.engine.PublishEvent(ctx, eventName, payload, opts...)
 }
@@ -211,10 +188,6 @@ func (b *bus) PublishWithResult(ctx context.Context, eventName string, payload a
 
 func (b *bus) Subscribe(eventName, handlerName string, handler Handler, opts ...SubscriberOption) error {
 	return b.engine.Subscribe(eventName, handlerName, handler, opts...)
-}
-
-func (b *bus) Stats(ctx context.Context, jobType string) (transport.TopologyStats, error) {
-	return b.TopologyStats(ctx, TaskRef(jobType))
 }
 
 func (b *bus) Ping(ctx context.Context) error {
