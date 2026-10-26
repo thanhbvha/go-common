@@ -14,5 +14,5 @@ The `kafka` module provides a robust, high-performance Apache Kafka client built
 ## 🚨 Best Practices for AI/Developers
 - **Client Initialization**: Always initialize the logger (`logger.SetDefault`) **before** calling `kafka.MustConnect(ctx, config)`.
 - **Graceful Shutdown (CRITICAL)**: Intercept OS signals (SIGINT, SIGTERM) and wait on the context (`<-ctx.Done()`). Always `defer client.Close()` to ensure in-flight messages are flushed and consumer group offsets are committed.
-- **Consumer Behavior**: Use `Subscribe` or `SubscribeGroup` to consume messages. Be aware that the underlying `franz-go` client polls records for *all* topics subscribed via a single client. For fully isolated processing and retry semantics, prefer using the `queue_kafka` module.
+- **Consumer Behavior**: `Subscribe` and `SubscribeBatch` add topics to the same underlying `franz-go` client. Do not run independent subscription loops on one `kafka.Client`, because each `PollFetches` call may receive records from any topic registered on that client. Use a dedicated client per raw consumer, or use the [`eventbus` Kafka driver](../../eventbus/README.md#kafka) for durable task processing with managed retries and dead-letter handling.
 - **Producing**: Use `ProduceJSON` for easy serialization or `Produce` for raw byte arrays. Both are asynchronous and thread-safe.
