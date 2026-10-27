@@ -48,9 +48,21 @@ func TestJWTManager(t *testing.T) {
 		t.Errorf("Expected Email %s, got %s", user.Email, extractedUser.Email)
 	}
 
-	// 4. Test Expired Token
-	expiredToken, _ := manager.GenerateToken(user, -1*time.Hour)
-	_, err = manager.ValidateToken(expiredToken)
+	// 4. Test Expired Token with a controllable clock.
+	now := time.Now()
+	clockedManager, err := NewManagerWithOptions(ManagerOptions{
+		SecretKey: "my-super-secret-key-must-be-32bytes",
+		Clock:     func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredToken, err := clockedManager.GenerateToken(user, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	_, err = clockedManager.ValidateToken(expiredToken)
 	if err != ErrExpiredToken {
 		t.Errorf("Expected ErrExpiredToken, got %v", err)
 	}

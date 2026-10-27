@@ -24,6 +24,9 @@ const (
 	// UserInfo is the context key for the authenticated user information
 	UserInfo Key = "user_info"
 
+	// AuthClaims is the context key for validated registered JWT claims.
+	AuthClaims Key = "auth_claims"
+
 	// DataLoaderKey is the context key for GraphQL DataLoader
 	DataLoaderKey Key = "data_loader"
 )
@@ -69,6 +72,17 @@ func SetUserInfo(ctx context.Context, userInfo any) context.Context {
 // GetUserInfo retrieves authenticated user information from the context.
 func GetUserInfo(ctx context.Context) (any, bool) {
 	val := ctx.Value(UserInfo)
+	return val, val != nil
+}
+
+// SetAuthClaims stores validated JWT claims in the context.
+func SetAuthClaims(ctx context.Context, claims any) context.Context {
+	return context.WithValue(ctx, AuthClaims, claims)
+}
+
+// GetAuthClaims retrieves validated JWT claims from the context.
+func GetAuthClaims(ctx context.Context) (any, bool) {
+	val := ctx.Value(AuthClaims)
 	return val, val != nil
 }
 

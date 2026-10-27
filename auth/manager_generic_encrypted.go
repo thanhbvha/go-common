@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -24,8 +25,8 @@ type GenericEncryptedManager[T any] interface {
 	// VerifyToken validates the JWT signature, decrypts the payload, and unmarshals it into emptyPayload.
 	VerifyToken(tokenString string, emptyPayload *T, aad []byte) error
 
-	// GenerateRefreshToken creates a secure random string for use as a refresh token
-	// and stores it in Redis with the given expiration.
+	// GenerateRefreshToken creates a secure random refresh token and stores only
+	// its digest in Redis with the given expiration.
 	GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error)
 
 	// VerifyRefreshToken checks if the refresh token is valid in Redis.
@@ -110,17 +111,17 @@ func (m *genericEncryptedManager[T]) GenerateToken(payload T, duration time.Dura
 func (m *genericEncryptedManager[T]) VerifyToken(tokenString string, emptyPayload *T, aad []byte) error {
 	// 1. Parse and validate the JWT signature
 	token, err := jwt.ParseWithClaims(tokenString, &EncryptedClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return m.jwtSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return ErrExpiredToken
 		}
-		return fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 
 	claims, ok := token.Claims.(*EncryptedClaims)
@@ -137,7 +138,7 @@ func (m *genericEncryptedManager[T]) VerifyToken(tokenString string, emptyPayloa
 	// 3. Decrypt the payload using AES-256 GCM
 	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, aad)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+		return fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 
 	// 4. Deserialize JSON back to generic type T
@@ -152,7 +153,13 @@ func (m *genericEncryptedManager[T]) VerifyToken(tokenString string, emptyPayloa
 
 func (m *genericEncryptedManager[T]) GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error) {
 	if m.redisClient == nil {
-		return "", errors.New("auth: redis client is not configured for refresh tokens")
+		return "", ErrRedisNotConfigured
+	}
+	if strings.TrimSpace(userID) == "" {
+		return "", ErrInvalidIdentity
+	}
+	if duration <= 0 {
+		return "", ErrInvalidDuration
 	}
 
 	b := make([]byte, 32)
@@ -162,7 +169,7 @@ func (m *genericEncryptedManager[T]) GenerateRefreshToken(ctx context.Context, u
 	rt := hex.EncodeToString(b)
 
 	key := refreshTokenPrefix + userID
-	if err := m.redisClient.Set(ctx, key, rt, duration).Err(); err != nil {
+	if err := m.redisClient.Set(ctx, key, hashRefreshToken(rt), duration).Err(); err != nil {
 		return "", fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
@@ -171,7 +178,10 @@ func (m *genericEncryptedManager[T]) GenerateRefreshToken(ctx context.Context, u
 
 func (m *genericEncryptedManager[T]) VerifyRefreshToken(ctx context.Context, userID, token string) (bool, error) {
 	if m.redisClient == nil {
-		return false, errors.New("auth: redis client is not configured for refresh tokens")
+		return false, ErrRedisNotConfigured
+	}
+	if strings.TrimSpace(userID) == "" || token == "" {
+		return false, nil
 	}
 
 	key := refreshTokenPrefix + userID
@@ -183,12 +193,19 @@ func (m *genericEncryptedManager[T]) VerifyRefreshToken(ctx context.Context, use
 		return false, err
 	}
 
-	return storedToken == token, nil
+	want := hashRefreshToken(token)
+	if strings.HasPrefix(storedToken, refreshTokenHashPrefix) {
+		return constantTimeEqual(storedToken, want), nil
+	}
+	return constantTimeEqual(storedToken, token), nil
 }
 
 func (m *genericEncryptedManager[T]) RevokeRefreshToken(ctx context.Context, userID string) error {
 	if m.redisClient == nil {
-		return errors.New("auth: redis client is not configured")
+		return ErrRedisNotConfigured
+	}
+	if strings.TrimSpace(userID) == "" {
+		return ErrInvalidIdentity
 	}
 	key := refreshTokenPrefix + userID
 	return m.redisClient.Del(ctx, key).Err()
@@ -196,10 +213,13 @@ func (m *genericEncryptedManager[T]) RevokeRefreshToken(ctx context.Context, use
 
 func (m *genericEncryptedManager[T]) RevokeToken(ctx context.Context, tokenID string, expiration time.Duration) error {
 	if m.redisClient == nil {
-		return errors.New("auth: redis client is not configured for revocation")
+		return ErrRedisNotConfigured
 	}
-	if tokenID == "" {
-		return errors.New("auth: tokenID (jti) is required for revocation")
+	if strings.TrimSpace(tokenID) == "" {
+		return ErrInvalidIdentity
+	}
+	if expiration <= 0 {
+		return ErrInvalidDuration
 	}
 	key := blacklistPrefix + tokenID
 	return m.redisClient.Set(ctx, key, "revoked", expiration).Err()
@@ -207,19 +227,16 @@ func (m *genericEncryptedManager[T]) RevokeToken(ctx context.Context, tokenID st
 
 func (m *genericEncryptedManager[T]) IsRevoked(ctx context.Context, tokenID string) (bool, error) {
 	if m.redisClient == nil {
-		return false, nil
+		return false, ErrRedisNotConfigured
 	}
-	if tokenID == "" {
-		return false, nil
+	if strings.TrimSpace(tokenID) == "" {
+		return false, ErrInvalidIdentity
 	}
 
 	key := blacklistPrefix + tokenID
-	err := m.redisClient.Get(ctx, key).Err()
-	if err == nil {
-		return true, nil
+	count, err := m.redisClient.Exists(ctx, key).Result()
+	if err != nil {
+		return false, fmt.Errorf("failed to check token revocation: %w", err)
 	}
-	if errors.Is(err, redis.Nil) {
-		return false, nil
-	}
-	return false, err
+	return count > 0, nil
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/thanhbvha/go-common/auth"
@@ -26,16 +27,44 @@ import (
 const address = ":3000"
 
 func main() {
+	demo := flag.String("demo", "standard", "Auth demo: standard, encrypted, generic, or rotation")
 	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
 	flag.Parse()
 
-	manager, err := auth.NewManager(os.Getenv("AUTH_JWT_SECRET"))
+	var err error
+	switch *demo {
+	case "standard":
+		err = runStandardDemo(*stack)
+	case "encrypted":
+		err = runEncryptedDemo()
+	case "generic":
+		err = runGenericDemo()
+	case "rotation":
+		err = runRotationDemo()
+	default:
+		err = fmt.Errorf("invalid -demo %q; use standard, encrypted, generic, or rotation", *demo)
+	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "AUTH_JWT_SECRET must contain at least 32 characters")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+}
+
+func runStandardDemo(stack string) error {
+	manager, err := auth.NewManagerWithOptions(auth.ManagerOptions{
+		SecretKey:      os.Getenv("AUTH_JWT_SECRET"),
+		Issuer:         exampleIssuer,
+		Audience:       []string{exampleAudience},
+		Leeway:         30 * time.Second,
+		MaxLifetime:    time.Hour,
+		MaxTokenSize:   auth.DefaultMaxTokenSize,
+		MaxPayloadSize: auth.DefaultMaxPayloadSize,
+	})
+	if err != nil {
+		return fmt.Errorf("configure standard manager: %w", err)
 	}
 
-	switch *stack {
+	switch stack {
 	case "nethttp":
 		runNetHTTP(manager)
 	case "fiber":
@@ -45,9 +74,9 @@ func main() {
 	case "echo":
 		runEcho(manager)
 	default:
-		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
-		os.Exit(2)
+		return fmt.Errorf("invalid -stack %q; use nethttp, fiber, gin, or echo", stack)
 	}
+	return nil
 }
 
 func issueToken(manager *auth.Manager) (string, error) {
@@ -67,6 +96,15 @@ func userFromContext(ctx context.Context) (*auth.UserInfo, bool) {
 	return user, ok && user != nil
 }
 
+func registeredClaimsFromContext(ctx context.Context) (jwt.RegisteredClaims, bool) {
+	value, ok := ctxkey.GetAuthClaims(ctx)
+	if !ok {
+		return jwt.RegisteredClaims{}, false
+	}
+	claims, ok := value.(jwt.RegisteredClaims)
+	return claims, ok
+}
+
 func runNetHTTP(manager *auth.Manager) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, _ *http.Request) {
@@ -75,6 +113,7 @@ func runNetHTTP(manager *auth.Manager) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+		setNoStore(w.Header())
 		writeJSON(w, http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
 	})
 	mux.Handle("GET /api/profile", nethttpauth.Middleware(manager)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +122,8 @@ func runNetHTTP(manager *auth.Manager) {
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"user": user, "stack": "net/http"})
+		claims, _ := registeredClaimsFromContext(r.Context())
+		writeJSON(w, http.StatusOK, map[string]any{"user": user, "claims": claims, "stack": "net/http"})
 	})))
 
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -97,6 +137,8 @@ func runFiber(manager *auth.Manager) {
 		if err != nil {
 			return c.SendStatus(fiber.StatusInternalServerError)
 		}
+		c.Set("Cache-Control", "no-store")
+		c.Set("Pragma", "no-cache")
 		return c.JSON(fiber.Map{"access_token": token, "token_type": "Bearer"})
 	})
 	app.Get("/api/profile", fiberauth.Middleware(manager), func(c *fiber.Ctx) error {
@@ -104,7 +146,8 @@ func runFiber(manager *auth.Manager) {
 		if !ok {
 			return c.SendStatus(fiber.StatusUnauthorized)
 		}
-		return c.JSON(fiber.Map{"user": user, "stack": "fiber"})
+		claims, _ := registeredClaimsFromContext(c.UserContext())
+		return c.JSON(fiber.Map{"user": user, "claims": claims, "stack": "fiber"})
 	})
 
 	shutdown := graceful.NewShutdown(10 * time.Second)
@@ -127,6 +170,8 @@ func runGin(manager *auth.Manager) {
 			c.Status(http.StatusInternalServerError)
 			return
 		}
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
 		c.JSON(http.StatusOK, gin.H{"access_token": token, "token_type": "Bearer"})
 	})
 	router.GET("/api/profile", ginauth.Middleware(manager), func(c *gin.Context) {
@@ -135,7 +180,8 @@ func runGin(manager *auth.Manager) {
 			c.Status(http.StatusUnauthorized)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"user": user, "stack": "gin"})
+		claims, _ := registeredClaimsFromContext(c.Request.Context())
+		c.JSON(http.StatusOK, gin.H{"user": user, "claims": claims, "stack": "gin"})
 	})
 
 	server := &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second}
@@ -150,6 +196,8 @@ func runEcho(manager *auth.Manager) {
 		if err != nil {
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.JSON(http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
 	})
 	e.GET("/api/profile", func(c echo.Context) error {
@@ -157,7 +205,8 @@ func runEcho(manager *auth.Manager) {
 		if !ok {
 			return c.NoContent(http.StatusUnauthorized)
 		}
-		return c.JSON(http.StatusOK, map[string]any{"user": user, "stack": "echo"})
+		claims, _ := registeredClaimsFromContext(c.Request().Context())
+		return c.JSON(http.StatusOK, map[string]any{"user": user, "claims": claims, "stack": "echo"})
 	}, echoauth.Middleware(manager))
 
 	shutdown := graceful.NewShutdown(10 * time.Second)
@@ -187,4 +236,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func setNoStore(header http.Header) {
+	header.Set("Cache-Control", "no-store")
+	header.Set("Pragma", "no-cache")
 }

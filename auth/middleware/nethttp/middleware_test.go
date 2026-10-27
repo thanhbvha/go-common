@@ -7,10 +7,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhbvha/go-common/auth"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/web/response"
 )
+
+type genericHTTPClaims struct {
+	UserID string `json:"user_id"`
+	jwt.RegisteredClaims
+}
 
 const (
 	testJWTSecret = "jwt-secret-key-that-is-at-least-32-bytes"
@@ -52,6 +60,11 @@ func TestMiddleware(t *testing.T) {
 				if !ok || gotUser.ID != wantUser.ID || gotUser.Role != wantUser.Role {
 					t.Fatalf("user info = %#v", value)
 				}
+				claimsValue, ok := ctxkey.GetAuthClaims(r.Context())
+				claims, valid := claimsValue.(jwt.RegisteredClaims)
+				if !ok || !valid || claims.ID == "" || claims.Subject != wantUser.ID {
+					t.Fatalf("registered claims = %#v", claimsValue)
+				}
 				w.WriteHeader(http.StatusNoContent)
 			})
 			req := httptest.NewRequest(http.MethodGet, "/profile", nil)
@@ -74,6 +87,18 @@ func TestMiddleware(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMiddlewareWithNilManagerFailsClosed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	recorder := httptest.NewRecorder()
+	Middleware(nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next handler must not be called")
+	})).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", recorder.Code)
 	}
 }
 
@@ -100,6 +125,11 @@ func TestEncryptedMiddlewareUsesAAD(t *testing.T) {
 		if !ok || gotUser.ID != wantUser.ID {
 			t.Fatalf("user info = %#v", value)
 		}
+		claimsValue, ok := ctxkey.GetAuthClaims(r.Context())
+		claims, valid := claimsValue.(jwt.RegisteredClaims)
+		if !ok || !valid || claims.ID == "" || claims.Subject != wantUser.ID {
+			t.Fatalf("registered claims = %#v", claimsValue)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -123,5 +153,73 @@ func TestEncryptedMiddlewareUsesAAD(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestGenericMiddlewareValidatesAndStoresClaims(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*genericHTTPClaims]{
+		SecretKey:   testJWTSecret,
+		Redis:       client,
+		MaxLifetime: time.Hour,
+		TokenID:     func(claims *genericHTTPClaims) (string, error) { return claims.ID, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator, err := auth.NewGenericTokenValidator(
+		manager,
+		func() *genericHTTPClaims { return &genericHTTPClaims{} },
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := &genericHTTPClaims{
+		UserID: "generic-user",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        "generic-token",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			Subject:   "generic-user",
+		},
+	}
+	token, err := manager.GenerateToken(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value, ok := ctxkey.GetUserInfo(r.Context())
+		got, valid := value.(*genericHTTPClaims)
+		if !ok || !valid || got.UserID != claims.UserID {
+			t.Fatalf("generic claims = %#v", value)
+		}
+		claimsValue, ok := ctxkey.GetAuthClaims(r.Context())
+		if !ok || claimsValue != got {
+			t.Fatalf("generic auth claims = %#v", claimsValue)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	GenericMiddleware(validator)(next).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	if err := manager.RevokeToken(request.Context(), claims.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	GenericMiddleware(validator)(next).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token status = %d", recorder.Code)
 	}
 }

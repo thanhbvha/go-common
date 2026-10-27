@@ -21,3 +21,12 @@ func TestUserInfoRoundTrip(t *testing.T) {
 		t.Fatalf("GetUserInfo() = %#v, %v", got, ok)
 	}
 }
+
+func TestAuthClaimsRoundTrip(t *testing.T) {
+	want := struct{ ID string }{ID: "token-123"}
+	ctx := SetAuthClaims(context.Background(), want)
+	got, ok := GetAuthClaims(ctx)
+	if !ok || got != want {
+		t.Fatalf("GetAuthClaims() = %#v, %v", got, ok)
+	}
+}

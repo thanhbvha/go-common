@@ -17,3 +17,13 @@ type CustomClaims struct {
 	UserInfo UserInfo `json:"user_info"`
 	jwt.RegisteredClaims
 }
+
+// TokenDetails is the normalized result of encrypted-token validation without
+// exposing the ciphertext payload.
+type TokenDetails struct {
+	UserInfo         UserInfo
+	RegisteredClaims jwt.RegisteredClaims
+	Encrypted        bool
+	EncryptionKeyID  string
+	FormatVersion    int
+}

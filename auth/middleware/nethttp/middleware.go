@@ -26,13 +26,46 @@ func Middleware(manager *auth.Manager) func(http.Handler) http.Handler {
 				return
 			}
 
-			userInfo, err := manager.ExtractUserInfo(tokenString)
+			if manager == nil {
+				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				return
+			}
+			claims, err := manager.ValidateTokenContext(r.Context(), tokenString)
 			if err != nil {
 				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
 				return
 			}
 
-			ctx := ctxkey.SetUserInfo(r.Context(), userInfo)
+			ctx := ctxkey.SetAuthClaims(r.Context(), claims.RegisteredClaims)
+			ctx = ctxkey.SetUserInfo(ctx, &claims.UserInfo)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// GenericMiddleware protects a net/http handler with a generic token
+// validator. The validated claims are stored through ctxkey.SetUserInfo.
+func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenString := authhttp.BearerToken(r.Header.Get("Authorization"))
+			if tokenString == "" {
+				_ = httpresp.Error(w, r, http.StatusUnauthorized, missingTokenMessage)
+				return
+			}
+			if validator == nil {
+				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				return
+			}
+
+			claims, err := validator.ValidateRequestToken(r.Context(), tokenString)
+			if err != nil {
+				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				return
+			}
+
+			ctx := ctxkey.SetAuthClaims(r.Context(), claims)
+			ctx = ctxkey.SetUserInfo(ctx, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -53,17 +86,22 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor AADExtract
 				return
 			}
 
+			if manager == nil {
+				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				return
+			}
 			var aad []byte
 			if aadExtractor != nil {
 				aad = aadExtractor(r)
 			}
-			userInfo, err := manager.ValidateToken(tokenString, aad)
+			details, err := manager.ValidateTokenDetailsContext(r.Context(), tokenString, aad)
 			if err != nil {
 				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
 				return
 			}
 
-			ctx := ctxkey.SetUserInfo(r.Context(), userInfo)
+			ctx := ctxkey.SetAuthClaims(r.Context(), details.RegisteredClaims)
+			ctx = ctxkey.SetUserInfo(ctx, &details.UserInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

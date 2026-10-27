@@ -19,7 +19,12 @@ func Middleware(manager *auth.Manager) gin.HandlerFunc {
 			return
 		}
 
-		userInfo, err := manager.ExtractUserInfo(tokenString)
+		if manager == nil {
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
+			return
+		}
+		claims, err := manager.ValidateTokenContext(c.Request.Context(), tokenString)
 		if err != nil {
 			ginresp.Error(c, 401, "Invalid or expired token")
 			c.Abort()
@@ -27,8 +32,42 @@ func Middleware(manager *auth.Manager) gin.HandlerFunc {
 		}
 
 		// Store UserInfo in Gin's context
+		userInfo := &claims.UserInfo
 		c.Set(string(ctxkey.UserInfo), userInfo)
-		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(c.Request.Context(), userInfo))
+		c.Set(string(ctxkey.AuthClaims), claims.RegisteredClaims)
+		ctx := ctxkey.SetAuthClaims(c.Request.Context(), claims.RegisteredClaims)
+		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, userInfo))
+		c.Next()
+	}
+}
+
+// GenericMiddleware protects Gin routes with a generic token validator. The
+// validated value is available from both Gin and request contexts.
+func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokenString := extractTokenFromGin(c)
+		if tokenString == "" {
+			ginresp.Error(c, 401, "Missing or invalid Authorization header")
+			c.Abort()
+			return
+		}
+		if validator == nil {
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
+			return
+		}
+
+		claims, err := validator.ValidateRequestToken(c.Request.Context(), tokenString)
+		if err != nil {
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
+			return
+		}
+
+		c.Set(string(ctxkey.UserInfo), claims)
+		c.Set(string(ctxkey.AuthClaims), claims)
+		ctx := ctxkey.SetAuthClaims(c.Request.Context(), claims)
+		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, claims))
 		c.Next()
 	}
 }
@@ -44,20 +83,28 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gi
 			return
 		}
 
+		if manager == nil {
+			ginresp.Error(c, 401, "Invalid or expired token")
+			c.Abort()
+			return
+		}
 		var aad []byte
 		if aadExtractor != nil {
 			aad = aadExtractor(c)
 		}
 
-		userInfo, err := manager.ValidateToken(tokenString, aad)
+		details, err := manager.ValidateTokenDetailsContext(c.Request.Context(), tokenString, aad)
 		if err != nil {
 			ginresp.Error(c, 401, "Invalid or expired token")
 			c.Abort()
 			return
 		}
 
+		userInfo := &details.UserInfo
 		c.Set(string(ctxkey.UserInfo), userInfo)
-		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(c.Request.Context(), userInfo))
+		c.Set(string(ctxkey.AuthClaims), details.RegisteredClaims)
+		ctx := ctxkey.SetAuthClaims(c.Request.Context(), details.RegisteredClaims)
+		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, userInfo))
 		c.Next()
 	}
 }
