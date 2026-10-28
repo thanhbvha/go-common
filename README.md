@@ -8,7 +8,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 
 | Package | Description |
 |---|---|
-| `foundation` | Core application lifecycle orchestrator (Startup Hooks, Graceful Shutdown, Health Checks) |
+| `foundation` | Supervised component lifecycle with startup rollback, runtime failure handling, graceful shutdown, and health state |
 | `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
 | `config` | Environment variable and configuration file loader (Viper wrapper) |
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
@@ -22,7 +22,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
 | `web` | Web core utilities (standard response, validator, net/http / Fiber / Gin / Echo middleware adapters) |
 | `graphql` | Framework-agnostic GraphQL engine with Generic DataLoader & Telemetry |
-| `utils` | Go Generics toolset (slice, maps, str), Cryptography (AES, ChaCha20, Argon2id, Hashing), and Graceful Shutdown |
+| `utils` | Go Generics and cryptography helpers; includes legacy standalone graceful shutdown for applications not using `foundation` |
 | `cache` | Multi-tier Caching (Ristretto Local + Redis Remote) & Redis Distributed Lock |
 | `auth` | Enterprise Authentication with Encrypted JWT (AES-GCM) and Dynamic Token Binding |
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
@@ -52,7 +52,7 @@ go get github.com/thanhbvha/go-common
 
 Each module contains its own detailed `README.md` with usage examples and API references. Please navigate to the respective package directory to learn more:
 
-- [`foundation`](./foundation/README.md)
+- [`foundation`](./foundation/README.md) — [runnable lifecycle examples](./examples/foundation/README.md)
 - [`logger`](./logger/README.md)
 - [`config`](./config/README.md)
 - [`xerrors`](./xerrors/README.md)
@@ -86,6 +86,30 @@ Each module contains its own detailed `README.md` with usage examples and API re
 | Responses / recovery / telemetry | `web` primitives | Adapter | Adapter | Adapter | Adapter |
 | GraphQL | `http.Handler` | Direct | Adapter | Adapter | Adapter |
 | WebSocket | `core.Conn` | Adapter | Adapter | Adapter | Adapter |
+
+## Lifecycle Selection
+
+For new services, use `foundation` as the single owner of startup, OS signals,
+runtime supervision, readiness, and graceful shutdown.
+
+- Register dependencies with `foundation.Resource` or `foundation.Component`.
+- Register long-running jobs with `foundation.Worker`.
+- Register net/http, Fiber, or gRPC servers with the adapters under
+  `foundation/adapter`.
+- Finish `main` with `app.Run(ctx)`; do not start server goroutines manually.
+- Do **not** combine a Foundation app with `utils/graceful`. Two lifecycle
+  coordinators can handle the same signal, close a resource twice, or violate
+  dependency shutdown order.
+- `utils/graceful` remains a legacy standalone helper only for applications
+  that have not migrated to Foundation.
+- If another process or host owns OS signals, create Foundation with
+  `foundation.WithoutSignals()` and control it through the parent context or
+  `app.Shutdown(ctx)`.
+
+Agents and MCP integrations should read the
+[`foundation` lifecycle contract](./foundation/README.md) and the
+[`foundation` examples](./examples/foundation/README.md) before generating a
+service bootstrap.
 
 ---
 

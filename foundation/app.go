@@ -1,98 +1,402 @@
-// Package foundation provides the core application lifecycle manager for microservices.
-// It features standardized startup sequences, centralized graceful shutdown coordination,
-// and integrated Kubernetes-ready health checks.
 package foundation
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"os"
 	"os/signal"
-	"syscall"
-	"time"
+	"runtime/debug"
+	"sync"
 
 	"github.com/thanhbvha/go-common/health"
-	"github.com/thanhbvha/go-common/utils/graceful"
 )
 
-// Config represents the core application configuration.
-type Config struct {
-	Name    string
-	Version string
+var errShutdownRequested = errors.New("foundation: shutdown requested")
 
-	// ShutdownTimeout determines how long to wait for graceful shutdown
-	ShutdownTimeout time.Duration
+type runResult struct {
+	component string
+	err       error
 }
 
-// App represents the lifecycle manager for a microservice.
+// App supervises registered components through startup, runtime, and shutdown.
+// App is safe for concurrent State and Shutdown calls. Register must complete
+// before Run begins.
 type App struct {
-	cfg      Config
-	shutdown *graceful.Shutdown
-	health   *health.Checker
+	cfg     Config
+	logger  Logger
+	health  *health.Checker
+	signals []os.Signal
 
-	// startFuncs stores background routines or servers to start.
-	startFuncs []func(context.Context) error
+	mu         sync.Mutex
+	state      State
+	components []Component
+	names      map[string]struct{}
+	cancel     context.CancelCauseFunc
+	done       chan struct{}
+	result     error
 }
 
-// NewApp creates a new application lifecycle manager.
-func NewApp(cfg Config) *App {
-	if cfg.ShutdownTimeout <= 0 {
-		cfg.ShutdownTimeout = 30 * time.Second
+// New creates a validated application lifecycle manager.
+func New(cfg Config, options ...Option) (*App, error) {
+	name, err := normalizedName(cfg.Name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: name %v", ErrInvalidConfig, err)
+	}
+	cfg.Name = name
+	if cfg.Version != "" {
+		version, err := normalizedName(cfg.Version)
+		if err != nil {
+			return nil, fmt.Errorf("%w: version %v", ErrInvalidConfig, err)
+		}
+		cfg.Version = version
+	}
+	if cfg.StartupTimeout < 0 || cfg.ShutdownTimeout < 0 {
+		return nil, fmt.Errorf("%w: lifecycle timeouts must not be negative", ErrInvalidConfig)
+	}
+	if cfg.StartupTimeout == 0 {
+		cfg.StartupTimeout = defaultStartupTimeout
+	}
+	if cfg.ShutdownTimeout == 0 {
+		cfg.ShutdownTimeout = defaultShutdownTimeout
 	}
 
+	settings := defaultSettings(cfg.Version)
+	for _, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("%w: option must not be nil", ErrInvalidConfig)
+		}
+		if err := option(&settings); err != nil {
+			return nil, err
+		}
+	}
 	app := &App{
-		cfg:      cfg,
-		shutdown: graceful.NewShutdown(cfg.ShutdownTimeout),
-		health:   health.New().WithVersion(cfg.Version),
+		cfg:     cfg,
+		logger:  settings.logger,
+		health:  settings.health,
+		signals: append([]os.Signal(nil), settings.signals...),
+		state:   StateCreated,
+		names:   make(map[string]struct{}),
+		done:    make(chan struct{}),
+	}
+	app.health.AddReadinessCheck(lifecycleCheckName, func(context.Context) error {
+		if state := app.State(); state != StateRunning {
+			return fmt.Errorf("application is %s", state)
+		}
+		return nil
+	})
+	return app, nil
+}
+
+// Register adds a component before Run begins.
+func (a *App) Register(component Component) error {
+	name, err := normalizedName(component.Name)
+	if err != nil {
+		return fmt.Errorf("%w: component name %v", ErrInvalidComponent, err)
+	}
+	component.Name = name
+	if component.Start == nil && component.Run == nil && component.Stop == nil {
+		return fmt.Errorf("%w: at least one callback is required", ErrInvalidComponent)
 	}
 
-	return app
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != StateCreated {
+		return ErrRegistrationClosed
+	}
+	if _, exists := a.names[component.Name]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateComponent, component.Name)
+	}
+	a.names[component.Name] = struct{}{}
+	a.components = append(a.components, component)
+	return nil
 }
 
-// OnStart registers a function that will be executed when App.Run is called.
-// Usually used to start HTTP/gRPC servers or workers in the background.
-// The function must not block indefinitely; it should start its work in a goroutine
-// if necessary, or return immediately after initialization.
-func (a *App) OnStart(fn func(ctx context.Context) error) {
-	a.startFuncs = append(a.startFuncs, fn)
+// State returns the current lifecycle state.
+func (a *App) State() State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state
 }
 
-// OnShutdown registers a cleanup function to run during graceful shutdown.
-func (a *App) OnShutdown(fn func(ctx context.Context) error) {
-	a.shutdown.Register(fn)
-}
-
-// Health returns the global health checker for this app.
+// Health returns the application health checker. The reserved readiness check
+// "foundation.lifecycle" reflects the current lifecycle state.
 func (a *App) Health() *health.Checker {
 	return a.health
 }
 
-// Run starts all registered components and blocks until an OS signal is received.
-// When a signal is received, it triggers a graceful shutdown.
-func (a *App) Run() error {
-	ctx := context.Background()
+// Run starts every component, supervises runners, and blocks until cancellation,
+// an OS signal, Shutdown, or a runtime failure. An App can only run once.
+func (a *App) Run(parent context.Context) error {
+	if parent == nil {
+		return fmt.Errorf("%w: run context must not be nil", ErrInvalidConfig)
+	}
 
-	// Execute all start functions
-	log.Printf("[%s] Starting application version %s...", a.cfg.Name, a.cfg.Version)
-	for i, startFn := range a.startFuncs {
-		if err := startFn(ctx); err != nil {
-			log.Printf("[%s] Failed to start component %d: %v", a.cfg.Name, i, err)
-			return err
+	a.mu.Lock()
+	if a.state != StateCreated {
+		a.mu.Unlock()
+		return ErrAlreadyRun
+	}
+	a.state = StateStarting
+	components := append([]Component(nil), a.components...)
+	a.mu.Unlock()
+
+	var stopSignals context.CancelFunc = func() {}
+	if len(a.signals) > 0 {
+		parent, stopSignals = signal.NotifyContext(parent, a.signals...)
+	}
+	defer stopSignals()
+
+	runCtx, cancel := context.WithCancelCause(parent)
+	a.mu.Lock()
+	a.cancel = cancel
+	shutdownRequested := a.state == StateStopping
+	a.mu.Unlock()
+	if shutdownRequested {
+		cancel(errShutdownRequested)
+	}
+
+	a.logInfo("application starting", "name", a.cfg.Name, "version", a.cfg.Version)
+	started, primaryErr := a.start(runCtx, components)
+	if primaryErr != nil {
+		cancel(primaryErr)
+	}
+
+	runResults := make(chan runResult, len(started))
+	runnerDone := make(map[string]<-chan struct{}, len(started))
+	if primaryErr == nil && runCtx.Err() == nil {
+		for _, component := range started {
+			if component.Run == nil {
+				continue
+			}
+			done := make(chan struct{})
+			runnerDone[component.Name] = done
+			go a.runComponent(runCtx, component, runResults, done)
+		}
+		select {
+		case result := <-runResults:
+			primaryErr = runtimeComponentError(result)
+			cancel(primaryErr)
+		default:
+			if a.transitionToRunning(runCtx) {
+				a.logInfo("application started", "name", a.cfg.Name)
+				select {
+				case result := <-runResults:
+					if runCtx.Err() == nil {
+						primaryErr = runtimeComponentError(result)
+						cancel(primaryErr)
+					}
+				case <-runCtx.Done():
+				}
+			} else {
+				cancel(errShutdownRequested)
+			}
 		}
 	}
 
-	log.Printf("[%s] Application started successfully. Press Ctrl+C to exit.", a.cfg.Name)
+	a.setState(StateStopping)
+	cancel(errShutdownRequested)
+	a.logInfo("application stopping", "name", a.cfg.Name)
+	shutdownErr := a.stop(started, runnerDone)
+	result := errors.Join(primaryErr, shutdownErr)
+	a.finish(result)
+	return result
+}
 
-	// Wait for termination signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+// Shutdown requests graceful shutdown and waits for Run to finish. Concurrent
+// calls are safe and observe the same terminal result.
+func (a *App) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: shutdown context must not be nil", ErrInvalidConfig)
+	}
 
-	sig := <-quit
-	log.Printf("[%s] Received signal %v, initiating graceful shutdown...", a.cfg.Name, sig)
+	a.mu.Lock()
+	switch a.state {
+	case StateCreated:
+		a.mu.Unlock()
+		return ErrNotRunning
+	case StateStarting, StateRunning:
+		a.state = StateStopping
+	}
+	cancel := a.cancel
+	done := a.done
+	if a.state == StateStopped || a.state == StateFailed {
+		result := a.result
+		a.mu.Unlock()
+		return result
+	}
+	a.mu.Unlock()
 
-	// Execute all shutdown functions (LIFO order)
-	a.shutdown.Execute()
+	if cancel != nil {
+		cancel(errShutdownRequested)
+	}
+	select {
+	case <-done:
+		a.mu.Lock()
+		result := a.result
+		a.mu.Unlock()
+		return result
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-	log.Printf("[%s] Application stopped gracefully.", a.cfg.Name)
-	return nil
+func (a *App) start(runCtx context.Context, components []Component) ([]Component, error) {
+	startupCtx, cancel := context.WithTimeout(runCtx, a.cfg.StartupTimeout)
+	defer cancel()
+
+	started := make([]Component, 0, len(components))
+	for _, component := range components {
+		if err := startupCtx.Err(); err != nil {
+			if runCtx.Err() != nil {
+				return started, nil
+			}
+			return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: err}
+		}
+		if component.Start != nil {
+			err, pending := callBounded(startupCtx, component.Start)
+			if err != nil {
+				if pending != nil {
+					a.cleanupLateStart(component, pending)
+				}
+				if runCtx.Err() != nil {
+					return started, nil
+				}
+				return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: err}
+			}
+		}
+		started = append(started, component)
+	}
+	return started, nil
+}
+
+func (a *App) runComponent(ctx context.Context, component Component, results chan<- runResult, done chan<- struct{}) {
+	defer close(done)
+	results <- runResult{component: component.Name, err: call(component.Run, ctx)}
+}
+
+func (a *App) stop(started []Component, runnerDone map[string]<-chan struct{}) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
+	defer cancel()
+
+	var errs []error
+	for i := len(started) - 1; i >= 0; i-- {
+		if shutdownCtx.Err() != nil {
+			break
+		}
+		component := started[i]
+		if component.Stop != nil {
+			if err, _ := callBounded(shutdownCtx, component.Stop); err != nil {
+				errs = append(errs, &ComponentError{Component: component.Name, Phase: PhaseStop, Err: err})
+			}
+			if shutdownCtx.Err() != nil {
+				break
+			}
+		}
+		// A worker without a Stop callback still has to finish before an
+		// earlier dependency is released.
+		if done := runnerDone[component.Name]; done != nil {
+			select {
+			case <-done:
+			case <-shutdownCtx.Done():
+				errs = append(errs, &ComponentError{
+					Component: component.Name,
+					Phase:     PhaseStop,
+					Err:       fmt.Errorf("runner did not stop: %w", shutdownCtx.Err()),
+				})
+				return errors.Join(errs...)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (a *App) setState(state State) {
+	a.mu.Lock()
+	a.state = state
+	a.mu.Unlock()
+}
+
+func (a *App) transitionToRunning(ctx context.Context) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != StateStarting || ctx.Err() != nil {
+		return false
+	}
+	a.state = StateRunning
+	return true
+}
+
+func (a *App) finish(result error) {
+	a.mu.Lock()
+	a.result = result
+	if result != nil {
+		a.state = StateFailed
+	} else {
+		a.state = StateStopped
+	}
+	close(a.done)
+	a.mu.Unlock()
+
+	if result != nil {
+		a.logError("application stopped with errors", "name", a.cfg.Name, "error", result)
+		return
+	}
+	a.logInfo("application stopped", "name", a.cfg.Name)
+}
+
+func callBounded(ctx context.Context, callback func(context.Context) error) (error, <-chan error) {
+	result := make(chan error, 1)
+	go func() { result <- call(callback, ctx) }()
+	select {
+	case err := <-result:
+		return err, nil
+	case <-ctx.Done():
+		return ctx.Err(), result
+	}
+}
+
+func (a *App) cleanupLateStart(component Component, pending <-chan error) {
+	if component.Stop == nil {
+		return
+	}
+	go func() {
+		if err := <-pending; err != nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
+		defer cancel()
+		if err, _ := callBounded(cleanupCtx, component.Stop); err != nil {
+			a.logError("late-start cleanup failed", "component", component.Name, "error", err)
+		}
+	}()
+}
+
+func runtimeComponentError(result runResult) error {
+	if result.err == nil {
+		result.err = ErrUnexpectedExit
+	}
+	return &ComponentError{Component: result.component, Phase: PhaseRun, Err: result.err}
+}
+
+func (a *App) logInfo(message string, args ...any) {
+	safeLog(func() { a.logger.Info(message, args...) })
+}
+
+func (a *App) logError(message string, args ...any) {
+	safeLog(func() { a.logger.Error(message, args...) })
+}
+
+func safeLog(log func()) {
+	defer func() { _ = recover() }()
+	log()
+}
+
+func call(callback func(context.Context) error, ctx context.Context) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &PanicError{Value: recovered, Stack: debug.Stack()}
+		}
+	}()
+	return callback(ctx)
 }

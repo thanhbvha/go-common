@@ -7,6 +7,7 @@ The `health` module provides standardized, Kubernetes-ready HTTP health check en
 - **Kubernetes Native**: Fully implements standard K8s probes (`liveness` and `readiness`).
 - **Concurrent Execution**: Runs all registered dependency checks concurrently using goroutines.
 - **Configurable Timeouts**: Prevents your health endpoint from hanging indefinitely if a dependency is stuck.
+- **Panic Isolation**: A panicking dependency checker is reported as down without crashing the service or exposing the panic value.
 - **Built-in Checkers**: Pre-built checkers for `GORM`, `Redis`, and standard `HTTP` endpoints.
 - **Framework Agnostic**: Handlers are isolated in subpackages (`health/handler/nethttp`, `health/handler/fiber`, `health/handler/gin`, `health/handler/echo`) so you only import what you need.
 
@@ -17,7 +18,7 @@ The `health` module provides standardized, Kubernetes-ready HTTP health check en
 - **Liveness vs Readiness**: 
   - **Liveness** (`/live`): Checks if the application process is running and not deadlocked. Should be extremely fast (e.g., memory checks). **If this fails, Kubernetes restarts the pod.**
   - **Readiness** (`/ready`): Checks if the application is ready to accept HTTP traffic (e.g., verifying DB, Redis, or upstream API connections). **If this fails, Kubernetes stops sending traffic to the pod (but does NOT restart it).**
-- Always set a timeout on the Checker (default is 5s) to ensure K8s probes don't time out.
+- Always set a timeout on the Checker (default is 5s) to ensure K8s probes don't time out. The timeout bounds the probe response even when a faulty checker ignores context cancellation.
 
 ---
 

@@ -19,9 +19,14 @@ package health
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
+
+// ErrCheckPanic is reported internally when a health checker panics. The panic
+// value and stack are intentionally not exposed through probe responses.
+var ErrCheckPanic = errors.New("health: check panicked")
 
 // CheckFunc is a function that performs a single dependency health check.
 // Return nil if healthy, non-nil error if unhealthy.
@@ -72,12 +77,16 @@ func New() *Checker {
 
 // WithVersion sets the service version included in every health response.
 func (c *Checker) WithVersion(v string) *Checker {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.version = v
 	return c
 }
 
 // WithTimeout sets the maximum duration for each individual check. Default: 5s.
 func (c *Checker) WithTimeout(d time.Duration) *Checker {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.timeout = d
 	return c
 }
@@ -86,6 +95,8 @@ func (c *Checker) WithTimeout(d time.Duration) *Checker {
 // health responses. It is disabled by default because health endpoints are
 // commonly exposed to load balancers and orchestrators.
 func (c *Checker) WithErrorDetails(enabled bool) *Checker {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.includeErrors = enabled
 	return c
 }
@@ -135,8 +146,13 @@ func (c *Checker) CheckHealth(ctx context.Context) HealthResponse {
 }
 
 func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
+	c.mu.RLock()
+	timeout := c.timeout
+	includeErrors := c.includeErrors
+	version := c.version
+	c.mu.RUnlock()
 	if len(checks) == 0 {
-		return HealthResponse{Status: StatusOK, Version: c.version}
+		return HealthResponse{Status: StatusOK, Version: version}
 	}
 
 	type result struct {
@@ -147,17 +163,17 @@ func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
 
 	for _, e := range checks {
 		go func(entry checkEntry) {
-			checkCtx, cancel := context.WithTimeout(ctx, c.timeout)
+			checkCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
 			start := time.Now()
-			err := entry.fn(checkCtx)
+			err := executeCheck(checkCtx, entry.fn)
 			durMs := time.Since(start).Milliseconds()
 
 			r := CheckResult{Status: StatusOK, DurationMs: durMs}
 			if err != nil {
 				r.Status = StatusDown
-				if c.includeErrors {
+				if includeErrors {
 					r.Error = err.Error()
 				}
 			}
@@ -175,5 +191,26 @@ func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
 		}
 	}
 
-	return HealthResponse{Status: overall, Checks: results, Version: c.version}
+	return HealthResponse{Status: overall, Checks: results, Version: version}
+}
+
+func executeCheck(ctx context.Context, check CheckFunc) error {
+	result := make(chan error, 1)
+	go func() {
+		var err error
+		defer func() {
+			if recover() != nil {
+				err = ErrCheckPanic
+			}
+			result <- err
+		}()
+		err = check(ctx)
+	}()
+
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
