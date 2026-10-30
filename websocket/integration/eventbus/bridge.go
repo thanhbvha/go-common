@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	bus "github.com/thanhbvha/go-common/eventbus"
+	"github.com/thanhbvha/go-common/eventbus/transport"
 	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
@@ -25,8 +26,22 @@ type Mapping struct {
 	Options []bus.EventOption
 	Map     func(context.Context, bus.Job) (Notification, error)
 }
+
+// PublicationDedupePolicy controls producer-side confirmed deduplication.
+// It does not disable gateway deduplication or provide business idempotency.
+type PublicationDedupePolicy int
+
+const (
+	// DedupeRequired preserves confirmed deduplication for existing callers.
+	DedupeRequired PublicationDedupePolicy = iota
+	// DedupeDisabled keeps stable IDs but permits duplicate publications. Use
+	// application idempotency/inbox handling with drivers such as Kafka.
+	DedupeDisabled
+)
+
 type Config struct {
 	Bus                 bus.Bus
+	PublicationDedupe   PublicationDedupePolicy
 	Router              *routing.Router
 	CommandTask         string
 	CommandOptions      []bus.TaskOption
@@ -41,6 +56,20 @@ type Bridge struct{ cfg Config }
 func New(c Config) (*Bridge, error) {
 	if c.Bus == nil {
 		return nil, routing.ErrInvalid
+	}
+	if c.PublicationDedupe != DedupeRequired && c.PublicationDedupe != DedupeDisabled {
+		return nil, fmt.Errorf("%w: unknown publication dedupe policy", routing.ErrInvalid)
+	}
+	if c.PublicationDedupe == DedupeRequired {
+		if provider, ok := c.Bus.(bus.CapabilityProvider); ok {
+			capabilities, err := provider.Capabilities()
+			if err != nil {
+				return nil, err
+			}
+			if capabilities.Dedupe == transport.DedupeNone {
+				return nil, fmt.Errorf("bridge requires confirmed publication dedupe: %w", bus.ErrDedupeUnavailable)
+			}
+		}
 	}
 	if c.CommandTask == "" {
 		c.CommandTask = "ws.command"
@@ -94,7 +123,8 @@ func (b *Bridge) PublishCommand(ctx context.Context, c routing.BusinessCommand) 
 	if c.Type == "" || c.UserID == "" || c.TenantID == "" || c.SessionID == "" || !json.Valid(c.Payload) {
 		return routing.ErrInvalid
 	}
-	return b.cfg.Bus.Enqueue(ctx, b.cfg.CommandTask, c, bus.WithMessageID(c.MessageID), bus.WithDedupeKey(c.MessageID), bus.WithHeader("request_id", c.RequestID))
+	options := append(b.publicationOptions(c.MessageID), bus.WithHeader("request_id", c.RequestID))
+	return b.cfg.Bus.Enqueue(ctx, b.cfg.CommandTask, c, options...)
 }
 func (b *Bridge) PublishNotification(ctx context.Context, n Notification) error {
 	if err := validate(n); err != nil {
@@ -103,7 +133,15 @@ func (b *Bridge) PublishNotification(ctx context.Context, n Notification) error 
 	if n.MessageID == "" {
 		n.MessageID = routing.NewID()
 	}
-	return b.cfg.Bus.Publish(ctx, b.cfg.NotificationEvent, n, bus.WithMessageID(n.MessageID), bus.WithDedupeKey(n.MessageID))
+	return b.cfg.Bus.Publish(ctx, b.cfg.NotificationEvent, n, b.publicationOptions(n.MessageID)...)
+}
+
+func (b *Bridge) publicationOptions(id string) []bus.JobOption {
+	options := []bus.JobOption{bus.WithMessageID(id)}
+	if b.cfg.PublicationDedupe == DedupeRequired {
+		options = append(options, bus.WithDedupeKey(id))
+	}
+	return options
 }
 func validate(n Notification) error {
 	if n.TenantID == "" || (n.RoomID == "" && n.UserID == "") || (n.RoomID != "" && (n.UserID != "" || n.SessionID != "")) {

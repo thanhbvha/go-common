@@ -42,9 +42,32 @@ jobs:
       nats:
         image: nats:2.11-alpine
         ports: ["4222:4222"]
+      kafka:
+        image: apache/kafka:3.9.1
+        ports: ["9092:9092"]
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+          KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
     env:
       WS_REDIS_INTEGRATION: "1"
       WS_NATS_INTEGRATION: "1"
+      WS_KAFKA_INTEGRATION: "1"
+      WS_KAFKA_BROKERS: 127.0.0.1:9092
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -53,6 +76,7 @@ jobs:
       - run: go test -tags=integration -count=1 ./websocket/pubsub/redis ./websocket/pubsub/nats
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: go test -tags=integration -count=1 ./websocket/integration/eventbus ./examples/websocket/cluster
+      - run: go test -tags=integration -count=1 -run TestProvisioningBypassesCachedMissingLayoutTopic ./eventbus/driver/kafka
 
   fuzz-smoke:
     runs-on: ubuntu-latest

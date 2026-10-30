@@ -20,9 +20,11 @@ import (
 	gonats "github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
 	bus "github.com/thanhbvha/go-common/eventbus"
+	kafkabus "github.com/thanhbvha/go-common/eventbus/driver/kafka"
 	natsbus "github.com/thanhbvha/go-common/eventbus/driver/nats"
 	redisbus "github.com/thanhbvha/go-common/eventbus/driver/redis"
 	"github.com/thanhbvha/go-common/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/kafka"
 	adapter "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
 	"github.com/thanhbvha/go-common/websocket/core"
 	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
@@ -33,15 +35,20 @@ import (
 
 type options struct {
 	role, broker, redis, nats, addr, tenant, user, room, text string
+	eventbusDriver, deliveryDriver, kafkaBrokers, namespace   string
 	count                                                     int
 }
 
 func main() {
 	var o options
 	flag.StringVar(&o.role, "role", "gateway", "gateway, worker, router, publish or load")
-	flag.StringVar(&o.broker, "broker", "redis", "redis or nats")
-	flag.StringVar(&o.redis, "redis", "127.0.0.1:6379", "Redis registry address (required for both stacks)")
-	flag.StringVar(&o.nats, "nats", gonats.DefaultURL, "NATS URL; JetStream must be enabled")
+	flag.StringVar(&o.broker, "broker", "redis", "Legacy shorthand for both drivers: redis or nats")
+	flag.StringVar(&o.eventbusDriver, "eventbus-driver", "", "Business EventBus driver: redis, nats or kafka (defaults to -broker)")
+	flag.StringVar(&o.deliveryDriver, "delivery-driver", "", "Targeted delivery driver: redis or nats (defaults to -broker)")
+	flag.StringVar(&o.kafkaBrokers, "kafka", "127.0.0.1:9092", "Comma-separated Kafka broker addresses")
+	flag.StringVar(&o.namespace, "namespace", "", "Isolate EventBus and routing resources (defaults to legacy namespaces)")
+	flag.StringVar(&o.redis, "redis", "127.0.0.1:6379", "Redis registry address (required for all combinations)")
+	flag.StringVar(&o.nats, "nats", gonats.DefaultURL, "NATS URL; JetStream required only for NATS EventBus")
 	flag.StringVar(&o.addr, "addr", "127.0.0.1:8080", "gateway HTTP address")
 	flag.StringVar(&o.tenant, "tenant", "demo", "tenant for publish/load")
 	flag.StringVar(&o.user, "user", "alice", "user for publish/load")
@@ -56,7 +63,36 @@ func main() {
 		os.Exit(1)
 	}
 }
+func (o options) normalized() (options, error) {
+	if o.broker == "" {
+		o.broker = "redis"
+	}
+	if o.broker != "redis" && o.broker != "nats" {
+		return o, errors.New("broker must be redis or nats")
+	}
+	if o.eventbusDriver == "" {
+		o.eventbusDriver = o.broker
+	}
+	if o.deliveryDriver == "" {
+		o.deliveryDriver = o.broker
+	}
+	if o.eventbusDriver != "redis" && o.eventbusDriver != "nats" && o.eventbusDriver != "kafka" {
+		return o, errors.New("eventbus-driver must be redis, nats or kafka")
+	}
+	if o.deliveryDriver != "redis" && o.deliveryDriver != "nats" {
+		return o, errors.New("delivery-driver must be redis or nats")
+	}
+	if o.kafkaBrokers == "" {
+		o.kafkaBrokers = "127.0.0.1:9092"
+	}
+	return o, nil
+}
 func run(ctx context.Context, o options) error {
+	var err error
+	o, err = o.normalized()
+	if err != nil {
+		return err
+	}
 	switch o.role {
 	case "gateway", "worker", "router", "publish", "load":
 	default:
@@ -69,33 +105,64 @@ func run(ctx context.Context, o options) error {
 	if err := rc.Ping(startup).Err(); err != nil {
 		return err
 	}
-	registry := redisrouting.NewRegistry(rc, "ws-example")
-	var delivery routing.DeliveryTransport
-	var transportDriver transport.Transport
-	var eventOptions []bus.EventOption
-	switch o.broker {
-	case "redis":
-		delivery = redisrouting.NewTransport(rc, "ws-example")
-		transportDriver = redisbus.New(rc)
-		eventOptions = []bus.EventOption{redisbus.WithEventLayoutTargeted(), redisbus.WithBatchSize(64), redisbus.WithBlock(25 * time.Millisecond)}
-	case "nats":
-		nc, err := gonats.Connect(o.nats)
+	prefix := o.namespace
+	if prefix == "" {
+		prefix = "ws-example"
+	}
+	registry := redisrouting.NewRegistry(rc, prefix)
+	var nc *gonats.Conn
+	if o.eventbusDriver == "nats" || o.deliveryDriver == "nats" {
+		nc, err = gonats.Connect(o.nats)
 		if err != nil {
 			return err
 		}
 		defer nc.Close()
+	}
+	var delivery routing.DeliveryTransport
+	switch o.deliveryDriver {
+	case "redis":
+		delivery = redisrouting.NewTransport(rc, prefix)
+	case "nats":
+		delivery = natsrouting.NewTransport(nc, prefix)
+	}
+	var transportDriver transport.Transport
+	var eventOptions []bus.EventOption
+	dedupe := bridge.DedupeRequired
+	switch o.eventbusDriver {
+	case "redis":
+		transportDriver = redisbus.New(rc)
+		eventOptions = []bus.EventOption{redisbus.WithEventLayoutTargeted(), redisbus.WithBatchSize(64), redisbus.WithBlock(25 * time.Millisecond)}
+	case "nats":
 		js, err := nc.JetStream()
 		if err != nil {
 			return err
 		}
-		delivery = natsrouting.NewTransport(nc, "ws-example")
 		transportDriver = natsbus.New(js)
 		eventOptions = []bus.EventOption{natsbus.WithEventLayoutTargeted(), natsbus.WithBatchSize(64), natsbus.WithFetchTimeout(25 * time.Millisecond)}
-	default:
-		return errors.New("broker must be redis or nats")
+	case "kafka":
+		cfg := commonkafka.DefaultConfig()
+		cfg.Brokers = nil
+		for _, broker := range strings.Split(o.kafkaBrokers, ",") {
+			if strings.TrimSpace(broker) == "" {
+				return errors.New("kafka broker address must not be empty")
+			}
+			cfg.Brokers = append(cfg.Brokers, strings.TrimSpace(broker))
+		}
+		transportDriver, err = kafkabus.NewWithConfig(cfg)
+		if err != nil {
+			return err
+		}
+		eventOptions = []bus.EventOption{kafkabus.WithEventLayoutTargeted(), kafkabus.WithFetchMaxWait(25 * time.Millisecond)}
+		dedupe = bridge.DedupeDisabled
+		log.Print("Kafka publication dedupe explicitly disabled; stable message IDs and gateway dedupe remain active; business handlers must be idempotent")
 	}
-	b, err := bus.Open(bus.DefaultConfig(), bus.WithTransport(transportDriver))
+	busConfig := bus.DefaultConfig()
+	if o.namespace != "" {
+		busConfig.Namespace = o.namespace
+	}
+	b, err := bus.Open(busConfig, bus.WithTransport(transportDriver))
 	if err != nil {
+		_ = transportDriver.Close(context.Background())
 		return err
 	}
 	defer func() {
@@ -127,7 +194,7 @@ func run(ctx context.Context, o options) error {
 	if err != nil {
 		return err
 	}
-	config := bridge.Config{Bus: b, NotificationOptions: eventOptions}
+	config := bridge.Config{Bus: b, NotificationOptions: eventOptions, PublicationDedupe: dedupe}
 	if o.role == "router" {
 		config.Router = router
 	}
@@ -164,7 +231,7 @@ func run(ctx context.Context, o options) error {
 	case "gateway":
 		return serve(ctx, gateway, integration, router, o)
 	default:
-		log.Printf("%s ready (%s)", o.role, o.broker)
+		log.Printf("%s ready (eventbus=%s, delivery=%s)", o.role, o.eventbusDriver, o.deliveryDriver)
 		<-ctx.Done()
 		return nil
 	}

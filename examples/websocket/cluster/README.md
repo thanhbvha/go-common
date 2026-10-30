@@ -34,10 +34,19 @@ hosting a session or room; targeted transport delivers messages to those nodes.
 | `publish` | An external producer that publishes user or room notifications through EventBus. |
 | `load` | Calls the Router directly to measure the round trip to gateway enqueue. It bypasses business Tasks/Events. |
 
-| Configuration | Business Task/Event | Targeted delivery + result | Session/room registry |
-|---|---|---|---|
-| `-broker redis` | EventBus Redis Streams driver | Redis Pub/Sub | Redis |
-| `-broker nats` | EventBus NATS JetStream driver | NATS Core | Redis |
+| EventBus driver | Delivery driver | Business Task/Event | Targeted delivery + result | Registry |
+|---|---|---|---|---|
+| `redis` | `redis` | Redis Streams | Redis Pub/Sub | Redis |
+| `redis` | `nats` | Redis Streams | NATS Core | Redis |
+| `nats` | `redis` | NATS JetStream | Redis Pub/Sub | Redis |
+| `nats` | `nats` | NATS JetStream | NATS Core | Redis |
+| `kafka` | `redis` | Kafka | Redis Pub/Sub | Redis |
+| `kafka` | `nats` | Kafka | NATS Core | Redis |
+
+Select drivers independently with `-eventbus-driver` and `-delivery-driver`.
+The legacy `-broker redis` / `-broker nats` shorthand still supplies the default
+for either driver when its explicit flag is omitted. Kafka is an EventBus
+backend, not a WebSocket delivery backend.
 
 Each gateway uses two fixed delivery/result subscriptions per node incarnation,
 independent of connection count. Gateways, workers, and routers connect to the
@@ -218,9 +227,11 @@ the same device.
 
 ## Running the example
 
-Requires Redis for the session registry. Choose either Redis Streams + Redis
-Pub/Sub or NATS JetStream + NATS Core. Start NATS with JetStream enabled (`-js`).
-Use the same broker/prefix configuration for every role.
+Requires Redis for the session registry. EventBus can use Redis Streams, NATS
+JetStream, or Kafka; targeted delivery can independently use Redis Pub/Sub or
+NATS Core. Enable JetStream (`-js`) only when EventBus uses NATS. Kafka + NATS
+delivery works with a NATS Core server without JetStream.
+Use consistent driver, address, and namespace settings for every role.
 
 Run in separate terminals (replace `-broker redis` with `-broker nats` for NATS):
 
@@ -232,6 +243,75 @@ go run ./examples/websocket/cluster -broker redis -role gateway -addr 127.0.0.1:
 go run ./examples/websocket/cluster -broker redis -role worker
 go run ./examples/websocket/cluster -broker redis -role router
 ```
+
+### Kafka EventBus with NATS delivery
+
+Run these commands in separate terminals, with Kafka, Redis and NATS Core running:
+
+```bash
+export WS_EXAMPLE_CLIENT_TOKEN=local-demo-token
+
+go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role gateway -addr 127.0.0.1:8080
+go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role gateway -addr 127.0.0.1:8081
+go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role worker
+go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role router
+```
+
+Replace `-delivery-driver nats` with `-delivery-driver redis` for Redis Pub/Sub
+delivery. `-kafka` accepts comma-separated broker addresses. `-redis` and `-nats`
+set the registry/Redis delivery address and NATS server URL respectively.
+`-namespace` isolates EventBus topologies and routing resources; without it,
+legacy EventBus namespace `eventbus` and routing prefix `ws-example` are retained.
+
+```mermaid
+flowchart LR
+    W["Business worker"] --> K["EventBus Kafka: ws.notification"]
+    K --> R["Subscriber group: realtime-router"]
+    R -->|"Resolve sessions or room nodes"| REG[("Redis Registry")]
+    REG -->|"Destination gateways"| R
+    R --> T["NATS Core or Redis Pub/Sub"]
+    T --> G["Destination gateway"]
+    G --> Q["Connection queue and write pump"]
+    Q --> C["Client"]
+```
+
+Kafka controls durable business processing, consumer groups and retry/DLQ.
+The router bridges that processing to the chosen delivery transport; brokers do
+not forward messages to one another automatically. `WithEventLayoutTargeted`
+configures Kafka subscriber retry isolation, not gateway destinations.
+
+### Publication dedupe policy
+
+The bridge defaults to `DedupeRequired`, preserving confirmed producer-side
+deduplication for Memory, Redis and NATS. Built-in buses expose the optional
+`eventbus.CapabilityProvider`; when a driver reports no dedupe support, the bridge
+rejects this policy at construction, before declaring topologies.
+
+Kafka does not support EventBus confirmed publication dedupe. The example
+explicitly configures `bridge.DedupeDisabled` for Kafka and logs that choice.
+Stable EventBus/message IDs and bounded gateway dedupe remain active, but producer
+retries may publish duplicate commands/events. Business handlers need application
+idempotency/inbox handling, with an outbox when DB/publication atomicity is needed.
+This policy does not provide exactly-once processing or client receipt guarantees.
+
+Direct library wiring uses the same independent dependencies:
+
+```go
+integration, err := bridge.New(bridge.Config{
+    Bus: kafkaBus, // An EventBus opened with the Kafka driver.
+    Router: router, // A routing.Router using Redis or NATS targeted delivery.
+    PublicationDedupe: bridge.DedupeDisabled,
+    NotificationOptions: []eventbus.EventOption{
+        kafkadriver.WithEventLayoutTargeted(),
+    },
+})
+if err != nil {
+    return err
+}
+// Register task handlers/mappings before kafkaBus.Start(startupCtx).
+```
+
+### Connect and send messages
 
 Connect two interactive clients to different gateways:
 
@@ -262,6 +342,12 @@ sessions and targets their gateway. Reconnect `alice-device` to port
 8081 and publish again to exercise location replacement. The notification is
 not stored if Alice is offline.
 
+For the mixed Kafka example, publish with the same driver and namespace settings:
+
+```bash
+go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role publish -tenant demo -user alice -text hello
+```
+
 Measure enqueue round-trip p95/p99 with connected clients:
 
 ```bash
@@ -279,3 +365,23 @@ parameters. Production authentication must derive tenant/user/session from a
 verified token. Apply room membership/business authorization in the application.
 The example supports `room.join`, `chat.send`, and `business`; other commands of
 the original interactive client are not implemented here.
+
+
+## Verification
+
+```bash
+go test ./examples/websocket/cluster ./websocket/integration/eventbus
+go test -tags=integration -count=1 ./examples/websocket/cluster ./websocket/integration/eventbus
+WS_KAFKA_INTEGRATION=1 WS_KAFKA_BROKERS=127.0.0.1:9092 go test -race -tags=integration -count=1 ./examples/websocket/cluster ./websocket/integration/eventbus
+WS_KAFKA_INTEGRATION=1 WS_KAFKA_BROKERS=127.0.0.1:9092 go test -tags=integration -run TestProvisioningBypassesCachedMissingLayoutTopic ./eventbus/driver/kafka
+```
+
+Use a disposable Kafka broker for integration. Kafka cases are skipped unless
+`WS_KAFKA_INTEGRATION=1`; once enabled, broker failures fail the test. Tests use
+unique namespaces. The example test creates temporary topics in that broker;
+dispose of the test broker after the run. Redis servers and NATS servers are
+started locally by the test fixtures. The Kafka bridge test exercises queue-full
+retry, a lost result after enqueue, reconnect fencing, and rooms across gateways.
+Kafka delayed retry uses its driver scheduler and is not an immediate realtime
+fallback. The end-to-end matrix also covers Redis/NATS mixed configurations and
+the legacy `-broker` shorthand.

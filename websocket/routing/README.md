@@ -140,3 +140,26 @@ For a realtime-oriented EventBus profile, the example explicitly uses batch size
 but avoid long waits while alternating fresh/retry lanes. Tune this tradeoff
 alongside concurrency/prefetch; defaults intended for general background work
 are not a realtime latency target. See [local measurements](../BENCHMARKS.md).
+
+
+## Independent EventBus and delivery brokers
+
+The bridge borrows `eventbus.Bus`, while `routing.Router` uses a separate
+`DeliveryTransport`. A Kafka EventBus can therefore feed Redis Pub/Sub or NATS
+Core gateway delivery; the Redis session/room registry is still required.
+Kafka support belongs to EventBus and does not require a Kafka WebSocket pub/sub
+backend. The cluster example exposes `-eventbus-driver` and `-delivery-driver`.
+NATS delivery alone does not require JetStream.
+
+`bridge.Config.PublicationDedupe` defaults to `bridge.DedupeRequired`. Built-in
+buses expose optional `eventbus.CapabilityProvider` for startup validation;
+unsupported required dedupe returns `eventbus.ErrDedupeUnavailable`. Custom bus
+wrappers that hide this optional interface retain publication-time validation.
+
+For Kafka, explicitly choose `bridge.DedupeDisabled` and pass
+`kafkadriver.WithEventLayoutTargeted()` in `NotificationOptions` and applicable
+mappings. This omits producer dedupe reservations while keeping stable message
+IDs. Gateway dedupe is unchanged and remains bounded/process-local. Application
+handlers must handle duplicate publications; durable business idempotency and
+outbox/inbox behavior are separate concerns. The bridge never silently falls
+back after a failed deduplicated publication.

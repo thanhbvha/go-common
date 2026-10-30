@@ -12,6 +12,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/eventbus"
 	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -78,7 +79,9 @@ func (t *kafkaTransport) validateRelatedTopicPartitions(ctx context.Context, top
 }
 
 func (t *kafkaTransport) relatedTopicPartitionsReady(ctx context.Context, topics []string, expected int32) (bool, error) {
-	metadata, err := t.adm.Metadata(ctx, topics...)
+	// Provisioning must observe broker state, not a cached negative lookup.
+	// kadm requests fresh metadata when authorized operations are included.
+	metadata, err := t.adm.Metadata(kadm.WithAuthorizedOps(ctx), topics...)
 	if err != nil {
 		return false, fmt.Errorf("kafka: inspect related topics: %w", err)
 	}

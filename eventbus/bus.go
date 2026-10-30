@@ -8,6 +8,19 @@ import (
 	"github.com/thanhbvha/go-common/eventbus/transport"
 )
 
+// CapabilityProvider optionally exposes a bus transport's guarantees without
+// expanding Bus, so existing wrappers and implementations remain compatible.
+type CapabilityProvider interface {
+	Capabilities() (transport.Capabilities, error)
+}
+
+// Capabilities reports normalized driver guarantees with panic isolation.
+func (b *bus) Capabilities() (transport.Capabilities, error) {
+	return guardValue(panicScopeAdmin, "transport capabilities", nil, func() (transport.Capabilities, error) {
+		return transport.NormalizeCapabilities(b.transport.Capabilities()), nil
+	})
+}
+
 // Bus represents the public interface for the event bus.
 type Bus interface {
 	// DeclareTask declares a competing-consumer task topology. Producer-only

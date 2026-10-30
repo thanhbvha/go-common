@@ -845,6 +845,26 @@ if reader, ok := tr.(transport.SchedulerHealthReader); ok {
 }
 ```
 
+## Optional Capability Introspection
+
+Built-in buses implement `eventbus.CapabilityProvider` without extending the
+`eventbus.Bus` interface. Integrations can inspect transport guarantees before
+registering handlers or starting consumers:
+
+```go
+if provider, ok := bus.(eventbus.CapabilityProvider); ok {
+    capabilities, err := provider.Capabilities()
+    if err != nil {
+        return err
+    }
+    _ = capabilities.Dedupe
+}
+```
+
+Capability reads are guarded against transport panics. Wrappers that expose only
+`Bus` may omit this optional interface; publication and processing validation
+still enforce the underlying driver's guarantees.
+
 ## Driver Capability Matrix
 
 | Capability | Memory | Redis | NATS JetStream | Kafka |

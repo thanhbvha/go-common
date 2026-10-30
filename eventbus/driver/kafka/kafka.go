@@ -400,7 +400,8 @@ func (t *kafkaTransport) reconcileRelatedTopicConfigs(ctx context.Context, topic
 }
 
 func (t *kafkaTransport) relatedTopicReplicationReady(ctx context.Context, topics []string, replicationFactor int16) (bool, error) {
-	metadata, err := t.adm.Metadata(ctx, topics...)
+	// Replication reconciliation must also bypass stale provisioning metadata.
+	metadata, err := t.adm.Metadata(kadm.WithAuthorizedOps(ctx), topics...)
 	if err != nil {
 		if isKafkaLeaderTransition(err) {
 			return false, nil
