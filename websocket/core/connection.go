@@ -16,6 +16,7 @@ import (
 	panicrecovery "github.com/thanhbvha/go-common/recovery"
 	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
 const (
@@ -28,7 +29,11 @@ const (
 	maxPendingHandlers   = 64
 )
 
-var nextConnectionID atomic.Uint64
+var (
+	nextConnectionID    atomic.Uint64
+	ErrConnectionClosed = errors.New("websocket connection closed")
+	ErrSendQueueFull    = errors.New("websocket send queue full")
+)
 
 // Conn defines a generic WebSocket connection interface to support multiple HTTP frameworks.
 type Conn interface {
@@ -70,7 +75,7 @@ type Connection struct {
 	nodeID            string
 	requestID         string
 	connectionID      string
-	config            ManagerConfig
+	config            *ManagerConfig
 	messageLimiter    *limiter.RateLimiter
 	byteLimiter       *limiter.RateLimiter
 	pendingHandlers   atomic.Int32
@@ -82,6 +87,7 @@ type Connection struct {
 	roomsMu           sync.Mutex
 	rooms             map[string]struct{}
 	quotaKeys         []quotaKey
+	location          *routing.Location
 }
 
 // NewConnection instantiates a Connection session wrapper.
@@ -97,7 +103,7 @@ func NewConnection(conn Conn, shard *Shard, userID, shardID, clientIP, nodeID, r
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	config := coordinatorConfig(shard.coordinator)
+	config := &shard.config
 
 	return &Connection{
 		conn:           conn,
@@ -261,13 +267,11 @@ func (c *Connection) readPump() {
 			}
 
 			c.shard.observer().InboundMessage(len(message))
-			messageCopy := bytes.Clone(message)
-
-			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(messageCopy))) {
+			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(message))) {
 				c.inboundDrops.Add(1)
 				continue
 			}
-			ev := &EventMessage{Conn: c, Raw: messageCopy}
+			ev := &EventMessage{Conn: c, Raw: bytes.Clone(message), queuedAt: time.Now()}
 			select {
 			case c.shard.incomingMessage <- ev:
 			default:
@@ -358,35 +362,37 @@ func (c *Connection) SendJSON(data interface{}) bool {
 
 // Send schedules a raw byte slice message for delivery. Returns false if closed or send buffer is full.
 func (c *Connection) Send(message []byte) bool {
-	return c.sendMessage(bytes.Clone(message))
+	return c.Enqueue(message) == nil
 }
 
-func (c *Connection) sendShared(message []byte) bool {
-	return c.sendMessage(message)
+// Enqueue copies message and reports whether the outbound queue accepted it.
+func (c *Connection) Enqueue(message []byte) error {
+	return c.enqueueShared(bytes.Clone(message))
 }
 
-func (c *Connection) sendMessage(message []byte) bool {
+func (c *Connection) sendShared(message []byte) bool { return c.enqueueShared(message) == nil }
+
+func (c *Connection) enqueueShared(message []byte) error {
 	c.lifecycleMu.RLock()
 	select {
 	case <-c.ctx.Done():
 		c.lifecycleMu.RUnlock()
-		return false
+		return ErrConnectionClosed
 	default:
 	}
-
 	select {
 	case c.send <- message:
 		c.consecutiveDrops.Store(0)
 		c.lifecycleMu.RUnlock()
-		return true
+		return nil
 	default:
 		c.lifecycleMu.RUnlock()
-		c.shard.observer().OutboundDropped(true)
-		if c.consecutiveDrops.Add(1) >= c.config.SlowConsumerDropThreshold {
+		closeSlow := c.consecutiveDrops.Add(1) >= c.config.SlowConsumerDropThreshold
+		c.shard.observer().OutboundDropped(closeSlow)
+		if closeSlow {
 			c.Close("Outbound queue full")
-			return false
 		}
-		return true
+		return ErrSendQueueFull
 	}
 }
 
@@ -413,4 +419,11 @@ func (c *Connection) GetShard() *Shard {
 // GetRequestID returns the trace request ID associated with the upgrading request.
 func (c *Connection) GetRequestID() string {
 	return c.requestID
+}
+
+func (c *Connection) routingLocation() routing.Location {
+	if c.location != nil {
+		return *c.location
+	}
+	return routing.Location{}
 }

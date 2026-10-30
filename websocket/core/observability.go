@@ -42,6 +42,8 @@ type SnapshotObserver interface {
 	EventStats() EventStats
 }
 
+type QueueLatencyObserver interface{ ObserveQueueLatency(time.Duration) }
+
 type LatencyObserver interface{ ObserveEventLatency(time.Duration) }
 type TraceObserver interface {
 	StartEvent(context.Context, string) (context.Context, func(error))
@@ -73,6 +75,7 @@ type AtomicObserver struct {
 	eventTimeouts     atomic.Uint64
 	eventPanics       atomic.Uint64
 	latencyBuckets    [6]atomic.Uint64
+	queueBuckets      [6]atomic.Uint64
 }
 
 func (o *AtomicObserver) ConnectionOpened() { o.connectionsOpened.Add(1) }
@@ -143,11 +146,32 @@ type Readiness struct {
 func (m *Manager) Readiness() Readiness {
 	stats := m.GetStats()
 	executorReady := m.eventExecutor.Stats().Accepting
-	brokerReady := true
+	brokerReady := m.subscriptionErrors.Load() == 0
+	if m.config.Distributed != nil {
+		brokerReady = m.config.Distributed.Ready()
+	}
 	if provider, ok := m.pubsubManager.(pubsub.ReadinessProvider); ok {
 		brokerReady = provider.Ready()
+		if m.config.Distributed != nil {
+			brokerReady = brokerReady && m.config.Distributed.Ready()
+		}
 	}
 	accountingValid := stats["totalConnections"] == stats["shardConnections"]
 	state := m.State()
 	return Readiness{Ready: state == StateRunning && executorReady && brokerReady && accountingValid, State: state, ExecutorAccepting: executorReady, BrokerReady: brokerReady, AccountingValid: accountingValid}
+}
+
+// ObserveQueueLatency measures inbound plus executor waiting, before handler work.
+func (o *AtomicObserver) ObserveQueueLatency(d time.Duration) {
+	index := 5
+	for i, t := range [...]time.Duration{time.Millisecond, 5 * time.Millisecond, 10 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond} {
+		if d < t {
+			index = i
+			break
+		}
+	}
+	o.queueBuckets[index].Add(1)
+}
+func (o *AtomicObserver) QueueLatencyHistogram() LatencyHistogram {
+	return LatencyHistogram{Under1ms: o.queueBuckets[0].Load(), Under5ms: o.queueBuckets[1].Load(), Under10ms: o.queueBuckets[2].Load(), Under50ms: o.queueBuckets[3].Load(), Under100ms: o.queueBuckets[4].Load(), Over100ms: o.queueBuckets[5].Load()}
 }

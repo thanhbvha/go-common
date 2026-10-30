@@ -243,12 +243,13 @@ func (psm *Manager) processMessage(channel string, payload []byte) {
 	}
 
 	for _, handler := range handlers {
-		handler := handler
-		_ = psm.executor.Submit(psm.ctx, messagePartitionKey(&message), func(context.Context) error {
+		if err := psm.executor.Submit(psm.ctx, messagePartitionKey(&message), func(context.Context) error {
 			defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.nats_message_handler", channel, &message)))
 			handler(&message)
 			return nil
-		})
+		}); err != nil {
+			logger.ErrorAsync("WebSocket pubsub dispatch rejected", "error", err)
+		}
 	}
 }
 
@@ -272,12 +273,13 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 		handlers := copyHandlers(psm.handlers[message.Type])
 		psm.mu.RUnlock()
 		for _, handler := range handlers {
-			handler := handler
-			_ = psm.executor.Submit(psm.ctx, messagePartitionKey(message), func(context.Context) error {
+			if err := psm.executor.Submit(psm.ctx, messagePartitionKey(message), func(context.Context) error {
 				defer panicrecovery.Catch(wsrecovery.Handler(psm.recoveryMetadata("pubsub.nats_loopback_handler", channel, message)))
 				handler(message)
 				return nil
-			})
+			}); err != nil {
+				logger.ErrorAsync("WebSocket pubsub dispatch rejected", "error", err)
+			}
 		}
 		return nil
 	}
@@ -450,6 +452,7 @@ func (psm *Manager) GetStats() map[string]interface{} {
 		"registered_handlers":  len(psm.registrations),
 		"handlers":             handlers,
 		"mode":                 "nats",
+		"dispatch":             psm.executor.Stats(),
 		"ready":                psm.readyLocked(),
 		"reconnect_state":      psm.reconnectStateLocked(),
 		"reconnect_attempts":   psm.reconnectAttempts.Load(),

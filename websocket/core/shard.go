@@ -64,6 +64,7 @@ type Shard struct {
 	coordinator       ShardCoordinator
 	config            ManagerConfig
 	handlerSupervisor *HandlerSupervisor
+	stopOnce          sync.Once
 	shutdownOnce      sync.Once
 	done              chan struct{}
 }
@@ -163,7 +164,7 @@ func (s *Shard) SendToUser(userID string, message []byte) {
 			continue
 		}
 
-		if !conn.sendShared(message) {
+		if !conn.sendShared(message) && conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 		}
 	}
@@ -196,7 +197,7 @@ func (s *Shard) SendToRoom(roomID string, message []byte) {
 			deadConnections = append(deadConnections, conn)
 			continue
 		}
-		if !conn.sendShared(message) {
+		if !conn.sendShared(message) && conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 		}
 	}
@@ -222,15 +223,19 @@ func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) e
 	if err := s.authorizer().CanSubscribe(ctx, conn.identity, roomID); err != nil {
 		return ErrUnauthorized
 	}
-	if !conn.addRoom(roomID) {
+	conn.roomsMu.Lock()
+	defer conn.roomsMu.Unlock()
+	if _, exists := conn.rooms[roomID]; !exists && len(conn.rooms) >= conn.config.MaxRoomsPerConnection {
 		return ErrRoomLimit
 	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, active := s.activeConns[conn]; !active || conn.IsClosed() {
-		conn.removeRoom(roomID)
+		delete(conn.rooms, roomID)
 		return ErrConnectionInactive
+	}
+	if _, joined := conn.rooms[roomID]; joined {
+		return nil
 	}
 	roomUsers, exists := s.chatRooms[roomID]
 	if !exists {
@@ -243,6 +248,20 @@ func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) e
 		roomUsers[conn.userID] = userConns
 	}
 	userConns[conn] = struct{}{}
+	conn.rooms[roomID] = struct{}{}
+	if gateway := s.config.Distributed; gateway != nil {
+		if err := gateway.JoinRoom(ctx, conn.routingLocation(), roomID); err != nil {
+			delete(userConns, conn)
+			if len(userConns) == 0 {
+				delete(roomUsers, conn.userID)
+			}
+			if len(roomUsers) == 0 {
+				delete(s.chatRooms, roomID)
+			}
+			delete(conn.rooms, roomID)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -254,8 +273,9 @@ func (s *Shard) LeaveRoom(ctx context.Context, roomID string, conn *Connection) 
 	if roomID == "" || conn == nil {
 		return nil
 	}
-	conn.removeRoom(roomID)
-
+	conn.roomsMu.Lock()
+	defer conn.roomsMu.Unlock()
+	delete(conn.rooms, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	roomUsers, exists := s.chatRooms[roomID]
@@ -270,6 +290,9 @@ func (s *Shard) LeaveRoom(ctx context.Context, roomID string, conn *Connection) 
 	}
 	if len(roomUsers) == 0 {
 		delete(s.chatRooms, roomID)
+	}
+	if gateway := s.config.Distributed; gateway != nil {
+		return gateway.LeaveRoom(ctx, conn.routingLocation(), roomID)
 	}
 	return nil
 }
@@ -299,7 +322,7 @@ func contextError(ctx context.Context) error {
 
 // Broadcast sends a raw byte slice to all connections managed by this shard.
 func (s *Shard) Broadcast(message []byte) {
-	s.handleBroadcast(message)
+	s.handleBroadcast(bytes.Clone(message))
 }
 
 // BroadcastGlobal broadcasts a message to all local shard clients and routes it to peer cluster instances.
@@ -387,6 +410,11 @@ func (s *Shard) removeConnection(conn *Connection, reason string) bool {
 	conn.roomsMu.Unlock()
 
 	conn.Close(reason)
+	if gateway := s.config.Distributed; gateway != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = gateway.Remove(ctx, conn.routingLocation())
+		cancel()
+	}
 	s.releaseManagerConnection(conn)
 	s.observer().ConnectionClosed()
 	logger.DebugAsync("Connection unregistered", "reason", reason, "shard", s.name, "userID", conn.userID, "count", s.GetConnectionCount())
@@ -466,7 +494,7 @@ func (s *Shard) handleBroadcast(message []byte) {
 			continue
 		}
 
-		if !conn.sendShared(message) {
+		if !conn.sendShared(message) && conn.IsClosed() {
 			deadConnections = append(deadConnections, conn)
 		}
 	}
@@ -610,10 +638,12 @@ func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
 
 // Shutdown gracefully stops the shard event loop and notifies peer nodes of shard termination.
 func (s *Shard) Shutdown(ctx context.Context) error {
-	pubsubManager := s.coordinator.GetPubSubManager()
-	_ = pubsubManager.NotifyShardDestroy(s.name)
-	s.cancel()
-	s.shutdown(ctx)
+	s.stopOnce.Do(func() {
+		s.cancel()
+		go s.shutdown(context.Background())
+		// Coordination is best effort and must not delay socket cleanup or the caller's deadline.
+		go func() { _ = s.coordinator.GetPubSubManager().NotifyShardDestroy(s.name) }()
+	})
 	select {
 	case <-s.done:
 		return nil

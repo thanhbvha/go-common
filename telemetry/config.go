@@ -18,7 +18,7 @@ type Config struct {
 	EnableMetrics bool
 
 	// SamplingRate controls the fraction of traces to sample (0.0 to 1.0).
-	// 0 hoặc 1.0 = AlwaysSample (default, backward-compatible).
+	// 0 or 1.0 = AlwaysSample (default, backward-compatible).
 	// 0.1 = sample 10% traces — recommended for high production traffic.
 	SamplingRate float64
 

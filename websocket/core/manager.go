@@ -12,11 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"errors"
 	"github.com/cespare/xxhash/v2"
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/logger"
 	"github.com/thanhbvha/go-common/websocket/pool"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
 const (
@@ -43,6 +45,7 @@ type Manager struct {
 	config              ManagerConfig
 	executorOwned       bool
 	pubsubRegistrations []pubsub.HandlerRegistration
+	subscriptionErrors  atomic.Uint64
 	state               atomic.Int32
 	shutdownOnce        sync.Once
 	done                chan struct{}
@@ -83,6 +86,10 @@ func NewManager() *Manager {
 
 // NewManagerWithConfig creates an independently configured connection manager.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
+	if config.Distributed != nil {
+		config.PubSub = pubsub.NewNoopManager()
+		config.PubSubOwnership = PubSubOwned
+	}
 	config, executorOwned := normalizeManagerConfig(config)
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -99,6 +106,9 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		executorOwned:     executorOwned,
 		done:              make(chan struct{}),
 	}
+	if config.Distributed != nil {
+		m.nodeID = config.Distributed.NodeID()
+	}
 	m.state.Store(int32(StateStarting))
 
 	m.setupPubSubHandlers()
@@ -107,7 +117,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 	defaultShard := NewShard(defaultShardName, m)
 	m.shards[defaultShardName] = defaultShard
 	go defaultShard.Run()
-	_ = m.pubsubManager.Subscribe("system", "shard:"+defaultShardName)
+	m.recordSubscriptionError(m.pubsubManager.Subscribe("system", "shard:"+defaultShardName))
 
 	m.sendNodeStatus()
 	m.state.Store(int32(StateRunning))
@@ -120,7 +130,9 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 func (m *Manager) State() ManagerState { return ManagerState(m.state.Load()) }
 
 // IsAcceptingConnections reports whether upgrades may proceed.
-func (m *Manager) IsAcceptingConnections() bool { return m.State() == StateRunning }
+func (m *Manager) IsAcceptingConnections() bool {
+	return m.State() == StateRunning && (m.config.Distributed == nil || m.config.Distributed.Ready())
+}
 
 // GetEventExecutor returns the bounded executor used for business handlers.
 func (m *Manager) GetEventExecutor() *pool.PartitionedExecutor { return m.eventExecutor }
@@ -361,20 +373,19 @@ func (m *Manager) AddShard(shardID string) *Shard {
 	default:
 	}
 
-	maxConfiguredShards := m.GetConfig().MaxShards
-	if len(m.shards) >= maxConfiguredShards {
-		logger.WarnAsync("Max Shard capacity reached, falling back to default Shard", "maxShards", maxConfiguredShards)
-		return m.shards[defaultShardName]
-	}
-
 	if shard, exists := m.shards[shardID]; exists {
 		return shard
+	}
+	maxConfiguredShards := m.GetConfig().MaxShards
+	if len(m.shards) >= maxConfiguredShards {
+		logger.WarnAsync("Max Shard capacity reached", "maxShards", maxConfiguredShards)
+		return nil
 	}
 
 	shard := NewShard(shardID, m)
 	m.shards[shardID] = shard
 	go shard.Run()
-	_ = m.pubsubManager.Subscribe("shard:" + shardID)
+	m.recordSubscriptionError(m.pubsubManager.Subscribe("shard:" + shardID))
 
 	_ = m.pubsubManager.NotifyShardCreate(shardID)
 
@@ -496,13 +507,17 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	shard := m.GetOrCreateShard(shardID)
 	if shard == nil {
 		_ = conn.Close()
-		return fmt.Errorf("manager is shutting down")
+		return fmt.Errorf("manager stopped or shard capacity reached")
 	}
 
+	shardID = shard.name
 	connection := NewConnection(conn, shard, userID, shardID, clientIP, m.nodeID, requestID)
 	if connection == nil {
 		_ = conn.Close()
 		return fmt.Errorf("failed to allocate connection wrapper")
+	}
+	if (m.config.Distributed != nil || m.config.CommandPublisher != nil) && identity.SessionID == "" {
+		identity.SessionID = routing.NewID()
 	}
 	connection.setIdentity(identity)
 	connection.quotaKeys = reservation.keys
@@ -511,6 +526,30 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 		defer timer.Stop()
 	}
 
+	if m.config.Distributed != nil {
+		registerCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+		location, err := m.config.Distributed.Register(registerCtx, routing.Location{TenantID: identity.TenantID, UserID: identity.UserID, SessionID: identity.SessionID, ShardID: shard.name}, func(payload []byte) error {
+			err := connection.enqueueShared(payload)
+			if errors.Is(err, ErrSendQueueFull) {
+				return routing.ErrQueueFull
+			}
+			if errors.Is(err, ErrConnectionClosed) {
+				return routing.ErrClosed
+			}
+			return err
+		}, func() { connection.Close("Session superseded") })
+		cancel()
+		if err != nil {
+			connection.Close("Session registration failed")
+			return err
+		}
+		connection.location = &location
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = m.config.Distributed.Remove(cleanupCtx, location)
+		}()
+	}
 	if !m.registerReservedConnection(shard, connection) {
 		reserved = false
 		connection.Close("registration rejected")
@@ -592,6 +631,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
+		"subscriptionErrors":  m.subscriptionErrors.Load(),
 		"totalShards":         len(m.shards),
 		"totalConnections":    atomic.LoadInt64(&m.totalConnections),
 		"shardConnections":    totalShardConnections,
@@ -604,6 +644,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 		"events":              m.eventStats(),
 		"runtime":             m.runtimeMetrics(),
 		"eventLatency":        m.eventLatency(),
+		"eventQueueLatency":   m.queueLatency(),
 	}
 }
 
@@ -667,4 +708,18 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (m *Manager) recordSubscriptionError(err error) {
+	if err != nil {
+		m.subscriptionErrors.Add(1)
+		logger.ErrorAsync("WebSocket subscription failed", "error", err)
+	}
+}
+
+func (m *Manager) queueLatency() LatencyHistogram {
+	if observer, ok := m.config.Observer.(interface{ QueueLatencyHistogram() LatencyHistogram }); ok {
+		return observer.QueueLatencyHistogram()
+	}
+	return LatencyHistogram{}
 }

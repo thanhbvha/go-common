@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race -count=10 ./websocket/core ./websocket/pool ./websocket/pubsub/... ./websocket/adapter/...
+      - run: go test -race -count=10 ./websocket/core ./websocket/pool ./websocket/pubsub/... ./websocket/adapter/... ./websocket/routing/... ./websocket/integration/...
 
   broker-integration:
     runs-on: ubuntu-latest
@@ -51,6 +51,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -tags=integration -count=1 ./websocket/pubsub/redis ./websocket/pubsub/nats
+      - run: sudo apt-get update && sudo apt-get install -y redis-server
+      - run: go test -tags=integration -count=1 ./websocket/integration/eventbus ./examples/websocket/cluster
 
   fuzz-smoke:
     runs-on: ubuntu-latest

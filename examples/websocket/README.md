@@ -825,3 +825,9 @@ git diff --check
 ## Related Documentation
 
 - `websocket/README.md`: complete module architecture, configuration, security, delivery, and tuning guide.
+
+## Targeted cluster architecture
+
+The separate [cluster example](cluster/README.md) runs two gateways with a Redis
+session registry, NATS or Redis targeted delivery, independent business workers,
+and a shared EventBus realtime-router group. It includes enqueue p95/p99 sampling.

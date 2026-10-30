@@ -841,3 +841,18 @@ Fuzz regression corpora under `websocket/core/testdata/fuzz` are source-controll
 ## Further Documentation
 
 - `examples/websocket`: runnable net/http, Fiber, Gin, and Echo examples.
+
+## Opt-in targeted routing and EventBus integration
+
+For tenant-scoped user/session delivery, rooms across shards/nodes, Redis session
+leases, and the business EventBus bridge, see [routing](routing/README.md) and the
+[runnable cluster example](../examples/websocket/cluster/README.md).
+
+`Connection.Enqueue` reports closed/full queues explicitly; `Send` returns true
+only for an accepted enqueue. Slow consumers remain connected until the configured
+drop threshold. Shard creation rejects capacity exhaustion with nil instead of
+silently changing the requested shard. Legacy pub/sub remains supported.
+
+The [refactor measurements](BENCHMARKS.md) record a same-machine baseline,
+corrected fan-out benchmarks and a real-broker enqueue smoke run. Manager stats
+include `eventQueueLatency` buckets covering inbound and executor wait.

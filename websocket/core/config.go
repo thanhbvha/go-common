@@ -6,6 +6,7 @@ import (
 
 	"github.com/thanhbvha/go-common/websocket/pool"
 	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
 // PubSubOwnership controls whether manager shutdown also shuts down the bus.
@@ -18,12 +19,15 @@ const (
 
 // ManagerConfig owns all production-path dependencies and runtime limits.
 type ManagerConfig struct {
-	PubSub          pubsub.Manager
-	PubSubOwnership PubSubOwnership
-	EventRegistry   *EventRegistry
-	Authorizer      Authorizer
-	EventExecutor   *pool.PartitionedExecutor
-	Observer        Observer
+	// Distributed is a started, borrowed gateway. It replaces legacy cross-node publishing.
+	Distributed      *routing.Gateway
+	CommandPublisher routing.CommandPublisher
+	PubSub           pubsub.Manager
+	PubSubOwnership  PubSubOwnership
+	EventRegistry    *EventRegistry
+	Authorizer       Authorizer
+	EventExecutor    *pool.PartitionedExecutor
+	Observer         Observer
 
 	MaxConnections            int64
 	MaxShards                 int

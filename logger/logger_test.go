@@ -11,7 +11,7 @@ func TestLoggerWith(t *testing.T) {
 	defer l.Close()
 
 	child := l.With("service", "auth", "version", "v1")
-	// child phải share cùng resources với parent nhưng không modify original
+	// The child shares resources with the parent without modifying the original logger.
 	if child == l {
 		t.Error("child logger should be a different instance")
 	}

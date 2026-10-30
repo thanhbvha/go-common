@@ -56,8 +56,17 @@ func currentAuthorizer() Authorizer {
 	return value
 }
 
+// DispatchPolicy selects local callbacks or a durable business command publisher.
+type DispatchPolicy int
+
+const (
+	Local DispatchPolicy = iota
+	Business
+)
+
 // HandlerConfig defines validation and execution policy for an event type.
 type HandlerConfig struct {
+	Dispatch        DispatchPolicy
 	MaxPayloadBytes int
 	Timeout         time.Duration
 	Validate        func([]byte) error

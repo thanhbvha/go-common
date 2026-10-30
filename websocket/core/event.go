@@ -9,6 +9,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/websocket/pool"
+	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
 // IncomingMessage represents the envelope for incoming payloads from a client.
@@ -31,6 +32,7 @@ type JobHandler func(conn *Connection, msg IncomingMessage) error
 type ContextJobHandler func(ctx context.Context, conn *Connection, msg IncomingMessage) error
 
 type handlerRegistration struct {
+	dispatch        DispatchPolicy
 	run             ContextJobHandler
 	timeout         time.Duration
 	maxPayloadBytes int
@@ -78,7 +80,7 @@ func RegisterContextHandler(eventType string, timeout time.Duration, handler Con
 // RegisterHandlerConfig registers validation, timeout, authorization and execution policy.
 func RegisterHandlerConfig(eventType string, config HandlerConfig) {
 	handler := config.Handler
-	if eventType == "" || handler == nil {
+	if eventType == "" || (handler == nil && config.Dispatch != Business) {
 		return
 	}
 	if config.Timeout <= 0 {
@@ -88,14 +90,14 @@ func RegisterHandlerConfig(eventType string, config HandlerConfig) {
 }
 
 func (r *EventRegistry) Register(eventType string, config HandlerConfig) {
-	if r == nil || eventType == "" || config.Handler == nil {
+	if r == nil || eventType == "" || (config.Dispatch != Local && config.Dispatch != Business) || (config.Handler == nil && config.Dispatch != Business) {
 		return
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 30 * time.Second
 	}
 	r.mu.Lock()
-	r.handlers[eventType] = handlerRegistration{run: config.Handler, timeout: config.Timeout, maxPayloadBytes: config.MaxPayloadBytes, validate: config.Validate}
+	r.handlers[eventType] = handlerRegistration{dispatch: config.Dispatch, run: config.Handler, timeout: config.Timeout, maxPayloadBytes: config.MaxPayloadBytes, validate: config.Validate}
 	r.mu.Unlock()
 }
 
@@ -108,8 +110,9 @@ func (r *EventRegistry) lookup(eventType string) (handlerRegistration, bool) {
 
 // EventMessage represents a raw incoming payload coupled with its source Connection.
 type EventMessage struct {
-	Conn *Connection
-	Raw  []byte
+	Conn     *Connection
+	Raw      []byte
+	queuedAt time.Time
 }
 
 // HandleEvent parses and submits an event to the bounded per-manager executor.
@@ -164,6 +167,11 @@ func HandleEvent(ev *EventMessage) {
 
 	err := executor.Submit(ev.Conn.ctx, ev.Conn.connectionID, func(parent context.Context) (handlerErr error) {
 		defer ev.Conn.releaseHandler()
+		if !ev.queuedAt.IsZero() {
+			if latency, ok := observer.(QueueLatencyObserver); ok {
+				latency.ObserveQueueLatency(time.Since(ev.queuedAt))
+			}
+		}
 		ctx, cancel := context.WithTimeout(parent, registration.timeout)
 		defer cancel()
 		finishTrace := func(error) {}
@@ -184,6 +192,14 @@ func HandleEvent(ev *EventMessage) {
 			}
 		}()
 		handlerErr = ev.Conn.shard.handlerSupervisor.Run(ctx, func(handlerCtx context.Context) error {
+			if registration.dispatch == Business {
+				publisher := ev.Conn.config.CommandPublisher
+				if publisher == nil {
+					return routing.ErrUnavailable
+				}
+				identity := ev.Conn.Identity()
+				return publisher.PublishCommand(handlerCtx, routing.BusinessCommand{MessageID: routing.NewID(), Type: inc.Type, TenantID: identity.TenantID, UserID: identity.UserID, AccountID: identity.AccountID, SessionID: identity.SessionID, RequestID: ev.Conn.requestID, Payload: inc.Data})
+			}
 			return registration.run(handlerCtx, ev.Conn, inc)
 		})
 		if errors.Is(handlerErr, context.DeadlineExceeded) {

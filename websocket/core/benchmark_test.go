@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ func newBenchmarkConnection(shard *Shard, user string) *Connection {
 
 func BenchmarkConnectionSend(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	connection := newBenchmarkConnection(shard, "user")
 	payload := []byte(`{"type":"benchmark","data":"value"}`)
@@ -51,6 +53,7 @@ func BenchmarkConnectionSend(b *testing.B) {
 
 func BenchmarkShardRegister(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -65,6 +68,7 @@ func BenchmarkShardRegister(b *testing.B) {
 
 func BenchmarkShardUnregister(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	connections := make([]*Connection, b.N)
 	for i := range connections {
@@ -84,53 +88,72 @@ func BenchmarkBroadcast100(b *testing.B)   { benchmarkBroadcast(b, 100) }
 func BenchmarkBroadcast1000(b *testing.B)  { benchmarkBroadcast(b, 1000) }
 func BenchmarkBroadcast10000(b *testing.B) { benchmarkBroadcast(b, 10000) }
 
+// Each iteration drains every recipient and verifies the audience stays fixed.
+// These benchmarks measure fan-out plus queue drain, not real socket writes.
 func benchmarkFanOut(b *testing.B, count int, room bool) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
+	connections := make([]*Connection, 0, count)
 	for i := 0; i < count; i++ {
 		conn := newBenchmarkConnection(shard, "user")
 		shard.Register(conn)
-		go func() {
-			for range conn.send {
-			}
-		}()
+		connections = append(connections, conn)
 		if room {
-			_ = shard.JoinRoom(context.Background(), "room", conn)
+			if err := shard.JoinRoom(context.Background(), "room", conn); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
-	payload := []byte("benchmark")
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	benchmarkDeliveries(b, shard, connections, func(payload []byte) {
 		if room {
 			shard.SendToRoom("room", payload)
 		} else {
 			shard.SendToUser("user", payload)
 		}
-	}
+	})
 }
-
 func benchmarkBroadcast(b *testing.B, count int) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
+	connections := make([]*Connection, 0, count)
 	for i := 0; i < count; i++ {
 		conn := newBenchmarkConnection(shard, fmt.Sprintf("user-%d", i))
 		shard.Register(conn)
-		go func() {
-			for range conn.send {
-			}
-		}()
+		connections = append(connections, conn)
 	}
+	benchmarkDeliveries(b, shard, connections, shard.Broadcast)
+}
+func benchmarkDeliveries(b *testing.B, shard *Shard, connections []*Connection, send func([]byte)) {
 	payload := []byte("benchmark")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		shard.handleBroadcast(payload)
+		send(payload)
+		for _, c := range connections {
+			select {
+			case <-c.send:
+			default:
+				b.Fatal("recipient did not receive payload")
+			}
+		}
 	}
+	b.StopTimer()
+	if shard.GetConnectionCount() != int64(len(connections)) {
+		b.Fatal("benchmark audience changed")
+	}
+	b.ReportMetric(float64(len(connections)), "recipients/op")
+	b.Cleanup(func() {
+		for _, c := range connections {
+			shard.Unregister(c)
+		}
+	})
 }
 
 func BenchmarkEventDispatch(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	conn := newBenchmarkConnection(shard, "user")
 	eventType := "benchmark-event"
@@ -142,6 +165,7 @@ func BenchmarkEventDispatch(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		HandleEvent(&EventMessage{Conn: conn, Raw: raw})
 		for conn.pendingHandlers.Load() != 0 {
+			runtime.Gosched()
 		}
 	}
 	_ = coordinator.GetEventExecutor().Shutdown(context.Background())
@@ -149,6 +173,7 @@ func BenchmarkEventDispatch(b *testing.B) {
 
 func BenchmarkDataStructureMemory(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
+	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
