@@ -99,7 +99,7 @@ sequenceDiagram
     W->>W: Execute business logic
     W->>EB: Publish Event ws.notification
     Note over W,EB: WebSocket payload has type=business.completed
-    W-->>EB: Task handler succeeds; EventBus settles task
+    W-->>EB: Task handler succeeds and EventBus settles task
     EB->>R: One instance in group realtime-router receives the event
     R->>REG: Resolve tenant + user and current sessions
     REG-->>R: Locations with node, shard, session, generation
@@ -110,10 +110,10 @@ sequenceDiagram
     DEST-->>X: DeliveryResult after enqueue
     X-->>R: Enqueued or partial/error results
     alt Enqueued or user offline
-        R-->>EB: Event handler succeeds; EventBus settles event
+        R-->>EB: Event handler succeeds and EventBus settles event
     else Queue full, unavailable, or unknown
         R-->>EB: Handler returns an error
-        EB->>EB: Retry according to policy; DLQ after attempts are exhausted
+        EB->>EB: Retry according to policy then move to DLQ after attempts are exhausted
     end
     DEST-->>C: Write pump sends frame when processing the queue
 ```
