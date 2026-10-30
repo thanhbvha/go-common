@@ -1,0 +1,12 @@
+# Explicit local load profile. Supply WS_EXAMPLE_CLIENT_TOKEN and
+# WS_EXAMPLE_ADMIN_TOKEN through the environment. No capacity guarantee.
+server_addr: "127.0.0.1:8080"
+upgrade_rate: 1000
+upgrade_burst: 4000
+max_connections_per_ip: 2000
+loadtest_connections: 1000
+loadtest_accounts: 10
+loadtest_messages: 60
+loadtest_rate: 1
+loadtest_group_size: 5
+# Executor partitions still default to CPU count; tune after measuring queues.

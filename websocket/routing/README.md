@@ -94,9 +94,79 @@ new fencing token. Other session IDs remain independent devices/tabs.
   the connection manager remains responsible for closing sockets.
 
 `Gateway.Stats` reports session/room/dedupe counts, lease failures, accepted and
-rejected enqueues. `Router.Stats` reports attempts, unknowns and partial results.
+rejected enqueues, plus `UnregisterFailures` (failed cleanup attempts, including
+canceled attempts) and `UnregisterRetries` (retries actually started).
+`Router.Stats` reports attempts, unknowns and partial results.
 Counters do not label user or session IDs. Legacy pub/sub stats now expose
 bounded executor dispatch counters; manager stats expose subscription errors.
+
+## Session lifecycle and failure recovery
+
+Gateway lifecycle operations remain serialized; session and room snapshots are
+copied under the local index mutex, with registry I/O outside that mutex. This
+also orders renew against leave/remove, preventing a delayed renewal from
+recreating a removed session or room. Local detachment checks the current owner.
+Close callbacks for replacement/fencing run after releasing the lifecycle lock.
+
+A replacement is locally routable while registration is in flight. The old
+connection is closed only after registry confirmation. On registration error,
+its local session and room indexes are restored. An ambiguous network error may
+still mean Redis accepted the new generation; later renewal fences the old owner
+if necessary. This is not a transactional rollback of a remote registration.
+
+Unregister detaches local indexes before broker work and attempts cleanup at most
+three times, with 10 ms and 20 ms backoffs within the supplied context. Invalid,
+stale and context errors are not retried. Persistent failure is returned and
+counted; lease expiry remains the final recovery path. There is no unbounded
+background retry queue. Redis implements optional `SessionRemover` to remove a
+session generation and its known room memberships in one tenant-slot Lua call.
+Delayed cleanup removes only the old generation's room members. Direct registry
+`Remove` retains its session-only contract; use `RemoveSession` with known rooms
+when room cleanup is also required.
+
+Redis implements optional `SessionLeaseRenewer.RenewBatch`, returning a result for
+every input and continuing beyond stale sessions across 256-session chunks.
+Gateway fences only stale owners and refreshes rooms only for renewed sessions.
+Other failures prevent extension of gateway readiness. Custom registries can
+continue implementing only `SessionRegistry`; the legacy stale-result path uses
+resolve for fencing and waits for a successful renewal before extending readiness.
+
+Shard shutdown closes sockets and detaches shard maps first, then explicitly
+unregisters each distributed session, including connections with no running
+handler. Broker cleanup uses up to 32 workers and a shared five-second budget per
+shard. Even after that budget expires, every captured session is detached from
+the gateway so closed connections cannot keep renewing. Broker clients must honor
+context deadlines; unrelated lifecycle operations can delay acquiring the gateway
+lock. Shutdown does not guarantee immediate Redis cleanup during an outage.
+
+Broadcast fallback and client ACK/offline inbox/replay remain separate feature
+work requiring application policy. The EventBus delivery guarantees above are
+unchanged. The session hash/expiry data model is unchanged; benchmark large-user
+workloads before introducing a different expiry index.
+
+## Registry lookup and registration cost
+
+Single-session `Resolve` uses Lua `HGET`, checks that field's lease, and deletes
+only that field if expired. A missing session returns immediately. User-wide
+resolution still scans and prunes all fields because it returns every live session.
+
+`Register` replaces a live session directly. New admissions below the physical
+hash limit also avoid a scan; when the hash is full, registration prunes expired
+fields atomically before enforcing capacity. An expired same-ID field is removed
+before admission, so it cannot bypass the limit. Live replacements retain their
+existing behavior when a configured limit has been lowered.
+
+Expiry pruning is demand-driven: unrelated expired records can remain until
+user-wide resolution, capacity admission, direct lookup/removal, or hash TTL expiry.
+They are never returned as live sessions. The physical hash remains bounded by
+the configured limit for new admissions; replacing existing fields does not grow
+it. No per-user sorted-set index or additional renewal write is introduced.
+Existing hash keys, JSON records and generation-fenced renew/remove remain
+compatible with older writers and require no migration.
+
+Full-capacity rejection and user-wide resolution retain O(N) scan costs. See the
+benchmark reports linked from [WebSocket measurements](../BENCHMARKS.md) for the
+measured tradeoffs and saturation-test limits.
 
 ## Business bridge
 

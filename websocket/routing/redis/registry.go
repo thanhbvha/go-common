@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -60,15 +61,29 @@ func encode(l routing.Location) []byte {
 	return b
 }
 
+// Replacing a live session does not consume a slot. A new session only needs
+// expiry pruning when the physical hash is full; every mutation stays atomic.
+// Keeping the existing hash format also supports writers from older versions.
 const registerScript = `
-local all = redis.call('HGETALL', KEYS[1])
-for i = 1, #all, 2 do
-    if cjson.decode(all[i+1]).lease_until <= tonumber(ARGV[4]) then
-        redis.call('HDEL', KEYS[1], all[i])
+local now = tonumber(ARGV[4])
+local limit = tonumber(ARGV[5])
+local old = redis.call('HGET', KEYS[1], ARGV[1])
+local replacing = false
+if old then
+    if cjson.decode(old).lease_until > now then
+        replacing = true
+    else
+        redis.call('HDEL', KEYS[1], ARGV[1])
     end
 end
-if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 and redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[5]) then
-    return 0
+if not replacing and redis.call('HLEN', KEYS[1]) >= limit then
+    local all = redis.call('HGETALL', KEYS[1])
+    for i = 1, #all, 2 do
+        if cjson.decode(all[i+1]).lease_until <= now then
+            redis.call('HDEL', KEYS[1], all[i])
+        end
+    end
+    if redis.call('HLEN', KEYS[1]) >= limit then return 0 end
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[3]) then
@@ -110,39 +125,50 @@ func (r *Registry) Renew(ctx context.Context, ls []routing.Location, ttl time.Du
 	if len(ls) == 0 {
 		return r.client.Ping(ctx).Err()
 	}
-	// Pipeline bounded chunks instead of a network round trip per session.
+	var err error
+	for _, result := range r.RenewBatch(ctx, ls, ttl) {
+		err = errors.Join(err, result.Err)
+	}
+	return err
+}
+
+// RenewBatch executes every bounded chunk, preserving a result for each input.
+func (r *Registry) RenewBatch(ctx context.Context, ls []routing.Location, ttl time.Duration) []routing.RenewResult {
+	results := make([]routing.RenewResult, len(ls))
+	for i, l := range ls {
+		results[i] = routing.RenewResult{Location: l, Err: valid(l, ttl)}
+	}
 	for start := 0; start < len(ls); start += 256 {
-		end := start + 256
-		if end > len(ls) {
-			end = len(ls)
-		}
+		end := min(start+256, len(ls))
 		pipe := r.client.Pipeline()
-		cmds := make([]*goredis.Cmd, 0, end-start)
-		for _, l := range ls[start:end] {
-			if err := valid(l, ttl); err != nil {
-				return err
+		cmds := make([]*goredis.Cmd, end-start)
+		for i := start; i < end; i++ {
+			if results[i].Err != nil {
+				continue
 			}
+			l := ls[i]
 			l.ExpiresAt = time.Now().Add(ttl)
-			b := encode(l)
-			cmds = append(cmds, pipe.Eval(ctx, renewScript, []string{r.key(l.TenantID, "user", l.UserID)}, l.SessionID, l.Generation, b, ttl.Milliseconds(), r.maxSessions))
+			cmds[i-start] = pipe.Eval(ctx, renewScript, []string{r.key(l.TenantID, "user", l.UserID)}, l.SessionID, l.Generation, encode(l), ttl.Milliseconds(), r.maxSessions)
 		}
-		if _, err := pipe.Exec(ctx); err != nil {
-			return err
-		}
-		for _, cmd := range cmds {
+		_, _ = pipe.Exec(ctx) // Each command carries its own transport/script error.
+		for offset, cmd := range cmds {
+			if cmd == nil {
+				continue
+			}
 			n, err := cmd.Int()
-			if err != nil {
-				return err
+			if err == nil {
+				switch n {
+				case 1:
+				case -1:
+					err = routing.ErrCapacity
+				default:
+					err = routing.ErrStale
+				}
 			}
-			if n == -1 {
-				return routing.ErrCapacity
-			}
-			if n != 1 {
-				return routing.ErrStale
-			}
+			results[start+offset].Err = err
 		}
 	}
-	return nil
+	return results
 }
 
 const removeScript = `
@@ -160,13 +186,49 @@ func (r *Registry) Remove(ctx context.Context, l routing.Location) error {
 	return r.client.Eval(ctx, removeScript, []string{r.key(l.TenantID, "user", l.UserID)}, l.SessionID, l.Generation).Err()
 }
 
+// All keys share the tenant hash slot. Room members include the generation,
+// so delayed cleanup never deletes membership belonging to a replacement.
+const removeSessionScript = `
+local old = redis.call('HGET', KEYS[1], ARGV[1])
+if old and cjson.decode(old).generation == ARGV[2] then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+end
+for i = 2, #KEYS do redis.call('ZREM', KEYS[i], ARGV[3]) end
+return 1
+`
+
+func (r *Registry) RemoveSession(ctx context.Context, l routing.Location, rooms []string) error {
+	if !l.Valid() {
+		return routing.ErrInvalid
+	}
+	keys := []string{r.key(l.TenantID, "user", l.UserID)}
+	for _, room := range rooms {
+		if room == "" {
+			return routing.ErrInvalid
+		}
+		keys = append(keys, r.key(l.TenantID, "room", room))
+	}
+	return r.client.Eval(ctx, removeSessionScript, keys, l.SessionID, l.Generation, member(l)).Err()
+}
+
+// Single-session routing inspects and prunes only that field. User-wide routing
+// still scans because it must return all live locations.
 const resolveScript = `
+if ARGV[2] ~= '' then
+    local value = redis.call('HGET', KEYS[1], ARGV[2])
+    if not value then return {} end
+    if cjson.decode(value).lease_until <= tonumber(ARGV[1]) then
+        redis.call('HDEL', KEYS[1], ARGV[2])
+        return {}
+    end
+    return {value}
+end
 local all = redis.call('HGETALL', KEYS[1])
 local result = {}
 for i = 1, #all, 2 do
     if cjson.decode(all[i+1]).lease_until <= tonumber(ARGV[1]) then
         redis.call('HDEL', KEYS[1], all[i])
-    elseif ARGV[2] == '' or all[i] == ARGV[2] then
+    else
         table.insert(result, all[i+1])
     end
 end

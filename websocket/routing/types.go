@@ -49,6 +49,24 @@ type SessionRegistry interface {
 	ResolveRoom(context.Context, string, string) ([]string, error)
 }
 
+// RenewResult identifies the input generation and its individual renewal error.
+type RenewResult struct {
+	Location Location
+	Err      error
+}
+
+// SessionLeaseRenewer reports one result per input, in order. A stale generation
+// must not prevent other sessions from renewing. Implementations must not mutate ls.
+type SessionLeaseRenewer interface {
+	RenewBatch(context.Context, []Location, time.Duration) []RenewResult
+}
+
+// SessionRemover atomically removes a generation and its known room memberships.
+// Removing an older generation must preserve a replacement session and its rooms.
+type SessionRemover interface {
+	RemoveSession(context.Context, Location, []string) error
+}
+
 type Status string
 
 const (

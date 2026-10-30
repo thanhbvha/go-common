@@ -754,12 +754,77 @@ go run ./examples/websocket/loadtest
 Override only the desired load values:
 
 ```bash
-go run ./examples/websocket/loadtest -connections=1000 -messages=20 -scenario=message
+go run ./examples/websocket/loadtest -connections=10 -messages=20 -scenario=message -rate=1
 ```
 
 The load generator reads `loadtest_*`, client credentials, tenant, and account from the shared file. It appends a unique structured identity to every connection. Its default `system.ping` event always receives a response, making the latency metrics meaningful.
 
 The load generator is intended for repeatable stress scenarios. The protocol-aware client is intended for functional examples and manual inspection.
+
+For small-group chat, use the cluster gateway described below. Every client joins a unique test room, waits for all joins,
+then sends `chat.send` at the requested per-connection rate:
+
+```bash
+go run ./examples/websocket/loadtest -config=examples/websocket/config.loadtest.yaml -scenario=fanout -output=fanout.json
+```
+
+Start the cluster gateway with `-config=examples/websocket/config.loadtest.yaml`
+and provide matching client/admin credentials through the environment. The legacy
+server above scopes room delivery by shard; use the cluster's targeted room router
+for groups spanning users on different shards.
+
+`group-size` counts all recipients including the sender (both examples echo to the
+sender). Connections must be divisible by group size. With 1,000 connections,
+60 messages and groups of 5, expected client receipts are 300,000. Missing or
+duplicate receipts fail the run. The final receipt wait is bounded to 10 seconds
+after each sender finishes. Test messages are small correlation strings; this
+command does not simulate 1 KiB frames or persistence/business processing.
+
+All scenarios run a socket reader during idle/hold, so server ping/pong continues.
+`reconnect` reuses each client's session ID across cycles; `churn` creates a new
+session ID per cycle. Run IDs isolate separate invocations. `rolling-drain` is an
+idle probe while an operator drains the server: disconnects are reported as errors,
+and it does not initiate deployment or automatically reconnect.
+
+`successfulConnectionsCumulative` counts successful handshakes across cycles;
+`peakActiveConnections` measures concurrent sockets, and `activeConnectionsAtEnd`
+should return to zero. `expectedReceipts`, `received`, `missingReceipts` and
+`duplicateReceipts` measure application frames at clients. Fanout percentiles
+measure send-to-client receipt, including intentional slow-reader delays. Latency
+storage uses the first 100,000 receipts (`latencySamples`), so larger-run percentiles
+describe that initial sample. Message/reconnect use one outstanding request per
+client; `system.ping` waits specifically for `system.pong`. A custom `-event` must
+be a request/reply event without unrelated unsolicited replies. `-rate=0` removes
+pacing; a slow request/reply cannot sustain the requested rate.
+
+`clientHeap*` and `clientGoroutines*` describe the load generator process, not the
+server. Collect server `/admin/stats` separately. Avoid running the load generator
+on the server host when measuring capacity. These runs do not establish production
+capacity without TLS, real payload sizes, broker topology and a sustained soak.
+
+The default quota remains 100 connections/account and 5,000/tenant. `-accounts=10`
+assigns clients to ten suffixed demo accounts; it does not change server quotas.
+This identity selection is specific to the local demo authentication policy.
+
+Manager limits are configurable through YAML and corresponding `WS_EXAMPLE_`
+environment variables: `executor_partitions` (default CPU count),
+`executor_queue_size` (256), `handler_concurrency` (64), `send_queue_size` (128),
+`inbound_queue_size` (1,024), `max_connections` (20,000),
+`max_connections_per_user` (5), `max_connections_per_account` (100), and
+`max_connections_per_tenant` (5,000). Values must be positive. Tune these against
+server queue/rejection metrics; increasing concurrency or queue size alone does
+not demonstrate higher capacity. `loadtest_group_size`, `loadtest_rate` and
+`loadtest_accounts` provide shared defaults for the new load flags.
+
+Handshake limits are configurable too: `upgrade_rate` (100/s), `upgrade_burst`
+(200) and `max_connections_per_ip` (20). These remain enabled. The opt-in
+`config.loadtest.yaml` sets 1,000/s, burst 4,000 and 2,000/IP for a local generator
+with 1,000 sockets. Use that file on both server and loadtest for larger message
+tests; credentials come from environment variables. These settings are for an
+isolated load test and do not establish deployment limits.
+
+HTTP shutdown and WebSocket manager shutdown each receive a fresh 15-second
+deadline, so a slow HTTP drain does not exhaust the session cleanup budget.
 
 ## Full Local Test
 
@@ -804,7 +869,7 @@ Replace these demonstration choices:
 | Static authorizer | Domain permission service or cached policy |
 | Node-local quotas only | Distributed reservation if strict cluster quota is required |
 | Redis Pub/Sub/Core NATS | Domain persistence plus outbox/inbox or a dedicated queue for messages that cannot be lost |
-| Hard-coded limits | Values established by Linux/TLS load and soak testing |
+| Configurable demo limits | Values established by Linux/TLS load and soak testing |
 
 ## Build and Test
 

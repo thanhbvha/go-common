@@ -1,5 +1,18 @@
 # WebSocket refactor measurements
 
+The implemented [registry fast paths and fresh A/B comparison](benchmarks/redis-fastpaths-ab-20261030.md)
+cover all 112 lookup/Register/Renew cases before and after optimization. Targeted
+lookup and live-session replacement avoid whole-hash scans; renewal and the Redis
+record format retain their existing contracts.
+
+The separate [Redis registry cardinality benchmark](benchmarks/redis-registry-20261030.md)
+measures Register/Resolve with 1, 10, 100 and 1,000 sessions per user on a disposable
+Redis 7.4.11 instance. It includes per-call percentiles, server EVAL service time,
+parallel callers, expired-record pruning and raw output for all 204 measured runs.
+The follow-up [Register/Renew workload benchmark](benchmarks/redis-register-renew-20261030.md)
+adds single-session and batched renewal, generation churn, fixed operation mixes,
+and saturated concurrent registration/batch renewal, with 132 measured runs.
+
 Measured locally on 2026-10-30 using Go 1.26.3, Linux amd64, Intel i7-12700F.
 Baseline: commit `b75269c`, exported to a temporary directory. Both revisions use
 `GOMAXPROCS=4`; five runs, 10,000 iterations per run. Values below are medians.

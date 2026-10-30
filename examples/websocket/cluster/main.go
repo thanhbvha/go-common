@@ -24,16 +24,19 @@ import (
 	natsbus "github.com/thanhbvha/go-common/eventbus/driver/nats"
 	redisbus "github.com/thanhbvha/go-common/eventbus/driver/redis"
 	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
 	commonkafka "github.com/thanhbvha/go-common/kafka"
 	adapter "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
 	"github.com/thanhbvha/go-common/websocket/core"
 	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/websocket/limiter"
 	"github.com/thanhbvha/go-common/websocket/routing"
 	natsrouting "github.com/thanhbvha/go-common/websocket/routing/nats"
 	redisrouting "github.com/thanhbvha/go-common/websocket/routing/redis"
 )
 
 type options struct {
+	config                                                    string
 	role, broker, redis, nats, addr, tenant, user, room, text string
 	eventbusDriver, deliveryDriver, kafkaBrokers, namespace   string
 	count                                                     int
@@ -41,6 +44,7 @@ type options struct {
 
 func main() {
 	var o options
+	flag.StringVar(&o.config, "config", os.Getenv("WS_EXAMPLE_CONFIG"), "Optional shared YAML/.env file for gateway limits")
 	flag.StringVar(&o.role, "role", "gateway", "gateway, worker, router, publish or load")
 	flag.StringVar(&o.broker, "broker", "redis", "Legacy shorthand for both drivers: redis or nats")
 	flag.StringVar(&o.eventbusDriver, "eventbus-driver", "", "Business EventBus driver: redis, nats or kafka (defaults to -broker)")
@@ -237,6 +241,14 @@ func run(ctx context.Context, o options) error {
 	}
 }
 func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.CommandPublisher, router *routing.Router, o options) error {
+	var settings *exampleconfig.Config
+	if o.config != "" {
+		loaded, err := exampleconfig.Load(o.config)
+		if err != nil {
+			return errors.New("cannot load gateway configuration")
+		}
+		settings = &loaded
+	}
 	token := os.Getenv("WS_EXAMPLE_CLIENT_TOKEN")
 	if token == "" {
 		return errors.New("WS_EXAMPLE_CLIENT_TOKEN is required")
@@ -279,23 +291,33 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 	cfg.EventRegistry = registry
 	cfg.CommandPublisher = publisher
 	cfg.Authorizer = roomAuthorizer{}
+	cfg.Observer = &core.AtomicObserver{}
+	if settings != nil {
+		settings.ApplyManagerLimits(&cfg)
+	}
 	manager := core.NewManagerWithConfig(cfg)
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = manager.Shutdown(shutdown)
 	}()
-	h := adapter.NewHandler(adapter.Config{Manager: manager, AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			return core.Identity{}, core.ErrUnauthorized
-		}
-		q := r.URL.Query()
-		identity := core.Identity{TenantID: q.Get("tenant_id"), UserID: q.Get("user_id"), SessionID: q.Get("session_id")}
-		if identity.TenantID == "" || identity.UserID == "" {
-			return identity, core.ErrUnauthorized
-		}
-		return identity, nil
-	}})
+	upgradeRate, upgradeBurst, perIP := 1000.0, int64(2000), 100
+	if settings != nil {
+		upgradeRate, upgradeBurst, perIP = settings.UpgradeRate, settings.UpgradeBurst, settings.MaxConnectionsPerIP
+	}
+	h := adapter.NewHandler(adapter.Config{Manager: manager,
+		RateLimiter: limiter.NewRateLimiter(upgradeRate, upgradeBurst), ConnectionLimiter: limiter.NewConnectionLimiter(perIP),
+		AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+				return core.Identity{}, core.ErrUnauthorized
+			}
+			q := r.URL.Query()
+			identity := core.Identity{TenantID: q.Get("tenant_id"), UserID: q.Get("user_id"), SessionID: q.Get("session_id")}
+			if identity.TenantID == "" || identity.UserID == "" {
+				return identity, core.ErrUnauthorized
+			}
+			return identity, nil
+		}})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.HandleUpgrade)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +325,12 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
+	// A separate credential is required; client credentials grant no stats access.
+	mux.Handle("/admin/stats", statsHandler(os.Getenv("WS_EXAMPLE_ADMIN_TOKEN"), func() any {
+		stats := manager.GetStats()
+		delete(stats, "shardStats")
+		return map[string]any{"manager": stats, "gateway": gateway.Stats(), "router": router.Stats()}
+	}))
 	server := &http.Server{Addr: o.addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
@@ -318,6 +346,23 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}
+}
+
+func statsHandler(token string, snapshot func() any) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(snapshot())
+	})
 }
 
 type roomAuthorizer struct{}

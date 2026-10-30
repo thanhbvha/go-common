@@ -49,6 +49,7 @@ const (
 )
 
 type application struct {
+	limits        exampleconfig.Config
 	manager       *core.Manager
 	redisClient   *commonredis.Client
 	natsClient    *commonnats.Client
@@ -111,7 +112,7 @@ func main() {
 	flag.Parse()
 	_ = configFile
 
-	app, err := newApplication(*broker, *redisAddress, *natsURL, *defaultTenant, loaded.ClientToken, loaded.AdminToken)
+	app, err := newApplication(*broker, *redisAddress, *natsURL, *defaultTenant, loaded.ClientToken, loaded.AdminToken, loaded)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -139,7 +140,7 @@ func main() {
 	}
 }
 
-func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, adminToken string) (*application, error) {
+func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, adminToken string, limits exampleconfig.Config) (*application, error) {
 	if clientToken == "" {
 		return nil, errors.New("client_token is required in config or WS_EXAMPLE_CLIENT_TOKEN")
 	}
@@ -165,26 +166,21 @@ func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, a
 	config.EventRegistry = registry
 	config.Authorizer = demoAuthorizer{}
 	config.Observer = &core.AtomicObserver{}
-	config.MaxConnections = 20_000
 	config.MaxShards = 64
 	config.MaxShardConnections = 1_000
-	config.SendQueueSize = 128
-	config.InboundQueueSize = 1_024
 	config.MaxMessageBytes = 16 * 1024
 	config.MessagesPerSecond = 20
 	config.MessageBurst = 50
 	config.BytesPerSecond = 32 * 1024
 	config.ByteBurst = 64 * 1024
 	config.MaxPendingHandlers = 16
-	config.MaxHandlerGoroutines = 64
 	config.MaxRoomsPerConnection = 50
 	config.SlowConsumerDropThreshold = 2
-	config.MaxConnectionsPerUser = 5
-	config.MaxConnectionsPerAccount = 100
-	config.MaxConnectionsPerTenant = 5_000
 	config.WriteWait = 5 * time.Second
 	config.PongWait = 60 * time.Second
 	config.PingPeriod = 50 * time.Second
+	limits.ApplyManagerLimits(&config)
+	app.limits = limits
 
 	app.manager = core.NewManagerWithConfig(config)
 	if readiness, ok := bus.(pubsub.WaitReadyProvider); ok {
@@ -399,7 +395,11 @@ func (a *application) adminAuthorized(authorization string) bool {
 }
 
 func (a *application) adapterLimiters() (*limiter.RateLimiter, *limiter.ConnectionLimiter) {
-	return limiter.NewRateLimiter(100, 200), limiter.NewConnectionLimiter(20)
+	limits := a.limits
+	if limits.MaxConnectionsPerIP == 0 {
+		limits = exampleconfig.Default()
+	}
+	return limiter.NewRateLimiter(limits.UpgradeRate, limits.UpgradeBurst), limiter.NewConnectionLimiter(limits.MaxConnectionsPerIP)
 }
 
 func (a *application) runNetHTTP(address string) error {
@@ -531,12 +531,16 @@ func (a *application) waitAndShutdown(serverErrors <-chan error, shutdownHTTP fu
 		logger.InfoAsync("Shutdown signal received", "signal", signalValue.String())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := shutdownHTTP(ctx); err != nil {
-		logger.ErrorAsync("HTTP shutdown failed", "error", err)
-	}
-	return a.manager.Shutdown(ctx)
+	return a.shutdown(shutdownHTTP)
+}
+
+func (a *application) shutdown(shutdownHTTP func(context.Context) error) error {
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 15*time.Second)
+	httpErr := shutdownHTTP(httpCtx)
+	cancelHTTP()
+	managerCtx, cancelManager := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelManager()
+	return errors.Join(httpErr, a.manager.Shutdown(managerCtx))
 }
 
 func (a *application) close() {

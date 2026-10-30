@@ -7,6 +7,20 @@ server_redis: "127.0.0.1:6379"
 server_nats: "nats://127.0.0.1:4222"
 server_tenant: demo
 
+# Demo limits, not a measured capacity guarantee. Executor partitions default to
+# runtime.NumCPU(); override WS_EXAMPLE_EXECUTOR_PARTITIONS for your load test.
+executor_queue_size: 256
+handler_concurrency: 64
+send_queue_size: 128
+inbound_queue_size: 1024
+max_connections: 20000
+max_connections_per_user: 5
+max_connections_per_account: 100
+max_connections_per_tenant: 5000
+upgrade_rate: 100
+upgrade_burst: 200
+max_connections_per_ip: 20
+
 # Demonstration credentials only. Do not use these values in production.
 client_token: local-demo-token
 admin_token: local-admin-token
@@ -32,3 +46,6 @@ loadtest_scenario: message
 loadtest_reconnects: 3
 loadtest_churn_delay: 100ms
 loadtest_output: ""
+loadtest_group_size: 5
+loadtest_rate: 1
+loadtest_accounts: 1

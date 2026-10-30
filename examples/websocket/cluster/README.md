@@ -360,6 +360,44 @@ successful throughput. It measures routing through the broker to gateway enqueue
 including registry lookup; it does not measure client receipt. Use the existing
 `examples/websocket/loadtest` tooling for connection churn and socket workloads.
 
+For actual client receipt measurements, target the gateway with the fanout
+scenario (the default `system.ping` scenario is not implemented by this gateway):
+
+```bash
+go run ./examples/websocket/loadtest -target=ws://127.0.0.1:8080/ws -scenario=fanout -connections=100 -group-size=5 -messages=60 -rate=1
+```
+
+Set the load client's `WS_EXAMPLE_CLIENT_TOKEN` to the gateway credential. Groups
+include the sender; this command expects 30,000 receipts. A single invocation
+connects to one endpoint. Use a load balancer spreading those sockets across
+gateways to exercise cross-node room delivery.
+
+Gateways expose authenticated aggregate metrics at `GET /admin/stats`. Set
+`WS_EXAMPLE_ADMIN_TOKEN` separately and send it in the `Authorization: Bearer`
+header; the route denies all access when that token is absent. Snapshots contain
+manager queue/handler/runtime statistics, gateway `LeaseFailures`,
+`UnregisterFailures`, `UnregisterRetries`, `Enqueued`, `Rejected`, and router
+counters. They omit per-shard identity keys. `Enqueued` confirms gateway admission,
+not client receipt. Keep this endpoint on an internal network.
+
+Optionally start a gateway with `-config=examples/websocket/config.yaml` (or
+`WS_EXAMPLE_CONFIG`) to apply the shared example's queue, concurrency and
+connection limits with `WS_EXAMPLE_` overrides. Without a config file the cluster
+gateway retains core defaults. Broker/role/address flags and the gateway's token
+environment variables remain authoritative; this option loads manager and handshake
+limits. Without a file the handshake limits remain 1,000/s, burst 2,000 and 100/IP,
+now wired per instance. For 1,000 clients from one IP, opt into
+`-config=examples/websocket/config.loadtest.yaml` on the gateway and loadtest.
+
+Reconnect clients should reuse a stable session ID for the same logical device.
+Register replacement and targeted session resolution use Redis `HGET` fast paths;
+new admission below quota avoids a full scan. User-wide resolution still returns
+all live sessions, and admission at quota can scan expired entries. Expired
+metadata is removed on demand and may remain in Redis until touched. No expiry
+sorted set or migration is required. Manager shutdown handles gateway session and
+room cleanup; examples must not independently delete registry records, which could
+race with reconnect ownership fencing.
+
 This is a local demonstration: one bearer token permits choosing identity query
 parameters. Production authentication must derive tenant/user/session from a
 verified token. Apply room membership/business authorization in the application.

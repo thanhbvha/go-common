@@ -1,6 +1,41 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
+	"github.com/thanhbvha/go-common/websocket/core"
+)
+
+func TestConfiguredLimitsAndShutdownError(t *testing.T) {
+	settings := exampleconfig.Default()
+	settings.ExecutorPartitions = 2
+	settings.MaxConnectionsPerIP = 2
+	app, err := newApplication("standalone", "", "", "demo", "test", "admin", settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.close()
+	_, connections := app.adapterLimiters()
+	if !connections.AddConnection("peer") || !connections.AddConnection("peer") || connections.AddConnection("peer") {
+		t.Fatal("configured per-IP connection limit not applied")
+	}
+	if app.manager.GetConfig().ExecutorPartitions != 2 {
+		t.Fatal("configured executor partitions not applied")
+	}
+	err = app.shutdown(func(ctx context.Context) error {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) <= 0 {
+			t.Fatal("missing HTTP shutdown budget")
+		}
+		return context.DeadlineExceeded
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || app.manager.State() != core.StateStopped {
+		t.Fatalf("shutdown error=%v state=%v", err, app.manager.State())
+	}
+}
 
 func TestAuthenticateDemo(t *testing.T) {
 	tests := []struct {

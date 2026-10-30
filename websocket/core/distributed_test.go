@@ -136,3 +136,71 @@ func TestDistributedRegistrationFailureRollsBackQuota(t *testing.T) {
 		t.Fatalf("failed registration leaked quota/session: %v", manager.GetStats())
 	}
 }
+
+// Exercise the lower-level shard API without a Manager handler/deferred Remove.
+func TestDistributedShardShutdownWithoutRunningHandler(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		name := "cleanup"
+		if canceled {
+			name = "expired_cleanup_budget"
+		}
+		t.Run(name, func(t *testing.T) { testDistributedShardShutdown(t, canceled) })
+	}
+}
+func testDistributedShardShutdown(t *testing.T, canceled bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+	defer client.Close()
+	registry := driver.NewRegistry(client, "shard-cleanup")
+	g, _ := routing.NewGateway(routing.GatewayConfig{Registry: registry, Transport: driver.NewTransport(client, "shard-cleanup")})
+	if err := g.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close(ctx)
+	config := DefaultManagerConfig()
+	config.Distributed = g
+	config.DisableLifecycleLogging = true
+	manager := NewManagerWithConfig(config)
+	defer manager.Shutdown(ctx)
+	shard := manager.GetOrCreateShard("direct")
+	conn := NewConnection(newMockConn(), shard, "u", shard.name, "", g.NodeID(), "")
+	conn.setIdentity(Identity{TenantID: "t", UserID: "u", SessionID: "s"})
+	l, err := g.Register(ctx, routing.Location{TenantID: "t", UserID: "u", SessionID: "s"}, func([]byte) error { return nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.location = &l
+	if !shard.Register(conn) {
+		t.Fatal("shard registration rejected")
+	}
+	if err = shard.JoinRoom(ctx, "r", conn); err != nil {
+		t.Fatal(err)
+	}
+	if canceled {
+		cleanupCtx, stop := context.WithCancel(ctx)
+		stop()
+		shard.shutdown(cleanupCtx)
+	} else if err = shard.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !conn.IsClosed() || shard.GetConnectionCount() != 0 || g.Stats().Sessions != 0 {
+		t.Fatal("local session leaked")
+	}
+	locations, err := registry.Resolve(ctx, "t", "u", "s")
+	expected := 0
+	if canceled {
+		expected = 1
+	}
+	if err != nil || len(locations) != expected {
+		t.Fatalf("registry session leaked: %v %v", locations, err)
+	}
+	if canceled && g.Stats().UnregisterFailures == 0 {
+		t.Fatal("canceled cleanup was not counted")
+	}
+	nodes, err := registry.ResolveRoom(ctx, "t", "r")
+	if err != nil || len(nodes) != expected {
+		t.Fatalf("registry room leaked: %v %v", nodes, err)
+	}
+}

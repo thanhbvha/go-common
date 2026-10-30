@@ -586,6 +586,29 @@ func (s *Shard) shutdown(ctx context.Context) {
 			s.releaseManagerConnection(conn)
 			s.observer().ConnectionClosed()
 		}
+		// The maps above are detached, so pump cleanup cannot unregister these
+		// sessions. Explicitly clean the registry even for connections never Run.
+		// One shared budget bounds total broker work across the entire shard.
+		if gateway := s.config.Distributed; gateway != nil {
+			cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			jobs := make(chan *Connection)
+			var workers sync.WaitGroup
+			for range min(32, len(connections)) {
+				workers.Go(func() {
+					for conn := range jobs {
+						_ = gateway.Remove(cleanupCtx, conn.routingLocation())
+					}
+				})
+			}
+			for _, conn := range connections {
+				// Even after the broker deadline, Remove detaches local gateway
+				// state so closed sockets cannot keep renewing indefinitely.
+				jobs <- conn
+			}
+			close(jobs)
+			workers.Wait()
+			cancel()
+		}
 		for _, conn := range connections {
 			if conn.hasStarted() {
 				_ = conn.Wait(ctx)

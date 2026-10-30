@@ -26,24 +26,26 @@ type localSession struct {
 	rooms    map[string]struct{}
 }
 type Gateway struct {
-	lifecycle     sync.Mutex
-	started       atomic.Bool
-	cfg           GatewayConfig
-	mu            sync.Mutex
-	sessions      map[string]*localSession
-	users         map[string]map[string]*localSession
-	rooms         map[string]map[string]*localSession
-	dedupe        map[string]time.Time
-	dedupeOrder   []dedupeEntry
-	dedupeNext    int
-	ctx           context.Context
-	cancel        context.CancelFunc
-	done          chan struct{}
-	leaseUntil    atomic.Int64
-	leaseFailures atomic.Uint64
-	delivered     atomic.Uint64
-	rejected      atomic.Uint64
-	closed        atomic.Bool
+	lifecycle          sync.Mutex
+	started            atomic.Bool
+	cfg                GatewayConfig
+	mu                 sync.Mutex
+	sessions           map[string]*localSession
+	users              map[string]map[string]*localSession
+	rooms              map[string]map[string]*localSession
+	dedupe             map[string]time.Time
+	dedupeOrder        []dedupeEntry
+	dedupeNext         int
+	ctx                context.Context
+	cancel             context.CancelFunc
+	done               chan struct{}
+	leaseUntil         atomic.Int64
+	leaseFailures      atomic.Uint64
+	unregisterFailures atomic.Uint64
+	unregisterRetries  atomic.Uint64
+	delivered          atomic.Uint64
+	rejected           atomic.Uint64
+	closed             atomic.Bool
 }
 
 func NewGateway(c GatewayConfig) (*Gateway, error) {
@@ -113,7 +115,13 @@ func (g *Gateway) Register(ctx context.Context, l Location, enqueue func([]byte)
 		return Location{}, ErrInvalid
 	}
 	g.lifecycle.Lock()
-	defer g.lifecycle.Unlock()
+	var closeOld func()
+	defer func() {
+		g.lifecycle.Unlock()
+		if closeOld != nil {
+			closeOld()
+		}
+	}()
 	if !g.Ready() {
 		return Location{}, ErrUnavailable
 	}
@@ -131,23 +139,55 @@ func (g *Gateway) Register(ctx context.Context, l Location, enqueue func([]byte)
 	}
 	g.users[uk][l.Key()] = s
 	g.mu.Unlock()
-	if old != nil && old.close != nil {
-		old.close()
-	}
 	registered, err := g.cfg.Registry.Register(ctx, l, g.cfg.LeaseTTL)
 	if err != nil {
 		g.mu.Lock()
-		g.removeLocal(s)
+		if g.removeLocal(s) && old != nil {
+			g.installLocal(old)
+		}
 		g.mu.Unlock()
 		return Location{}, err
 	}
 	g.mu.Lock()
 	s.location = registered
 	g.mu.Unlock()
+	if old != nil {
+		closeOld = old.close
+		rooms := make([]string, 0, len(old.rooms))
+		for room := range old.rooms {
+			rooms = append(rooms, room)
+		}
+		// Publication is committed. Cleanup is generation-fenced and failures
+		// are counted, with lease expiry as fallback; do not roll it back.
+		_ = g.unregister(ctx, old.location, rooms)
+	}
 	return registered, nil
 }
-func (g *Gateway) removeLocal(s *localSession) {
+
+// installLocal restores all indexes; caller holds mu and lifecycle.
+func (g *Gateway) installLocal(s *localSession) {
 	l := s.location
+	g.sessions[l.Key()] = s
+	uk := userKey(l.TenantID, l.UserID)
+	if g.users[uk] == nil {
+		g.users[uk] = make(map[string]*localSession)
+	}
+	g.users[uk][l.Key()] = s
+	for room := range s.rooms {
+		rk := roomKey(l.TenantID, room)
+		if g.rooms[rk] == nil {
+			g.rooms[rk] = make(map[string]*localSession)
+		}
+		g.rooms[rk][l.Key()] = s
+	}
+}
+
+// removeLocal only detaches the current owner; caller holds mu.
+func (g *Gateway) removeLocal(s *localSession) bool {
+	l := s.location
+	if g.sessions[l.Key()] != s {
+		return false
+	}
 	delete(g.sessions, l.Key())
 	uk := userKey(l.TenantID, l.UserID)
 	delete(g.users[uk], l.Key())
@@ -161,6 +201,7 @@ func (g *Gateway) removeLocal(s *localSession) {
 			delete(g.rooms, rk)
 		}
 	}
+	return true
 }
 func (g *Gateway) Remove(ctx context.Context, l Location) error {
 	g.lifecycle.Lock()
@@ -173,18 +214,50 @@ func (g *Gateway) Remove(ctx context.Context, l Location) error {
 		s = nil
 	}
 	g.mu.Unlock()
-	var first error
+	var rooms []string
 	if s != nil {
 		for room := range s.rooms {
-			if err := g.cfg.Registry.LeaveRoom(ctx, l, room); err != nil && first == nil {
-				first = err
-			}
+			rooms = append(rooms, room)
 		}
 	}
-	if err := g.cfg.Registry.Remove(ctx, l); err != nil {
-		return err
+	return g.unregister(ctx, l, rooms)
+}
+
+// unregister retries idempotent, generation-fenced cleanup within the caller's
+// deadline. Local indexes are already detached and mu is never held during I/O.
+func (g *Gateway) unregister(ctx context.Context, l Location, rooms []string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			g.unregisterFailures.Add(1)
+			return ctx.Err()
+		}
+		if atomic, ok := g.cfg.Registry.(SessionRemover); ok {
+			err = atomic.RemoveSession(ctx, l, rooms)
+		} else {
+			err = nil
+			for _, room := range rooms {
+				err = errors.Join(err, g.cfg.Registry.LeaveRoom(ctx, l, room))
+			}
+			err = errors.Join(err, g.cfg.Registry.Remove(ctx, l))
+		}
+		if err == nil {
+			return nil
+		}
+		g.unregisterFailures.Add(1)
+		if errors.Is(err, ErrInvalid) || errors.Is(err, ErrStale) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || attempt == 2 {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		g.unregisterRetries.Add(1)
 	}
-	return first
+	return err
 }
 func (g *Gateway) JoinRoom(ctx context.Context, l Location, room string) error {
 	if room == "" {
@@ -344,59 +417,116 @@ func (g *Gateway) renewLoop() {
 		}
 	}
 }
+
+// sessionSnapshot copies mutable room maps under mu. lifecycle keeps registry
+// operations ordered, including leave/remove versus in-flight lease renewal.
+type sessionSnapshot struct {
+	session  *localSession
+	location Location
+	rooms    []RoomMembership
+}
+
+func (g *Gateway) snapshotSessions() []sessionSnapshot {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	snapshots := make([]sessionSnapshot, 0, len(g.sessions))
+	for _, s := range g.sessions {
+		item := sessionSnapshot{session: s, location: s.location}
+		for room := range s.rooms {
+			item.rooms = append(item.rooms, RoomMembership{Location: s.location, RoomID: room})
+		}
+		snapshots = append(snapshots, item)
+	}
+	return snapshots
+}
 func (g *Gateway) renew() {
 	g.lifecycle.Lock()
-	defer g.lifecycle.Unlock()
+	var closed []func()
+	defer func() {
+		g.lifecycle.Unlock()
+		for _, closeSession := range closed {
+			closeSession()
+		}
+	}()
 	renewedAt := time.Now()
 	ctx, cancel := context.WithTimeout(g.ctx, g.cfg.RenewInterval)
 	defer cancel()
-	g.mu.Lock()
-	ls := make([]Location, 0, len(g.sessions))
-	for _, s := range g.sessions {
+	snapshots := g.snapshotSessions()
+	ls := make([]Location, 0, len(snapshots))
+	for _, s := range snapshots {
 		ls = append(ls, s.location)
 	}
-	g.mu.Unlock()
-	err := g.cfg.Registry.Renew(ctx, ls, g.cfg.LeaseTTL)
-	if errors.Is(err, ErrStale) {
-		for _, s := range g.sessions {
-			locations, e := g.cfg.Registry.Resolve(ctx, s.location.TenantID, s.location.UserID, s.location.SessionID)
-			if e != nil {
-				continue
-			}
-			valid := false
-			for _, l := range locations {
-				if l.Generation == s.location.Generation {
-					valid = true
-				}
-			}
-			if !valid {
-				g.mu.Lock()
-				g.removeLocal(s)
-				g.mu.Unlock()
-				if s.close != nil {
-					s.close()
-				}
-			}
+	results := make([]RenewResult, len(ls))
+	var failure error
+	if batch, ok := g.cfg.Registry.(SessionLeaseRenewer); ok && len(ls) > 0 {
+		results = batch.RenewBatch(ctx, ls, g.cfg.LeaseTTL)
+		if len(results) != len(ls) {
+			g.leaseFailures.Add(1)
+			return
 		}
-	}
-	if err == nil {
-		var rooms []RoomMembership
-		for _, s := range g.sessions {
-			for room := range s.rooms {
-				rooms = append(rooms, RoomMembership{Location: s.location, RoomID: room})
-			}
+	} else {
+		err := g.cfg.Registry.Renew(ctx, ls, g.cfg.LeaseTTL)
+		// A legacy implementation may stop at the first stale session. Resolve
+		// fences owners but cannot prove the remaining leases were extended.
+		failure = err
+		if len(ls) == 0 && err != nil {
+			g.leaseFailures.Add(1)
+			return
 		}
-		if batch, ok := g.cfg.Registry.(RoomLeaseRenewer); ok {
-			err = batch.RenewRooms(ctx, rooms, g.cfg.LeaseTTL)
-		} else {
-			for _, m := range rooms {
-				if e := g.cfg.Registry.JoinRoom(ctx, m.Location, m.RoomID, g.cfg.LeaseTTL); e != nil {
-					err = e
+		for i, l := range ls {
+			results[i] = RenewResult{Location: l, Err: err}
+			if errors.Is(err, ErrStale) {
+				locations, e := g.cfg.Registry.Resolve(ctx, l.TenantID, l.UserID, l.SessionID)
+				if e != nil {
+					results[i].Err = e
+					continue
+				}
+				for _, current := range locations {
+					if current.Generation == l.Generation && current.NodeID == l.NodeID {
+						results[i].Err = nil
+						break
+					}
 				}
 			}
 		}
 	}
-	if err != nil {
+	var rooms []RoomMembership
+	for i, result := range results {
+		snapshot := snapshots[i]
+		if result.Location.DeliveryKey() != snapshot.location.DeliveryKey() || result.Location.NodeID != snapshot.location.NodeID {
+			failure = errors.Join(failure, ErrInvalid)
+			continue
+		}
+		if errors.Is(result.Err, ErrStale) {
+			g.mu.Lock()
+			removed := g.removeLocal(snapshot.session)
+			g.mu.Unlock()
+			if removed && snapshot.session.close != nil {
+				closed = append(closed, snapshot.session.close)
+			}
+			if removed && len(snapshot.rooms) > 0 {
+				roomIDs := make([]string, 0, len(snapshot.rooms))
+				for _, room := range snapshot.rooms {
+					roomIDs = append(roomIDs, room.RoomID)
+				}
+				_ = g.unregister(ctx, snapshot.location, roomIDs)
+			}
+			continue
+		}
+		if result.Err != nil {
+			failure = errors.Join(failure, result.Err)
+			continue
+		}
+		rooms = append(rooms, snapshot.rooms...)
+	}
+	if batch, ok := g.cfg.Registry.(RoomLeaseRenewer); ok {
+		failure = errors.Join(failure, batch.RenewRooms(ctx, rooms, g.cfg.LeaseTTL))
+	} else {
+		for _, m := range rooms {
+			failure = errors.Join(failure, g.cfg.Registry.JoinRoom(ctx, m.Location, m.RoomID, g.cfg.LeaseTTL))
+		}
+	}
+	if failure != nil {
 		g.leaseFailures.Add(1)
 		return
 	}
@@ -416,13 +546,14 @@ func (g *Gateway) Close(ctx context.Context) error {
 }
 
 type GatewayStats struct {
-	Ready                             bool
-	Sessions, Rooms, DedupeEntries    int
-	LeaseFailures, Enqueued, Rejected uint64
+	Ready                                 bool
+	Sessions, Rooms, DedupeEntries        int
+	LeaseFailures, Enqueued, Rejected     uint64
+	UnregisterFailures, UnregisterRetries uint64
 }
 
 func (g *Gateway) Stats() GatewayStats {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return GatewayStats{g.Ready(), len(g.sessions), len(g.rooms), len(g.dedupe), g.leaseFailures.Load(), g.delivered.Load(), g.rejected.Load()}
+	return GatewayStats{Ready: g.Ready(), Sessions: len(g.sessions), Rooms: len(g.rooms), DedupeEntries: len(g.dedupe), LeaseFailures: g.leaseFailures.Load(), Enqueued: g.delivered.Load(), Rejected: g.rejected.Load(), UnregisterFailures: g.unregisterFailures.Load(), UnregisterRetries: g.unregisterRetries.Load()}
 }
