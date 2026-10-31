@@ -1,86 +1,105 @@
 package orm
 
 import (
-	"math"
+	"context"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// PageRequest represents a standard pagination request from an API.
-type PageRequest struct {
-	Page  int      `json:"page" query:"page" form:"page"`
-	Size  int      `json:"size" query:"size" form:"size"`
-	Sorts []string `json:"sorts" query:"sorts" form:"sorts"` // e.g. "created_at desc"
-}
+type Direction string
 
-// PageResponse is a generic struct for returning paginated items.
+const (
+	Ascending  Direction = "asc"
+	Descending Direction = "desc"
+)
+
+type Sort struct {
+	Field     string    `json:"field"`
+	Direction Direction `json:"direction"`
+}
+type PageRequest struct {
+	Page  int    `json:"page"`
+	Size  int    `json:"size"`
+	Sorts []Sort `json:"sorts"`
+}
 type PageResponse[T any] struct {
 	TotalRows  int64 `json:"total_rows"`
-	TotalPages int   `json:"total_pages"`
+	TotalPages int64 `json:"total_pages"`
 	Page       int   `json:"page"`
 	Size       int   `json:"size"`
 	Items      []T   `json:"items"`
 }
 
-// GetPage safely gets the page number (1-indexed).
-func (p *PageRequest) GetPage() int {
-	if p.Page <= 0 {
-		return 1
+func (r *Repository[T]) page(req PageRequest) (PageRequest, int, error) {
+	if req.Page == 0 {
+		req.Page = 1
 	}
-	return p.Page
-}
-
-// GetSize safely gets the page size.
-func (p *PageRequest) GetSize() int {
-	if p.Size <= 0 {
-		return 10
-	}
-	if p.Size > 1000 {
-		return 1000 // Hard cap to prevent memory exhaustion
-	}
-	return p.Size
-}
-
-// GetOffset calculates the SQL offset.
-func (p *PageRequest) GetOffset() int {
-	return (p.GetPage() - 1) * p.GetSize()
-}
-
-// Paginate is a GORM Scope that automatically applies OFFSET, LIMIT, and ORDER BY.
-func Paginate(req PageRequest) func(db *gorm.DB) *gorm.DB {
-	return func(db *gorm.DB) *gorm.DB {
-		if len(req.Sorts) > 0 {
-			for _, sort := range req.Sorts {
-				db = db.Order(sort)
-			}
+	if req.Size == 0 {
+		req.Size = 10
+		if req.Size > r.opts.MaxPageSize {
+			req.Size = r.opts.MaxPageSize
 		}
-		return db.Offset(req.GetOffset()).Limit(req.GetSize())
 	}
+	if req.Page < 1 || req.Size < 1 || req.Size > r.opts.MaxPageSize {
+		return req, 0, ErrInvalidArgument
+	}
+	// Division bounds multiplication before it happens, including MaxInt input.
+	if req.Page-1 > r.opts.MaxOffset/req.Size {
+		return req, 0, ErrInvalidArgument
+	}
+	if len(req.Sorts) > 8 {
+		return req, 0, ErrInvalidArgument
+	}
+	seen := map[string]bool{}
+	for _, s := range req.Sorts {
+		if !r.sortable[s.Field] || seen[s.Field] || (s.Direction != Ascending && s.Direction != Descending) {
+			return req, 0, ErrInvalidArgument
+		}
+		seen[s.Field] = true
+	}
+	return req, (req.Page - 1) * req.Size, nil
+}
+func (r *Repository[T]) ordered(db *gorm.DB, sorts []Sort) *gorm.DB {
+	hasPK := false
+	for _, s := range sorts {
+		db = db.Order(clause.OrderByColumn{Column: clause.Column{Table: clause.CurrentTable, Name: s.Field}, Desc: s.Direction == Descending})
+		hasPK = hasPK || s.Field == r.pk
+	}
+	if !hasPK {
+		db = db.Order(clause.OrderByColumn{Column: clause.Column{Table: clause.CurrentTable, Name: r.pk}})
+	}
+	return db
 }
 
-// ExecutePagination runs the Count and Find queries, returning a populated PageResponse.
-// db should be the query with all filters applied (e.g. Where).
-func ExecutePagination[T any](db *gorm.DB, req PageRequest) (*PageResponse[T], error) {
-	var totalRows int64
-	var items []T
-
-	// Run Count before applying pagination offsets
-	if err := db.Model(new(T)).Count(&totalRows).Error; err != nil {
+// Paginate issues separate count/read statements. Totals can change under
+// concurrent writes. Use a repeatable-read transaction for snapshot consistency.
+// Filters must add predicates only (not limits, ordering, projections or groups).
+func (r *Repository[T]) Paginate(ctx context.Context, req PageRequest, filters ...Scope) (*PageResponse[T], error) {
+	req, offset, err := r.page(req)
+	if err != nil {
 		return nil, err
 	}
-
-	// Apply pagination and fetch items
-	if err := db.Scopes(Paginate(req)).Find(&items).Error; err != nil {
+	db, cancel, err := r.query(ctx)
+	if err != nil {
 		return nil, err
 	}
-
-	totalPages := int(math.Ceil(float64(totalRows) / float64(req.GetSize())))
-
-	return &PageResponse[T]{
-		TotalRows:  totalRows,
-		TotalPages: totalPages,
-		Page:       req.GetPage(),
-		Size:       req.GetSize(),
-		Items:      items,
-	}, nil
+	defer cancel()
+	db, err = applyFilters(db, filters)
+	if err != nil {
+		return nil, err
+	}
+	var total int64
+	if err := r.resultError("count", db.Session(&gorm.Session{}).Count(&total)); err != nil {
+		return nil, err
+	}
+	items := make([]T, 0)
+	if err := r.resultError("paginate", r.ordered(db.Session(&gorm.Session{}), req.Sorts).Offset(offset).Limit(req.Size).Find(&items)); err != nil {
+		return nil, err
+	}
+	pages := total / int64(req.Size)
+	if total%int64(req.Size) != 0 {
+		pages++
+	}
+	return &PageResponse[T]{TotalRows: total, TotalPages: pages, Page: req.Page, Size: req.Size, Items: items}, nil
 }

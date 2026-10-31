@@ -1,347 +1,131 @@
+// Run from the repository root: go run ./examples/db -list
 package main
 
 import (
 	"context"
-	"embed"
+	"errors"
+	"flag"
 	"fmt"
-	"log"
-
-	"github.com/glebarez/sqlite"
-	"github.com/thanhbvha/go-common/db/migration"
-	"github.com/thanhbvha/go-common/db/orm"
-	"github.com/thanhbvha/go-common/telemetry"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/plugin/opentelemetry/tracing"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
 )
 
-//go:embed sql/*.sql
-var migrationFS embed.FS
-
-// ---------------------------------------------------------
-// Models
-// ---------------------------------------------------------
-type Patient struct {
-	gorm.Model
-	FullName string
-	Age      int
-	Status   string
+type options struct {
+	backend string
+	demo    string
+	otel    bool
+}
+type demo struct {
+	name, description string
+	run               func(context.Context, options) error
 }
 
-type Department struct {
-	gorm.Model
-	Name string
+var demos = []demo{
+	{"backend", "configuration, requirements and verified capabilities", demoBackend},
+	{"crud", "create, bulk insert, lookup, zero-value patch and soft delete", demoCRUD},
+	{"pagination", "filtered pages, typed sorting and both cursor directions", demoPagination},
+	{"scope", "tenant policy retained across queries and transactions", demoScope},
+	{"upsert", "strict targets, DoNothing and explicit MySQL AnyUniqueKey", demoUpsert},
+	{"transactions", "commit, rollback, isolation, read-only and scope guards", demoTransactions},
+	{"cas", "optimistic concurrency and stale-version handling", demoCAS},
+	{"limits", "batch size, bulk count, payload and pagination limits", demoLimits},
+	{"manager", "multiple pools, dynamic Add and wrong-client rejection", demoManager},
+	{"admission", "bounded queue, ErrBusy and queued cancellation", demoAdmission},
+	{"lifecycle", "bounded shutdown, transaction draining and terminal Close", demoLifecycle},
+	{"native", "parameterized native SQL, aggregates and joins", demoNative},
+	{"errors", "safe errors.Is/As handling and backend error classification", demoErrors},
+	{"telemetry", "instance-owned traces, metrics and Monitor events", demoTelemetry},
 }
 
-type Doctor struct {
-	gorm.Model
-	Name         string
-	DepartmentID uint
-}
-
-type Visit struct {
-	gorm.Model
-	PatientID uint
-	DoctorID  uint
-	Diagnosis string
-}
-
-// ---------------------------------------------------------
-// Main Menu
-// ---------------------------------------------------------
 func main() {
-	fmt.Println("=== Database/ORM Module Examples ===")
-	dbConn := setupDatabaseAndSeed()
-
-	// Uncomment the example you want to run:
-
-	RunMultiDatabaseConfigExample()
-	RunPaginationExample(dbConn)
-	RunMigrationExample(dbConn)
-	// RunAggregateAndRawQueryExample(dbConn)
-	// RunTransactionExample(dbConn)
-	// RunComplexJoinExample(dbConn)
-}
-
-// =====================================================================
-// 0. Multi-Database Configuration & Connection Example
-// =====================================================================
-func RunMultiDatabaseConfigExample() {
-	fmt.Println("\n--- 0. Multi-Database Configuration Example ---")
-
-	// Create configuration for two separate PostgreSQL databases
-	configs := map[string]orm.Config{
-		"primary_db": {
-			Dialector: postgres.New(postgres.Config{
-				DSN:                  "host=localhost user=postgres password=password dbname=app_main port=5432 sslmode=disable TimeZone=Asia/Ho_Chi_Minh",
-				PreferSimpleProtocol: true,
-			}),
-			MaxOpenConns:    100,
-			MaxIdleConns:    10,
-			EnableTelemetry: true,
-		},
-		"analytics_db": {
-			Dialector: postgres.New(postgres.Config{
-				DSN:                  "host=localhost user=postgres password=password dbname=app_analytics port=5432 sslmode=disable TimeZone=Asia/Ho_Chi_Minh",
-				PreferSimpleProtocol: true,
-			}),
-			MaxOpenConns:    50,
-			MaxIdleConns:    5,
-			EnableTelemetry: false,
-		},
-	}
-
-	// Initialize the global ORM Manager.
-	// The second parameter specifies the default database.
-	// NOTE: In a real environment without these DBs running, this will return an error.
-	err := orm.Init(configs, "primary_db")
-	if err != nil {
-		fmt.Printf("Notice: Failed to connect to PostgreSQL (expected in this demo without a real DB running): %v\n", err)
-	} else {
-		// CRITICAL: Always close connections on application shutdown
-		defer orm.Close()
-		fmt.Println("Successfully connected to multiple databases!")
-	}
-
-	// Usage anywhere in your application:
-	// mainDB := orm.Get()               // Returns the default "primary_db"
-	// analyticsDB := orm.Get("analytics_db") // Returns the specific DB
-
-	fmt.Println("Configuration pattern demonstrated successfully.")
-}
-
-// =====================================================================
-// 1. Pagination Example (Using Generic Repository)
-// =====================================================================
-func RunPaginationExample(dbConn *gorm.DB) {
-	fmt.Println("\n--- 1. Fetching WAITING Patients (Page 1, Size 2) ---")
-	patientRepo := orm.NewRepository[Patient](dbConn)
-
-	req := orm.PageRequest{
-		Page:  1,
-		Size:  2,
-		Sorts: []string{"age desc"},
-	}
-
-	// Execute pagination via Generic Repository
-	resp, err := patientRepo.Paginate(context.Background(), req, "status = ?", "WAITING")
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Total Records: %d\n", resp.TotalRows)
-	fmt.Printf("Total Pages: %d\n", resp.TotalPages)
-	fmt.Printf("Current Page: %d\n", resp.Page)
-
-	for i, p := range resp.Items {
-		fmt.Printf("  %d. %s (Age: %d)\n", i+1, p.FullName, p.Age)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+		// run returns sanitized errors. Never print DSNs or unwrapped native errors.
+		slog.Error("ORM example failed", "error", err)
+		os.Exit(1)
 	}
 }
-
-// =====================================================================
-// 2. Aggregate & Raw SQL Example
-// =====================================================================
-func RunAggregateAndRawQueryExample(dbConn *gorm.DB) {
-	patientRepo := orm.NewRepository[Patient](dbConn)
-
-	type StatusCount struct {
-		Status string
-		Total  int
+func run(ctx context.Context, args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("db-example", flag.ContinueOnError)
+	flags.SetOutput(out)
+	opt := options{}
+	list := false
+	flags.StringVar(&opt.backend, "backend", "sqlite", "sqlite, postgres or mysql")
+	flags.StringVar(&opt.demo, "demo", "all", "all or comma-separated demo names")
+	flags.BoolVar(&opt.otel, "otel", false, "capture local traces/metrics for every demo")
+	flags.BoolVar(&list, "list", false, "list demos without connecting to a database")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
 	}
-
-	// Example A: Using Aggregate (Query Builder)
-	fmt.Println("\n--- 2A. Aggregate: Group by Status ---")
-	var aggResults []StatusCount
-	err := patientRepo.Aggregate(context.Background(), &aggResults, func(db *gorm.DB) *gorm.DB {
-		return db.Select("status, count(*) as total").Group("status")
-	})
-	if err != nil {
-		panic(err)
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected positional argument")
 	}
-	for _, res := range aggResults {
-		fmt.Printf("  Status: %-12s | Total: %d\n", res.Status, res.Total)
+	if list {
+		for _, d := range demos {
+			fmt.Fprintf(out, "%-14s %s\n", d.name, d.description)
+		}
+		return nil
 	}
-
-	// Example B: Using RawQuery (Manual SQL)
-	fmt.Println("\n--- 2B. RawQuery: Custom SQL (Age > 30) ---")
-	var rawResults []StatusCount
-	sqlQuery := `
-		SELECT status, count(*) as total
-		FROM patients
-		WHERE age > ?
-		GROUP BY status
-	`
-	err = patientRepo.RawQuery(context.Background(), sqlQuery, &rawResults, 30)
-	if err != nil {
-		panic(err)
+	if opt.backend != "sqlite" && opt.backend != "postgres" && opt.backend != "mysql" {
+		return fmt.Errorf("backend must be sqlite, postgres or mysql")
 	}
-	for _, res := range rawResults {
-		fmt.Printf("  Status: %-12s | Total: %d\n", res.Status, res.Total)
+	requested := map[string]bool{}
+	if opt.demo != "all" {
+		for _, name := range strings.Split(opt.demo, ",") {
+			requested[strings.TrimSpace(name)] = true
+		}
+		for name := range requested {
+			found := false
+			for _, d := range demos {
+				found = found || name == d.name
+			}
+			if !found {
+				return fmt.Errorf("unknown demo: %s (use -list)", name)
+			}
+		}
 	}
-}
-
-// =====================================================================
-// 3. Transaction Example (Using WithTx)
-// =====================================================================
-func RunTransactionExample(dbConn *gorm.DB) {
-	fmt.Println("\n--- 3. Transaction: Insert with WithTx ---")
-	patientRepo := orm.NewRepository[Patient](dbConn)
-
-	err := dbConn.Transaction(func(tx *gorm.DB) error {
-		// CRITICAL: Clone repo with Transaction DB using WithTx()
-		txRepo := patientRepo.WithTx(tx)
-
-		err := txRepo.Insert(context.Background(), &Patient{
-			FullName: "Tx Patient",
-			Age:      20,
-			Status:   "WAITING",
-		})
-		if err != nil {
-			fmt.Println("  [Error] Insert failed, rolling back...")
+	// Demo bodies print only synthetic IDs/counts and safe metadata.
+	for _, d := range demos {
+		if opt.demo != "all" && !requested[d.name] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-
-		fmt.Println("  [Success] Inserted Tx Patient within transaction.")
-		return nil // Returning nil will automatically Commit
-	})
-
-	if err != nil {
-		panic(err)
+		fmt.Fprintf(out, "\n[%s / %s] %s\n", opt.backend, d.name, d.description)
+		if err := d.run(ctx, opt); err != nil {
+			return fmt.Errorf("%s: %w", d.name, err)
+		}
 	}
+	fmt.Fprintln(out, "\nAll selected demos completed.")
+	return nil
 }
 
-// =====================================================================
-// 4. Complex JOIN Example
-// =====================================================================
-func RunComplexJoinExample(dbConn *gorm.DB) {
-	fmt.Println("\n--- 4. Aggregate: Complex JOIN (Patient -> Visit -> Doctor -> Department) ---")
-	patientRepo := orm.NewRepository[Patient](dbConn)
-
-	type VisitDetail struct {
-		PatientName    string
-		Diagnosis      string
-		DoctorName     string
-		DepartmentName string
+func require(condition bool, message string) error {
+	if !condition {
+		return fmt.Errorf("example assertion: %s", message)
 	}
-	var visitDetails []VisitDetail
-
-	// Query to get list of patients visiting Cardiology department
-	err := patientRepo.Aggregate(context.Background(), &visitDetails, func(db *gorm.DB) *gorm.DB {
-		return db.Select("patients.full_name as patient_name, visits.diagnosis, doctors.name as doctor_name, departments.name as department_name").
-			Joins("JOIN visits ON visits.patient_id = patients.id").
-			Joins("JOIN doctors ON doctors.id = visits.doctor_id").
-			Joins("JOIN departments ON departments.id = doctors.department_id").
-			Where("departments.name = ?", "Cardiology")
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	for _, vd := range visitDetails {
-		fmt.Printf("  Patient: %-15s | Diagnosis: %-20s | Doctor: %-15s | Dept: %s\n", vd.PatientName, vd.Diagnosis, vd.DoctorName, vd.DepartmentName)
-	}
+	return nil
 }
-
-// =====================================================================
-// 5. Database Migration Example (Using goose wrapper)
-// =====================================================================
-func RunMigrationExample(dbConn *gorm.DB) {
-	fmt.Println("\n--- 5. Database Migration: Running Up and Down ---")
-
-	// Extract the underlying *sql.DB from GORM
-	sqlDB, err := dbConn.DB()
-	if err != nil {
-		log.Fatalf("Failed to get raw SQL DB: %v", err)
+func expect(err, target error) error {
+	if !errors.Is(err, target) {
+		return fmt.Errorf("example expected %v", target)
 	}
-
-	// Initialize the migration manager using embedded filesystem
-	migrator, err := migration.New(migration.Options{
-		DB:      sqlDB,
-		Dialect: "sqlite3", // Using sqlite3 for this example
-		Dir:     "sql",     // Directory inside the embed.FS
-		FS:      migrationFS,
-	})
-	if err != nil {
-		log.Fatalf("Failed to initialize migration manager: %v", err)
-	}
-
-	// Print Status
-	fmt.Println(">> Current Status before migration:")
-	_ = migrator.Status()
-
-	// Apply migrations (Up)
-	fmt.Println("\n>> Applying Migrations (Up)...")
-	if err := migrator.Up(); err != nil {
-		log.Fatalf("Migration Up failed: %v", err)
-	}
-
-	fmt.Println("\n>> Current Status after Up:")
-	_ = migrator.Status()
-
-	// Rollback migrations (Down)
-	fmt.Println("\n>> Rolling back Migrations (Down)...")
-	if err := migrator.Down(); err != nil {
-		log.Fatalf("Migration Down failed: %v", err)
-	}
-
-	fmt.Println("\n>> Current Status after Down:")
-	_ = migrator.Status()
+	return nil
 }
-
-// ---------------------------------------------------------
-// Helper: Setup DB & Seed Data
-// ---------------------------------------------------------
-func setupDatabaseAndSeed() *gorm.DB {
-	// Initialize Telemetry
-	tel, err := telemetry.Init(context.Background(), telemetry.Config{
-		ServiceName:   "demo-db-service",
-		EnableTracing: true,
-		Endpoint:      "localhost:4317",
-	})
+func nativeFailure(operation string, err error) error {
 	if err == nil {
-		// In a real app, defer this in main()
-		defer tel.Shutdown(context.Background())
+		return nil
 	}
-
-	// 1. Initialize In-Memory SQLite connection
-	dbConn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
-	if err != nil {
-		panic("failed to connect to db")
-	}
-
-	// 2. Enable Telemetry Plugin for GORM
-	if err := dbConn.Use(tracing.NewPlugin()); err != nil {
-		fmt.Printf("Warning: failed to enable tracing: %v\n", err)
-	}
-
-	// 3. Auto-migrate schema
-	dbConn.AutoMigrate(&Patient{}, &Department{}, &Doctor{}, &Visit{})
-
-	// 4. Seed Data
-	patientRepo := orm.NewRepository[Patient](dbConn)
-	_ = patientRepo.InsertMany(context.Background(), []Patient{
-		{FullName: "Nguyen Van A", Age: 45, Status: "WAITING"},
-		{FullName: "Tran Thi B", Age: 32, Status: "IN_PROGRESS"},
-		{FullName: "Le Van C", Age: 28, Status: "WAITING"},
-		{FullName: "Pham Thi D", Age: 65, Status: "COMPLETED"},
-		{FullName: "Hoang Van E", Age: 50, Status: "WAITING"},
-	})
-
-	deptRepo := orm.NewRepository[Department](dbConn)
-	_ = deptRepo.InsertMany(context.Background(), []Department{{Name: "Cardiology"}, {Name: "Neurology"}})
-
-	doctorRepo := orm.NewRepository[Doctor](dbConn)
-	_ = doctorRepo.InsertMany(context.Background(), []Doctor{
-		{Name: "Dr. Smith", DepartmentID: 1},
-		{Name: "Dr. Strange", DepartmentID: 2},
-	})
-
-	visitRepo := orm.NewRepository[Visit](dbConn)
-	_ = visitRepo.InsertMany(context.Background(), []Visit{
-		{PatientID: 1, DoctorID: 1, Diagnosis: "Heart burn"},
-		{PatientID: 2, DoctorID: 2, Diagnosis: "Headache"},
-		{PatientID: 3, DoctorID: 1, Diagnosis: "High blood pressure"},
-	})
-
-	return dbConn
+	return fmt.Errorf("native example operation failed: %s", operation)
+}
+func cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }

@@ -1,182 +1,202 @@
-// Package orm provides a robust, production-ready database client using GORM.
-//
-// It includes features like multi-connection management (singleton manager),
-// connection pooling, automatic OpenTelemetry instrumentation, pagination utilities,
-// and a generic repository pattern for common CRUD operations.
-//
-// Basic usage:
-//
-//	err := orm.Init(map[string]orm.Config{
-//		"main": { Dialector: postgres.Open("dsn"), MaxOpenConns: 100 },
-//	})
-//	db := orm.Get("main")
+// Package orm provides instance-scoped GORM clients, bounded repositories and
+// explicit transaction scopes. PostgreSQL, MySQL and SQLite adapters expose their
+// verified capabilities. Open never runs migrations or silently emulates features.
 package orm
 
 import (
+	"context"
 	"errors"
-	"fmt"
+	"sort"
+	"strings"
 	"sync"
-
-	"gorm.io/gorm"
+	"unicode"
 )
 
-// Manager handles multiple ORM database connections.
+// Manager's zero value is usable. Do not copy after use. Lifecycle changes are
+// serialized; lookups never wait on network I/O. Close is terminal.
 type Manager struct {
-	dbs         map[string]*gorm.DB
-	defaultName string
+	once        sync.Once
+	gate        chan struct{}
 	mu          sync.RWMutex
+	clients     map[string]*Client
+	defaultName string
+	initialized bool
+	closed      bool
+	open        func(context.Context, Config) (*Client, error) // test seam
 }
 
-var (
-	globalManager *Manager
-	initMu        sync.Mutex
-	isInitialized bool
-)
-
-// Init initializes the global ORM manager with multiple configurations.
-// If defaultDBName is provided, it marks that key as the default DB.
-// If configs contains only 1 entry, it automatically becomes the default DB regardless.
-// Safe to call concurrently, guarantees initialization happens only once.
-func Init(configs map[string]Config, defaultDBName ...string) error {
-	initMu.Lock()
-	defer initMu.Unlock()
-
-	if isInitialized {
+func NewManager() *Manager { return &Manager{} }
+func (m *Manager) lock(ctx context.Context) error {
+	m.once.Do(func() { m.gate = make(chan struct{}, 1); m.gate <- struct{}{} })
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.gate:
+		if err := ctx.Err(); err != nil {
+			m.unlock()
+			return err
+		}
 		return nil
 	}
+}
+func (m *Manager) unlock() { m.gate <- struct{}{} }
+func validName(s string) bool {
+	if s == "" || len(s) > 128 || strings.TrimSpace(s) != s {
+		return false
+	}
+	for _, c := range s {
+		if unicode.IsControl(c) {
+			return false
+		}
+	}
+	return true
+}
+func (m *Manager) connect(ctx context.Context, cfg Config) (*Client, error) {
+	if m.open != nil {
+		return m.open(ctx, cfg)
+	}
+	return Open(ctx, cfg)
+}
 
+// Init validates before opening anything and publishes atomically. Failure
+// closes newly opened pools. A successful Init cannot be repeated.
+func (m *Manager) Init(ctx context.Context, configs map[string]Config, defaultName string) error {
+	if err := m.lock(ctx); err != nil {
+		return normalize("init", err)
+	}
+	defer m.unlock()
+	m.mu.RLock()
+	closed, initialized := m.closed, m.initialized
+	m.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if initialized {
+		return ErrAlreadyInitialized
+	}
 	if len(configs) == 0 {
-		return errors.New("no orm configurations provided")
+		return invalid("connections")
 	}
-
-	if globalManager == nil {
-		globalManager = &Manager{
-			dbs: make(map[string]*gorm.DB),
-		}
-	}
-
-	globalManager.mu.Lock()
-	defer globalManager.mu.Unlock()
-
-	// Connect to all configured databases
+	names := make([]string, 0, len(configs))
 	for name, cfg := range configs {
-		if _, exists := globalManager.dbs[name]; exists {
-			continue // Skip if already added via AddConnection
+		if !validName(name) {
+			return invalid("connection_name")
 		}
-
-		db, err := New(cfg)
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if defaultName == "" && len(names) == 1 {
+		defaultName = names[0]
+	}
+	if _, ok := configs[defaultName]; !ok {
+		return invalid("default_connection")
+	}
+	staged := make(map[string]*Client, len(configs))
+	for _, name := range names {
+		c, err := m.connect(ctx, configs[name])
 		if err != nil {
-			return fmt.Errorf("failed to connect to orm instance '%s': %w", name, err)
+			errs := []error{err}
+			for _, c := range staged {
+				errs = append(errs, c.Close(context.Background()))
+			}
+			return errors.Join(errs...)
 		}
-		globalManager.dbs[name] = db
+		staged[name] = c
 	}
-
-	// Determine the default DB name
-	if len(configs) == 1 && globalManager.defaultName == "" {
-		for name := range configs {
-			globalManager.defaultName = name
+	if err := ctx.Err(); err != nil {
+		errs := []error{normalize("init", err)}
+		for _, c := range staged {
+			errs = append(errs, c.Close(context.Background()))
 		}
-	} else if len(defaultDBName) > 0 && defaultDBName[0] != "" {
-		if _, exists := globalManager.dbs[defaultDBName[0]]; !exists {
-			return fmt.Errorf("default db name '%s' not found in configs", defaultDBName[0])
-		}
-		globalManager.defaultName = defaultDBName[0]
+		return errors.Join(errs...)
 	}
-
-	isInitialized = true
-	return nil
-}
-
-// AddConnection dynamically adds a new ORM connection at runtime.
-// If the manager has not been initialized yet, it will initialize it.
-// If setAsDefault is true (or if this is the very first connection), this connection becomes the default database.
-func AddConnection(name string, cfg Config, setAsDefault bool) error {
-	initMu.Lock()
-	if globalManager == nil {
-		globalManager = &Manager{
-			dbs: make(map[string]*gorm.DB),
-		}
-	}
-	initMu.Unlock()
-
-	globalManager.mu.Lock()
-	defer globalManager.mu.Unlock()
-
-	if _, exists := globalManager.dbs[name]; exists {
-		return fmt.Errorf("orm instance '%s' already exists", name)
-	}
-
-	db, err := New(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to connect to orm instance '%s': %w", name, err)
-	}
-
-	globalManager.dbs[name] = db
-
-	if setAsDefault || len(globalManager.dbs) == 1 {
-		globalManager.defaultName = name
-	}
-
-	return nil
-}
-
-// Get returns a GORM database instance by name.
-// If no name is provided (or empty), it returns the default database.
-// Panics if the manager is not initialized, the default is not set, or the name is not found.
-func Get(name ...string) *gorm.DB {
-	if globalManager == nil {
-		panic("orm manager is not initialized, call orm.Init or orm.AddConnection first")
-	}
-
-	globalManager.mu.RLock()
-	defer globalManager.mu.RUnlock()
-
-	targetName := globalManager.defaultName
-	if len(name) > 0 && name[0] != "" {
-		targetName = name[0]
-	}
-
-	if targetName == "" {
-		panic("no default orm configured and no name provided")
-	}
-
-	db, exists := globalManager.dbs[targetName]
-	if !exists {
-		panic(fmt.Sprintf("orm instance '%s' not found", targetName))
-	}
-
-	return db
-}
-
-// Close gracefully closes all database connections managed by this instance.
-// It is useful for graceful shutdown to prevent connection leaks.
-func (m *Manager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var errs []error
-	for name, db := range m.dbs {
-		sqlDB, err := db.DB()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to get sql.DB for '%s': %w", name, err))
-			continue
-		}
-		if err := sqlDB.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close db '%s': %w", name, err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing databases: %v", errs)
-	}
+	m.clients = staged
+	m.defaultName = defaultName
+	m.initialized = true
+	m.mu.Unlock()
 	return nil
 }
 
-// Close gracefully closes all database connections in the global manager.
-// Safe to call even if the manager is not initialized.
-func Close() error {
-	if globalManager == nil {
-		return nil
+// Add requires successful Init. Existing aliases are never replaced.
+func (m *Manager) Add(ctx context.Context, name string, cfg Config) error {
+	if !validName(name) {
+		return invalid("connection_name")
 	}
-	return globalManager.Close()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := m.lock(ctx); err != nil {
+		return normalize("add", err)
+	}
+	defer m.unlock()
+	m.mu.RLock()
+	closed, initialized := m.closed, m.initialized
+	_, exists := m.clients[name]
+	m.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if !initialized {
+		return invalid("manager_not_initialized")
+	}
+	if exists {
+		return ErrDuplicateConnection
+	}
+	c, err := m.connect(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(normalize("add", err), c.Close(context.Background()))
+	}
+	m.mu.Lock()
+	m.clients[name] = c
+	m.mu.Unlock()
+	return nil
+}
+func (m *Manager) Lookup(name string) (*Client, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, ErrClosed
+	}
+	if name == "" {
+		name = m.defaultName
+	}
+	c, ok := m.clients[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return c, nil
+}
+
+// Close starts every client drain, even when another client is slow. Retrying a
+// timed-out wait is safe; new lookups and lifecycle changes stay rejected.
+func (m *Manager) Close(ctx context.Context) error {
+	if err := m.lock(ctx); err != nil {
+		return normalize("close", err)
+	}
+	defer m.unlock()
+	m.mu.Lock()
+	m.closed = true
+	clients := make([]*Client, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
+	}
+	m.mu.Unlock()
+	var wg sync.WaitGroup
+	errs := make([]error, len(clients))
+	for i, c := range clients {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs[i] = c.Close(ctx) }()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

@@ -1,0 +1,80 @@
+name: orm
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go run -race ./examples/db -demo all -otel
+      - run: go test -race -count=10 ./db/orm/...
+      - run: go test ./db/orm -run '^$' -fuzz FuzzPageValidation -fuzztime 10s
+      - run: go test ./db/orm -run '^$' -fuzz FuzzCursorDecode -fuzztime 10s
+      - run: go test ./db/orm -run '^$' -fuzz FuzzBoundID -fuzztime 10s
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_DB: orm_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d orm_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      ORM_INTEGRATION_REQUIRED: '1'
+      ORM_POSTGRES_DSN: 'host=127.0.0.1 port=5432 user=postgres dbname=orm_test sslmode=disable'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags=integration -count=1 ./db/orm/...
+      - run: go run ./examples/db -backend postgres -demo all
+      - name: Record bounded-pool workload baseline
+        run: go test -tags=integration -run '^$' -bench BenchmarkPostgresCursor -benchtime=2s -benchmem ./db/orm
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          # Disposable CI credentials generated from this run, never production.
+          MYSQL_ROOT_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: orm_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      ORM_MYSQL_REQUIRED: '1'
+      ORM_MYSQL_DSN: root:${{ github.run_id }}-${{ github.run_attempt }}@tcp(127.0.0.1:3306)/orm_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags=integration -count=1 ./db/orm/...
+      - run: go run ./examples/db -backend mysql -demo all
