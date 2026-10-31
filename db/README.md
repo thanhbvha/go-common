@@ -18,10 +18,24 @@ cfg := mongodb.DefaultConfig()
 cfg.URI = "mongodb://localhost:27017"
 cfg.EnableTelemetry = true // Auto-trace BSON queries
 
-client, _ := mongodb.NewClient(ctx, cfg)
-mongoRepo := mongodb.NewRepository[Patient](client, "my_db", "patients")
+client, err := mongodb.New(ctx, cfg)
+if err != nil {
+    return err
+}
+defer func() {
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _ = client.Disconnect(shutdownCtx)
+}()
+mongoRepo := mongodb.NewRepository[Patient](client.Database("my_db"), "patients")
 mongoRepo.InsertOne(ctx, &Patient{Name: "Jane Doe"})
 ```
+
+For instance-scoped management, bounded reads, pagination and production configuration,
+see [MongoDB usage](../examples/db_mongodb/README.md). Query document contents are
+excluded from MongoDB traces, including when telemetry is enabled.
+See also the [MongoDB production APIs](mongodb/README.md) for graceful transaction
+draining, capability checks, typed errors, cursor pagination and transaction metrics.
 
 ## Database Migrations
 

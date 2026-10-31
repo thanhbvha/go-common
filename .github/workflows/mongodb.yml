@@ -1,0 +1,23 @@
+name: mongodb
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [replica, secure]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit tests and race checks
+        run: go test -race -count=10 ./db/mongodb
+      - name: MongoDB integration (${{ matrix.fixture }})
+        run: bash .github/scripts/test-mongodb.sh '${{ matrix.fixture }}'
