@@ -14,6 +14,14 @@ import (
 
 // Component manages listener creation, serving, and graceful shutdown for server.
 func Component(name, address string, server *grpcframework.Server) foundation.Component {
+	return ComponentWithShutdown(name, address, server, nil)
+}
+
+// ComponentWithShutdown uses an application's shutdown callback instead of the
+// native stop policy. For go-common/grpc pass srv.Server and srv.Shutdown so
+// health status, drain timeout and terminal failures stay with the wrapper.
+// A nil callback preserves Component's native GracefulStop/Stop behavior.
+func ComponentWithShutdown(name, address string, server *grpcframework.Server, shutdown func(context.Context) error) foundation.Component {
 	var listener net.Listener
 	var closeOnce sync.Once
 	var closeErr error
@@ -57,6 +65,9 @@ func Component(name, address string, server *grpcframework.Server) foundation.Co
 		Stop: func(ctx context.Context) error {
 			if server == nil {
 				return nil
+			}
+			if shutdown != nil {
+				return errors.Join(shutdown(ctx), closeListener())
 			}
 			done := make(chan struct{})
 			go func() {

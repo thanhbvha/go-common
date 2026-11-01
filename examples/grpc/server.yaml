@@ -1,0 +1,17 @@
+# Local loopback template. Use private *.local.yaml for tokens, or GRPC_DEMO_TOKEN.
+token: ""
+# All relative certificate paths are resolved from the working directory.
+addr: 127.0.0.1:50051
+insecure: true
+cert: ""
+key: ""
+ca: ""
+server_name: ""
+reflection: false
+demo_errors: false
+shutdown_timeout: 10s
+startup_timeout: 30s
+app_shutdown_timeout: 30s
+ready_delay: 0s
+otlp_endpoint: ""
+otlp_insecure: false

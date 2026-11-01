@@ -234,3 +234,15 @@ After termination, callers receive the same retained result as `Run`: nil for
   hijacked connections.
 - Component errors are logged as returned. Redact credentials, tokens, connection
   strings, and sensitive payloads before returning an error.
+
+### gRPC wrapper shutdown
+
+For `github.com/thanhbvha/go-common/grpc.Server`, use the adapter's
+`ComponentWithShutdown(name, address, srv.Server, srv.Shutdown)`. It binds the
+listener in Start, serves in Run and invokes the supplied callback in Stop. This
+preserves wrapper health transitions, configured drain deadlines and forced-stop
+errors. `Component(name, address, nativeServer)` remains available for native gRPC
+servers. Do not start a second serving/signal loop for the same server.
+
+The runnable [gRPC foundation example](../examples/grpc/README.md#foundation-lifecycle-variant)
+shows dependency ordering, readiness, YAML/env configuration and graceful/forced drain.

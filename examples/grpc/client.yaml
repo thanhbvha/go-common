@@ -1,0 +1,13 @@
+# Local loopback template. Use private *.local.yaml for tokens, or GRPC_DEMO_TOKEN.
+token: ""
+target: localhost:50051
+insecure: true
+cert: ""
+key: ""
+ca: ""
+server_name: ""
+scenario: basic
+message: Hello gRPC
+timeout: 3s
+otlp_endpoint: ""
+otlp_insecure: false

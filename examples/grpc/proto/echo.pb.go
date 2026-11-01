@@ -24,6 +24,8 @@ const (
 type EchoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+	DelayMs       uint32                 `protobuf:"varint,2,opt,name=delay_ms,json=delayMs,proto3" json:"delay_ms,omitempty"`
+	Count         uint32                 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -63,6 +65,20 @@ func (x *EchoRequest) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *EchoRequest) GetDelayMs() uint32 {
+	if x != nil {
+		return x.DelayMs
+	}
+	return 0
+}
+
+func (x *EchoRequest) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
 }
 
 type EchoResponse struct {
@@ -113,15 +129,19 @@ var File_proto_echo_proto protoreflect.FileDescriptor
 
 const file_proto_echo_proto_rawDesc = "" +
 	"\n" +
-	"\x10proto/echo.proto\x12\x04echo\"'\n" +
+	"\x10proto/echo.proto\x12\x04echo\"X\n" +
 	"\vEchoRequest\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"(\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\x12\x19\n" +
+	"\bdelay_ms\x18\x02 \x01(\rR\adelayMs\x12\x14\n" +
+	"\x05count\x18\x03 \x01(\rR\x05count\"(\n" +
 	"\fEchoResponse\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage2\xaa\x01\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage2\xe3\x01\n" +
 	"\vEchoService\x12/\n" +
 	"\x04Echo\x12\x11.echo.EchoRequest\x1a\x12.echo.EchoResponse\"\x00\x124\n" +
 	"\tEchoError\x12\x11.echo.EchoRequest\x1a\x12.echo.EchoResponse\"\x00\x124\n" +
-	"\tEchoPanic\x12\x11.echo.EchoRequest\x1a\x12.echo.EchoResponse\"\x00B;Z9github.com/thanhbvha/go-common/examples/grpc_simple/protob\x06proto3"
+	"\tEchoPanic\x12\x11.echo.EchoRequest\x1a\x12.echo.EchoResponse\"\x00\x127\n" +
+	"\n" +
+	"EchoStream\x12\x11.echo.EchoRequest\x1a\x12.echo.EchoResponse\"\x000\x01B4Z2github.com/thanhbvha/go-common/examples/grpc/protob\x06proto3"
 
 var (
 	file_proto_echo_proto_rawDescOnce sync.Once
@@ -144,11 +164,13 @@ var file_proto_echo_proto_depIdxs = []int32{
 	0, // 0: echo.EchoService.Echo:input_type -> echo.EchoRequest
 	0, // 1: echo.EchoService.EchoError:input_type -> echo.EchoRequest
 	0, // 2: echo.EchoService.EchoPanic:input_type -> echo.EchoRequest
-	1, // 3: echo.EchoService.Echo:output_type -> echo.EchoResponse
-	1, // 4: echo.EchoService.EchoError:output_type -> echo.EchoResponse
-	1, // 5: echo.EchoService.EchoPanic:output_type -> echo.EchoResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	0, // 3: echo.EchoService.EchoStream:input_type -> echo.EchoRequest
+	1, // 4: echo.EchoService.Echo:output_type -> echo.EchoResponse
+	1, // 5: echo.EchoService.EchoError:output_type -> echo.EchoResponse
+	1, // 6: echo.EchoService.EchoPanic:output_type -> echo.EchoResponse
+	1, // 7: echo.EchoService.EchoStream:output_type -> echo.EchoResponse
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name

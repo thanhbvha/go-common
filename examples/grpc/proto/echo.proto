@@ -2,16 +2,19 @@ syntax = "proto3";
 
 package echo;
 
-option go_package = "github.com/thanhbvha/go-common/examples/grpc_simple/proto";
+option go_package = "github.com/thanhbvha/go-common/examples/grpc/proto";
 
 service EchoService {
     rpc Echo (EchoRequest) returns (EchoResponse) {}
     rpc EchoError (EchoRequest) returns (EchoResponse) {}
     rpc EchoPanic (EchoRequest) returns (EchoResponse) {}
+    rpc EchoStream (EchoRequest) returns (stream EchoResponse) {}
 }
 
 message EchoRequest {
     string message = 1;
+    uint32 delay_ms = 2;
+    uint32 count = 3;
 }
 
 message EchoResponse {

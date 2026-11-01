@@ -14,7 +14,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/introspection"
-	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
+	"github.com/thanhbvha/go-common/examples/graphql/graph/model"
 	gqlparser "github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 )
@@ -612,7 +612,7 @@ func (ec *executionContext) _Post_author(ctx context.Context, field graphql.Coll
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v *model.User) graphql.Marshaler {
-			return ec.marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUser(ctx, selections, v)
+			return ec.marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUser(ctx, selections, v)
 		},
 		true,
 		true,
@@ -645,7 +645,7 @@ func (ec *executionContext) _Query_users(ctx context.Context, field graphql.Coll
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.User) graphql.Marshaler {
-			return ec.marshalNUser2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUserᚄ(ctx, selections, v)
+			return ec.marshalNUser2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUserᚄ(ctx, selections, v)
 		},
 		true,
 		true,
@@ -689,7 +689,7 @@ func (ec *executionContext) _Query_posts(ctx context.Context, field graphql.Coll
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.Post) graphql.Marshaler {
-			return ec.marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐPostᚄ(ctx, selections, v)
+			return ec.marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐPostᚄ(ctx, selections, v)
 		},
 		true,
 		true,
@@ -855,7 +855,7 @@ func (ec *executionContext) _User_posts(ctx context.Context, field graphql.Colle
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.Post) graphql.Marshaler {
-			return ec.marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐPostᚄ(ctx, selections, v)
+			return ec.marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐPostᚄ(ctx, selections, v)
 		},
 		true,
 		true,
@@ -2642,11 +2642,11 @@ func (ec *executionContext) marshalNInt2int(ctx context.Context, sel ast.Selecti
 	return res
 }
 
-func (ec *executionContext) marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐPostᚄ(ctx context.Context, sel ast.SelectionSet, v []*model.Post) graphql.Marshaler {
+func (ec *executionContext) marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐPostᚄ(ctx context.Context, sel ast.SelectionSet, v []*model.Post) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
 		fc.Result = &v[i]
-		return ec.marshalNPost2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐPost(ctx, sel, v[i])
+		return ec.marshalNPost2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐPost(ctx, sel, v[i])
 	})
 
 	for _, e := range ret {
@@ -2658,7 +2658,7 @@ func (ec *executionContext) marshalNPost2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑc
 	return ret
 }
 
-func (ec *executionContext) marshalNPost2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐPost(ctx context.Context, sel ast.SelectionSet, v *model.Post) graphql.Marshaler {
+func (ec *executionContext) marshalNPost2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐPost(ctx context.Context, sel ast.SelectionSet, v *model.Post) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
@@ -2684,15 +2684,15 @@ func (ec *executionContext) marshalNString2string(ctx context.Context, sel ast.S
 	return res
 }
 
-func (ec *executionContext) marshalNUser2githubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUser(ctx context.Context, sel ast.SelectionSet, v model.User) graphql.Marshaler {
+func (ec *executionContext) marshalNUser2githubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUser(ctx context.Context, sel ast.SelectionSet, v model.User) graphql.Marshaler {
 	return ec._User(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNUser2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUserᚄ(ctx context.Context, sel ast.SelectionSet, v []*model.User) graphql.Marshaler {
+func (ec *executionContext) marshalNUser2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUserᚄ(ctx context.Context, sel ast.SelectionSet, v []*model.User) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
 		fc.Result = &v[i]
-		return ec.marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUser(ctx, sel, v[i])
+		return ec.marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUser(ctx, sel, v[i])
 	})
 
 	for _, e := range ret {
@@ -2704,7 +2704,7 @@ func (ec *executionContext) marshalNUser2ᚕᚖgithubᚗcomᚋthanhbvhaᚋgoᚑc
 	return ret
 }
 
-func (ec *executionContext) marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphql_webᚋgraphᚋmodelᚐUser(ctx context.Context, sel ast.SelectionSet, v *model.User) graphql.Marshaler {
+func (ec *executionContext) marshalNUser2ᚖgithubᚗcomᚋthanhbvhaᚋgoᚑcommonᚋexamplesᚋgraphqlᚋgraphᚋmodelᚐUser(ctx context.Context, sel ast.SelectionSet, v *model.User) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")

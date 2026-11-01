@@ -2,8 +2,8 @@ package graph
 
 import (
 	"context"
-	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
-	"github.com/thanhbvha/go-common/examples/graphql_web/service"
+	"github.com/thanhbvha/go-common/examples/graphql/graph/model"
+	"github.com/thanhbvha/go-common/examples/graphql/service"
 	common "github.com/thanhbvha/go-common/graphql"
 	"github.com/thanhbvha/go-common/xerrors"
 )

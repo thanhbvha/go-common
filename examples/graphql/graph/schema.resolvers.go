@@ -8,8 +8,8 @@ package graph
 import (
 	"context"
 
-	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
-	"github.com/thanhbvha/go-common/examples/graphql_web/service"
+	"github.com/thanhbvha/go-common/examples/graphql/graph/model"
+	"github.com/thanhbvha/go-common/examples/graphql/service"
 )
 
 // Author is the resolver for the author field.

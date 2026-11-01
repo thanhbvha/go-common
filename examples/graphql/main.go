@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/examples/graphql_web/graph"
+	"github.com/thanhbvha/go-common/examples/graphql/graph"
 	common_graphql "github.com/thanhbvha/go-common/graphql"
 	echoadapter "github.com/thanhbvha/go-common/graphql/adapter/echo"
 	fiberadapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
