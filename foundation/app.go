@@ -15,8 +15,9 @@ import (
 var errShutdownRequested = errors.New("foundation: shutdown requested")
 
 type runResult struct {
-	component string
-	err       error
+	component  string
+	err        error
+	contextErr error
 }
 
 // App supervises registered components through startup, runtime, and shutdown.
@@ -176,14 +177,16 @@ func (a *App) Run(parent context.Context) error {
 		select {
 		case result := <-runResults:
 			primaryErr = runtimeComponentError(result)
-			cancel(primaryErr)
+			if primaryErr != nil {
+				cancel(primaryErr)
+			}
 		default:
 			if a.transitionToRunning(runCtx) {
 				a.logInfo("application started", "name", a.cfg.Name)
 				select {
 				case result := <-runResults:
-					if runCtx.Err() == nil {
-						primaryErr = runtimeComponentError(result)
+					primaryErr = runtimeComponentError(result)
+					if primaryErr != nil {
 						cancel(primaryErr)
 					}
 				case <-runCtx.Done():
@@ -198,6 +201,17 @@ func (a *App) Run(parent context.Context) error {
 	cancel(errShutdownRequested)
 	a.logInfo("application stopping", "name", a.cfg.Name)
 	shutdownErr := a.stop(started, runnerDone)
+	// Results are buffered before runners signal completion. Collect every
+	// available failure, including errors produced while draining on cancellation.
+collectResults:
+	for {
+		select {
+		case result := <-runResults:
+			primaryErr = errors.Join(primaryErr, runtimeComponentError(result))
+		default:
+			break collectResults
+		}
+	}
 	result := errors.Join(primaryErr, shutdownErr)
 	a.finish(result)
 	return result
@@ -272,7 +286,8 @@ func (a *App) start(runCtx context.Context, components []Component) ([]Component
 
 func (a *App) runComponent(ctx context.Context, component Component, results chan<- runResult, done chan<- struct{}) {
 	defer close(done)
-	results <- runResult{component: component.Name, err: call(component.Run, ctx)}
+	err := call(component.Run, ctx)
+	results <- runResult{component: component.Name, err: err, contextErr: ctx.Err()}
 }
 
 func (a *App) stop(started []Component, runnerDone map[string]<-chan struct{}) error {
@@ -373,10 +388,34 @@ func (a *App) cleanupLateStart(component Component, pending <-chan error) {
 }
 
 func runtimeComponentError(result runResult) error {
+	if result.contextErr != nil && (result.err == nil || cancellationOnly(result.err, result.contextErr)) {
+		return nil
+	}
 	if result.err == nil {
 		result.err = ErrUnexpectedExit
 	}
 	return &ComponentError{Component: result.component, Phase: PhaseRun, Err: result.err}
+}
+
+// A joined cancellation and a real failure must still be reported. Walk error
+// trees rather than using errors.Is, which matches any child of errors.Join.
+func cancellationOnly(err, expected error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !cancellationOnly(child, expected) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped := errors.Unwrap(err); wrapped != nil {
+		return cancellationOnly(wrapped, expected)
+	}
+	return err == expected
 }
 
 func (a *App) logInfo(message string, args ...any) {

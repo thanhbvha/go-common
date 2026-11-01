@@ -1,288 +1,236 @@
 # Foundation
 
-`foundation` is a lightweight, framework-agnostic application supervisor. It
-starts resources in dependency order, supervises long-running services, exposes
-lifecycle readiness, and performs bounded LIFO shutdown.
+`foundation` supervises application startup, long-running components, readiness,
+and graceful shutdown. Dependencies are wired explicitly; the core does not load
+configuration or initialize databases, brokers, or telemetry.
 
-> **Breaking v1 change:** the former `NewApp`, `OnStart`, `OnShutdown`, and
-> parameterless `Run` API was removed intentionally. Follow the migration table
-> below when upgrading.
+## Quick Start
 
-## Why Use It
+Use `foundation/adapter/nethttp` for net/http, Gin, and Echo servers:
 
-- Startup failures roll back resources that already started.
-- HTTP servers and workers are supervised; runtime failures stop the process
-  instead of disappearing in detached goroutines.
-- `SIGINT`, `SIGTERM`, parent-context cancellation, and programmatic shutdown
-  share one lifecycle path.
-- Startup and shutdown have total deadlines, including callbacks that ignore
-  context cancellation.
-- Panics become component errors with stack traces.
-- Readiness is down before startup completes and before draining begins.
-- Core code does not initialize config, databases, Redis, or telemetry
-  implicitly; dependencies remain explicit and testable.
+```go
+package main
 
-## Lifecycle Ownership
+import (
+    "context"
+    "log"
+    "net/http"
+    "time"
 
-Foundation is the lifecycle and graceful-shutdown owner for an application that
-uses it. It handles `SIGINT`/`SIGTERM` by default, cancels the application
-context, drains registered components in reverse dependency order, and returns
-startup, runtime, or shutdown failures to `main`.
+    "github.com/thanhbvha/go-common/foundation"
+    foundationhttp "github.com/thanhbvha/go-common/foundation/adapter/nethttp"
+    healthhttp "github.com/thanhbvha/go-common/health/handler/nethttp"
+)
 
-Do not create a `utils/graceful.Shutdown` beside a Foundation app and do not
-register the same server or dependency in both systems. Combining two lifecycle
-coordinators can cause duplicate signal handling, double shutdown, lost cleanup
-errors, and resources closing in the wrong order.
+func run(ctx context.Context) error {
+    app, err := foundation.New(foundation.Config{
+        Name:            "orders-api",
+        Version:         "v1.0.0",
+        StartupTimeout:  30 * time.Second,
+        ShutdownTimeout: 30 * time.Second,
+    })
+    if err != nil {
+        return err
+    }
 
-Use exactly one of these models:
+    mux := http.NewServeMux()
+    mux.Handle("GET /ready", healthhttp.ReadyHandler(app.Health()))
+    mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+    })
+    server := &http.Server{
+        Addr:              ":8080",
+        Handler:           mux,
+        ReadHeaderTimeout: 5 * time.Second,
+    }
+    if err := app.Register(foundationhttp.Component("http", server)); err != nil {
+        return err
+    }
+    return app.Run(ctx)
+}
 
-| Application type | Lifecycle owner |
-| --- | --- |
-| New service with managed resources, servers, or workers | `foundation.App` |
-| Legacy/minimal application not using Foundation | `utils/graceful` |
-| Foundation embedded in a process that already owns signals | `foundation.App` with `WithoutSignals()` |
+func main() {
+    if err := run(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+}
+```
 
-Foundation does not import or delegate to `utils/graceful`; its lifecycle is
-implemented directly because it also supervises startup rollback, runtime
-failure, readiness, panic recovery, and dependency-safe teardown.
+Runnable [examples](../examples/foundation) cover net/http, Fiber, a worker, and
+a service with logging, telemetry, and dependency health.
 
-### Rules For MCP And Code Generators
-
-When generating a Foundation bootstrap:
-
-1. Create one `foundation.App` and check the error from `foundation.New`.
-2. Register dependencies first and servers last so LIFO shutdown drains traffic
-   before closing dependencies.
-3. Put blocking work in `Component.Run` or `foundation.Worker`; never launch an
-   unmanaged goroutine from `Component.Start`.
-4. Use a framework adapter for net/http, Fiber, or gRPC instead of calling
-   `Listen`, `Serve`, or `GracefulStop` directly from `main`.
-5. Return `app.Run(ctx)` from the bootstrap and propagate its error to the
-   process owner.
-6. Never generate `graceful.NewShutdown`, `graceful.Register`, or
-   `graceful.Wait` in the same application.
-
-## Lifecycle
+## Lifecycle Contract
 
 ```text
 Created -> Starting -> Running -> Stopping -> Stopped
               |           |          |
               +-----------+----------+-----> Failed
-
-Start: registration order, sequential
-Run:   concurrent and supervised
-Stop:  reverse registration order, sequential
 ```
 
-`Start`, `Run`, and `Stop` are optional, but each component must provide at
-least one callback. Components may only be registered before `Run` begins, and
-an `App` may only run once.
+Create an app with `New`, register components with `Register`, and call `Run(ctx)`
+once. Registration closes when `Run` begins. Component names must be unique.
 
-## Quick Start
+| Callback | Execution | Responsibility |
+| --- | --- | --- |
+| `Start(ctx)` | Sequential, registration order | Initialize and return; respect the shared startup deadline |
+| `Run(ctx)` | Concurrent, supervised | Block while serving or working; drain when the application context is canceled |
+| `Stop(ctx)` | Sequential, reverse registration order | Release resources within the shared shutdown deadline |
+
+Each component needs at least one callback. Register dependencies first and
+servers last. Shutdown invokes a component's `Stop`, waits for its runner to
+finish, and then moves to the preceding dependency. Startup failure rolls back
+components whose initialization completed successfully. A failing `Start` must
+clean up any partial initialization before returning its error.
+
+Foundation owns OS signals and shutdown for the application. It handles
+`SIGINT` and `SIGTERM` by default. Use one lifecycle coordinator and let adapters
+own their listeners. Put blocking work in `Component.Run` or `Worker`; return
+initialization work from `Start` without launching unmanaged server goroutines.
+
+## Components And Helpers
+
+`Component` pairs initialization, runtime work, and cleanup:
 
 ```go
-app, err := foundation.New(foundation.Config{
-    Name:            "orders-api",
-    Version:         "v1.0.0",
-    StartupTimeout:  30 * time.Second,
-    ShutdownTimeout: 30 * time.Second,
-})
+if err := app.Register(foundation.Component{
+    Name:  "consumer",
+    Start: consumer.Connect,
+    Run:   consumer.Consume,
+    Stop:  consumer.Close,
+}); err != nil {
+    return err
+}
+```
+
+| Helper | Callbacks | Use |
+| --- | --- | --- |
+| `Resource(name, start, stop)` | `Start`, `Stop` | Database, cache, telemetry, or another initialized dependency |
+| `Worker(name, run)` | `Run` | Context-aware background work |
+| `Closer(name, closer)` | `Stop` | An already acquired `io.Closer` |
+
+A worker returning before application cancellation is a runtime failure, even
+when it returns `nil` (`ErrUnexpectedExit`). During cancellation, `nil` and
+errors consisting only of the application context's cancellation/deadline error
+are normal exits. Other errors, including flush failures, joined cancellation
+and failure errors, and panics, are retained in the terminal result.
+
+## Server Adapters
+
+| Adapter | Constructor | Server configuration |
+| --- | --- | --- |
+| net/http, Gin, Echo | `nethttp.Component(name, server, options...)` | Explicit address, non-nil handler, effective header read timeout |
+| Fiber | `fiber.Component(name, address, app, options...)` | Non-nil app with a positive `ReadTimeout` |
+| gRPC | `grpc.Component(name, address, server)` | Non-nil server; configure transport credentials and message limits when constructing it |
+
+Adapters live under `foundation/adapter`. Gin and Echo engines implement
+`http.Handler` and can be assigned to `http.Server.Handler`. Fiber uses its
+dedicated adapter.
+
+All adapters bind their TCP listener during `Start`. An invalid or occupied
+address fails startup before readiness becomes healthy. Rollback closes the
+owned listener even if `Run` has not begun. The net/http adapter updates
+`server.Addr` to the bound address, including the assigned port when using `:0`.
+
+For net/http, set `ReadHeaderTimeout > 0`, or leave it at zero and set
+`ReadTimeout > 0`. Fiber requires `ReadTimeout > 0`. The HTTP and Fiber adapters
+accept `AllowUnsafeTimeouts()` only as an explicit opt-out when an upstream
+proxy enforces an equivalent limit or a documented deployment requirement
+provides equivalent protection.
+
+### HTTPS
+
+The net/http adapter serves HTTP when `server.TLSConfig` is nil. A non-nil
+`TLSConfig` enables HTTPS through `http.Server.ServeTLS`; it must provide
+`Certificates`, `GetCertificate`, or `GetConfigForClient`. An empty TLS
+configuration is rejected during startup, before binding the listener.
+
+Load deployment-provided certificate files before registering the server:
+
+```go
+certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
 if err != nil {
     return err
 }
-
-mux := http.NewServeMux()
-mux.Handle("GET /ready", healthhttp.ReadyHandler(app.Health()))
-mux.HandleFunc("GET /orders", listOrders)
-
-server := &http.Server{
-    Addr:              ":8080",
-    Handler:           mux,
-    ReadHeaderTimeout: 5 * time.Second,
+server.TLSConfig = &tls.Config{
+    MinVersion:   tls.VersionTLS12,
+    Certificates: []tls.Certificate{certificate},
 }
-if err := app.Register(foundationhttp.Component("http", server)); err != nil {
+if err := app.Register(foundationhttp.Component("https", server)); err != nil {
     return err
 }
-
-return app.Run(context.Background())
 ```
 
-The net/http adapter also supports Gin and Echo because both engines implement
-`http.Handler`:
+Import `crypto/tls` for this configuration. Certificate callbacks follow the
+standard library contract; invalid certificates or callback errors fail TLS
+handshakes. Configure the server before starting the app. If TLS terminates at
+a trusted reverse proxy, the internal HTTP server can keep `TLSConfig` nil.
+The Fiber adapter serves a plain TCP listener; configure TLS at a trusted proxy
+or supply a custom component for a TLS listener. gRPC transport security is
+configured on `grpc.Server`.
 
-```go
-server := &http.Server{Addr: ":8080", Handler: ginEngine}
-// or: Handler: echoApp
-app.Register(foundationhttp.Component("http", server))
-```
+## Configuration And Options
 
-Fiber and gRPC use dedicated adapters:
+| Configuration | Behavior |
+| --- | --- |
+| `Name` | Required application name |
+| `Version` | Optional application version, used by the default health checker |
+| `StartupTimeout` | Total startup deadline; zero defaults to 30 seconds |
+| `ShutdownTimeout` | Total shutdown deadline; zero defaults to 30 seconds |
 
-```go
-fiberApp := fiber.New(fiber.Config{ReadTimeout: 10 * time.Second})
-app.Register(foundationfiber.Component("fiber", ":8080", fiberApp))
-app.Register(foundationgrpc.Component("grpc", ":50051", grpcServer))
-```
+Negative timeouts are rejected. Names, versions, and component names are trimmed,
+limited to 128 bytes, and must not contain Unicode control/format characters.
 
-Every server adapter binds its listener during `Start`, so an invalid or busy
-address fails startup before readiness becomes healthy. Rollback also closes
-the owned listener even when `Run` never begins.
+| Option | Behavior |
+| --- | --- |
+| `WithLogger(logger)` | Supply the structured `Info`/`Error` logging contract; defaults to `slog.Default()` |
+| `WithHealthChecker(checker)` | Supply the application's dependency health checker |
+| `WithSignals(signals...)` | Replace the default signal set with a non-empty set |
+| `WithoutSignals()` | Disable signal handling for tests or an embedding process |
 
-The net/http adapter rejects a nil handler and requires an effective
-`ReadHeaderTimeout` or `ReadTimeout`. The Fiber adapter requires a positive
-`ReadTimeout`. If an upstream proxy enforces an equivalent limit, applications
-may opt out explicitly with the adapter's `AllowUnsafeTimeouts()` option.
-
-## Components
-
-### Resource
-
-Use a resource for a dependency with initialization and cleanup:
-
-```go
-app.Register(foundation.Resource(
-    "redis",
-    func(ctx context.Context) error { return redisClient.Connect(ctx) },
-    func(context.Context) error { return redisClient.Close() },
-))
-```
-
-If a later component fails startup, Redis is closed automatically during
-rollback.
-
-### Worker
-
-`Worker` functions should block until their context is canceled. Returning
-while the app is still running—whether with an error or `nil`—is treated as a
-runtime failure.
-
-```go
-app.Register(foundation.Worker("consumer", func(ctx context.Context) error {
-    return consumer.Consume(ctx)
-}))
-```
-
-### Generic component
-
-Use `Component` when one unit needs all three phases:
-
-```go
-app.Register(foundation.Component{
-    Name:  "service",
-    Start: service.Connect,
-    Run:   service.Serve,
-    Stop:  service.Shutdown,
-})
-```
-
-`Closer(name, io.Closer)` is available for shutdown-only resources.
+`New` returns an error for nil options, loggers, health checkers, or signals.
+When embedding Foundation, pass the owning process's context to `Run` and use
+`WithoutSignals()`.
 
 ## Health And Readiness
 
-`App.Health()` returns a normal `health.Checker` and automatically includes the
-reserved readiness check `foundation.lifecycle`:
-
-- `created`, `starting`, `stopping`, `stopped`, `failed`: down
-- `running`: OK
-
-Dependency checks can be added normally:
+`app.State()` reports the lifecycle state. `app.Health()` returns a
+`health.Checker` containing the reserved readiness check `foundation.lifecycle`.
+It reports ready only in `StateRunning`; dependency checks may still report down.
+Readiness is down during initialization, draining, and terminal states.
 
 ```go
 app.Health().AddReadinessCheck("postgres", health.GORMChecker(db))
 app.Health().AddReadinessCheck("redis", health.RedisChecker(redisClient))
 ```
 
-Do not register another check named `foundation.lifecycle`.
-
-## Logging And Options
-
-Foundation uses `log/slog.Default()` unless a compatible logger is supplied:
-
-```go
-app, err := foundation.New(cfg,
-    foundation.WithLogger(serviceLogger),
-    foundation.WithHealthChecker(checker),
-)
-```
-
-`WithSignals` replaces the default `SIGINT`/`SIGTERM` set.
-`WithoutSignals` is intended for tests and applications embedded in another
-process; cancellation and `Shutdown` remain available.
-
-Application names, versions, and component names are limited to 128 bytes and
-must not contain control characters, preventing forged multiline log entries.
+Reserve `foundation.lifecycle` for the app. Health error details are disabled by
+default; expose details only on protected diagnostic endpoints.
 
 ## Errors And Programmatic Shutdown
 
-Errors support `errors.Is` and `errors.As`. `ComponentError` reports the
-component name and phase (`start`, `run`, or `stop`); `PanicError` retains the
-recovered value and stack.
+`Run(ctx)` blocks until parent cancellation, an OS signal, `Shutdown(ctx)`, or a
+component failure. Errors from completed runners and shutdown callbacks are
+joined with the initiating failure. `ComponentError` identifies the component
+and phase (`PhaseStart`, `PhaseRun`, or `PhaseStop`). `PanicError` preserves the
+recovered value and stack. Use `errors.Is` and `errors.As` to inspect failures.
 
-```go
-var componentErr *foundation.ComponentError
-if errors.As(err, &componentErr) {
-    logger.Error("component failed",
-        "component", componentErr.Component,
-        "phase", componentErr.Phase,
-        "error", componentErr.Err,
-    )
-}
-```
+`app.Shutdown(ctx)` requests shutdown and waits for the terminal result. It is
+safe for concurrent callers; each caller has its own waiting deadline. A caller's
+expired waiting context does not change the app's configured shutdown deadline.
+After termination, callers receive the same retained result as `Run`: nil for
+`StateStopped`, or the joined failure for `StateFailed`. Calling shutdown before
+`Run` returns `ErrNotRunning`; running an app again returns `ErrAlreadyRun`.
 
-`Shutdown(ctx)` is safe to call concurrently. All callers wait for the same
-terminal result, bounded by their own waiting contexts.
+## Resource And Security Boundaries
 
-Foundation logs raw component errors by design. Do not include credentials,
-tokens, connection strings, or sensitive payloads in returned errors. Apply
-redaction before returning an error when its contents are not safe for logs.
-
-## Security And Timeout Boundaries
-
-- Lifecycle callbacks are trusted in-process code. Go cannot forcibly terminate
-  a goroutine that ignores context cancellation.
-- If a timed-out `Start` later succeeds, Foundation performs best-effort cleanup
-  with a fresh shutdown context.
-- If a dependent component does not stop before the global shutdown deadline,
-  Foundation does not close earlier dependencies underneath it. `Run` returns a
-  fatal error so the process owner can terminate the process safely.
-- Configure TLS either on the server or at a trusted reverse proxy. The adapters
-  do not add encryption automatically.
-- Configure gRPC transport credentials and send/receive message size limits when
-  constructing `grpc.Server`.
-- `http.Server.Shutdown` does not close hijacked connections such as WebSockets.
-  Register the WebSocket manager as its own Foundation component so it can drain
-  connections explicitly.
-- Health error details remain disabled by default. Only enable them for a
-  protected diagnostic endpoint.
-
-## Migration From The Removed API
-
-| Removed API | Replacement |
-| --- | --- |
-| `foundation.NewApp(cfg)` | `foundation.New(cfg)` and handle the returned error |
-| `app.OnStart(fn)` | `app.Register(foundation.Resource(...))` or `Component.Start` |
-| Manually starting a goroutine in `OnStart` | `Component.Run` or `foundation.Worker` |
-| `app.OnShutdown(fn)` | `Component.Stop`, paired with the owning component |
-| `app.Run()` | `app.Run(context.Background())` |
-| Detached server goroutine | A framework adapter under `foundation/adapter/...` |
-
-### Migration From `utils/graceful`
-
-| Standalone graceful code | Foundation replacement |
-| --- | --- |
-| `graceful.NewShutdown(timeout)` | `foundation.New(Config{ShutdownTimeout: timeout})` |
-| `shutdown.Register(startedResource.Close)` | `foundation.Resource(name, start, stop)` |
-| Registering `server.Shutdown` | Register the matching `foundation/adapter` component |
-| `shutdown.Wait()` | `app.Run(context.Background())` |
-| `shutdown.Execute()` | Cancel the parent context or call `app.Shutdown(ctx)` while `Run` is active |
-| Package-level `graceful.Register/Wait` | No global equivalent; register components on one explicit `App` |
-
-After migration, remove every `utils/graceful` import from that service. Do not
-keep it as a second fallback shutdown path.
-
-Shutdown ownership now stays beside startup/runtime ownership. Do not recreate
-the old detached-goroutine pattern inside `Start`, because Foundation cannot
-supervise errors from work it does not own.
-
-Runnable net/http API, Fiber API, worker, and full-stack examples are in
-[`examples/foundation`](../examples/foundation).
+- Callback deadlines bound Foundation's waiting time. Go cannot forcibly stop a
+  goroutine that ignores cancellation. If startup times out but later succeeds,
+  Foundation attempts cleanup with a fresh shutdown context.
+- If a dependent component cannot stop within the total shutdown deadline,
+  earlier dependencies remain open. The returned error lets the process owner
+  decide how to terminate. Errors from runners still executing after this
+  deadline cannot be included in an already returned result.
+- Register WebSocket managers separately: `http.Server.Shutdown` does not drain
+  hijacked connections.
+- Component errors are logged as returned. Redact credentials, tokens, connection
+  strings, and sensitive payloads before returning an error.

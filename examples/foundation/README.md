@@ -23,8 +23,8 @@ For MCP, AI-assisted integration, or manual project bootstrapping:
    workers next, and network servers last.
 3. Let Foundation adapters own listeners and server shutdown.
 4. Call `app.Run(ctx)` on the main goroutine.
-5. Do not add `graceful.NewShutdown`, `graceful.Register`, `graceful.Wait`, a
-   second signal channel, or a detached `Listen`/`Serve` goroutine.
+5. Let Foundation handle signals and shutdown; keep blocking server work in
+   adapter components and background work in `foundation.Worker`.
 
 Correct:
 
@@ -43,16 +43,6 @@ if err := app.Register(foundation.Resource("database", openDatabase, closeDataba
 if err := app.Register(foundationfiber.Component("fiber-http", ":8080", fiberApp)); err != nil {
     return err
 }
-return app.Run(context.Background())
-```
-
-Do not combine lifecycle systems:
-
-```go
-// Incorrect: Foundation already owns signals and graceful shutdown.
-shutdown := graceful.NewShutdown(15 * time.Second)
-shutdown.Register(func(ctx context.Context) error { return fiberApp.ShutdownWithContext(ctx) })
-go fiberApp.Listen(":8080")
 return app.Run(context.Background())
 ```
 
@@ -104,8 +94,9 @@ go run ./examples/foundation -demo=worker
 ```
 
 The heartbeat worker receives the application context. Returning unexpectedly
-from the worker is treated as an application failure; cancellation during
-normal shutdown is not.
+from the worker is treated as an application failure. After cancellation,
+returning nil or only the context's cancellation error is normal. Flush errors
+and panics during draining are included in the result from `Run` and `Shutdown`.
 
 ## Full Service
 
@@ -170,5 +161,11 @@ send/receive message sizes. For HTTP, keep handler and read-header timeouts
 explicit; use `AllowUnsafeTimeouts()` only when a trusted upstream enforces an
 equivalent limit.
 
+For HTTPS with net/http, Gin, or Echo, set `server.TLSConfig` with certificates
+or a certificate callback before registering the component. A non-nil TLS
+configuration enables HTTPS; an empty configuration fails startup. See the
+[HTTPS configuration](../../foundation/README.md#https) for certificate loading
+and callback support.
+
 See the [Foundation README](../../foundation/README.md) for the lifecycle
-contract, error handling, component helpers, and migration guide.
+contract, error handling, component helpers, and configuration.

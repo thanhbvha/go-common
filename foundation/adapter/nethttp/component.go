@@ -29,6 +29,8 @@ func AllowUnsafeTimeouts() Option {
 // Component manages listener creation, serving, and graceful shutdown for server.
 // server.Addr must be set; when it uses port 0, Start replaces it with the bound
 // listener address.
+// A non-nil server.TLSConfig enables HTTPS and must provide certificates,
+// GetCertificate, or GetConfigForClient. A nil TLSConfig serves plain HTTP.
 func Component(name string, server *http.Server, options ...Option) foundation.Component {
 	config := settings{}
 	for _, option := range options {
@@ -67,6 +69,10 @@ func Component(name string, server *http.Server, options ...Option) foundation.C
 			if !config.allowUnsafeTimeouts && !hasHeaderTimeout {
 				return errors.New("foundation/nethttp: positive ReadHeaderTimeout or ReadTimeout is required")
 			}
+			if tlsConfig := server.TLSConfig; tlsConfig != nil &&
+				len(tlsConfig.Certificates) == 0 && tlsConfig.GetCertificate == nil && tlsConfig.GetConfigForClient == nil {
+				return errors.New("foundation/nethttp: TLSConfig requires certificates, GetCertificate, or GetConfigForClient")
+			}
 			bound, err := (&net.ListenConfig{}).Listen(ctx, "tcp", server.Addr)
 			if err != nil {
 				return fmt.Errorf("foundation/nethttp: listen on %s: %w", server.Addr, err)
@@ -79,7 +85,12 @@ func Component(name string, server *http.Server, options ...Option) foundation.C
 			if listener == nil {
 				return errors.New("foundation/nethttp: server was not started")
 			}
-			err := server.Serve(listener)
+			var err error
+			if server.TLSConfig != nil {
+				err = server.ServeTLS(listener, "", "")
+			} else {
+				err = server.Serve(listener)
+			}
 			if ctx.Err() != nil && errors.Is(err, http.ErrServerClosed) {
 				return ctx.Err()
 			}

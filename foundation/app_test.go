@@ -3,7 +3,9 @@ package foundation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -341,6 +343,86 @@ func TestShutdownJoinsAllErrors(t *testing.T) {
 	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
 		t.Fatalf("expected both shutdown errors, got %v", err)
 	}
+}
+
+func TestShutdownCollectsRunnerFailures(t *testing.T) {
+	flushErr := errors.New("flush failed")
+	stopErr := errors.New("stop failed")
+	tests := []struct {
+		name      string
+		run       func(context.Context) error
+		wantErr   error
+		wantPanic bool
+	}{
+		{name: "nil", run: func(context.Context) error { return nil }},
+		{name: "canceled", run: func(ctx context.Context) error { return ctx.Err() }},
+		{name: "wrapped cancellation", run: func(ctx context.Context) error { return fmt.Errorf("worker: %w", ctx.Err()) }},
+		{name: "flush failure", run: func(context.Context) error { return flushErr }, wantErr: flushErr},
+		{name: "joined cancellation and failure", run: func(ctx context.Context) error { return errors.Join(ctx.Err(), flushErr) }, wantErr: flushErr},
+		{name: "wrapped joined failure", run: func(ctx context.Context) error { return fmt.Errorf("worker: %w", errors.Join(ctx.Err(), flushErr)) }, wantErr: flushErr},
+		{name: "panic", run: panicCallback, wantPanic: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := newTestApp(t, Config{Name: "draining"})
+			for _, name := range []string{"first", "second"} {
+				if err := app.Register(Worker(name, func(ctx context.Context) error {
+					<-ctx.Done()
+					return test.run(ctx)
+				})); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			done := runAsync(app, ctx)
+			waitForState(t, app, StateRunning)
+			cancel()
+			err := <-done
+			if test.wantErr == nil && !test.wantPanic {
+				if err != nil || app.State() != StateStopped {
+					t.Fatalf("normal shutdown: err=%v state=%s", err, app.State())
+				}
+				return
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("expected %v, got %v", test.wantErr, err)
+			}
+			var panicErr *PanicError
+			if test.wantPanic && !errors.As(err, &panicErr) {
+				t.Fatalf("expected panic, got %v", err)
+			}
+			for _, name := range []string{"first", "second"} {
+				if !strings.Contains(err.Error(), fmt.Sprintf("component %q failed during run", name)) {
+					t.Fatalf("missing runner %s: %v", name, err)
+				}
+			}
+			if app.State() != StateFailed {
+				t.Fatalf("expected failed state, got %s", app.State())
+			}
+			if shutdownErr := app.Shutdown(t.Context()); shutdownErr != err {
+				t.Fatalf("shutdown did not retain terminal result: %v", shutdownErr)
+			}
+		})
+	}
+
+	t.Run("joins runtime and stop failures", func(t *testing.T) {
+		app := newTestApp(t, Config{Name: "joined"})
+		if err := app.Register(Component{Name: "worker", Run: func(ctx context.Context) error {
+			<-ctx.Done()
+			return flushErr
+		}, Stop: func(context.Context) error { return stopErr }}); err != nil {
+			t.Fatal(err)
+		}
+		done := runAsync(app, t.Context())
+		waitForState(t, app, StateRunning)
+		err := app.Shutdown(t.Context())
+		if !errors.Is(err, flushErr) || !errors.Is(err, stopErr) {
+			t.Fatalf("expected both failures, got %v", err)
+		}
+		if runErr := <-done; runErr != err {
+			t.Fatalf("Run and Shutdown results differ: %v / %v", runErr, err)
+		}
+	})
 }
 
 func TestShutdownJoinsDependentRunnerBeforeReleasingResource(t *testing.T) {
