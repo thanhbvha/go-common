@@ -1,7 +1,7 @@
 type User {
   id: Int!
   name: String!
-  posts: [Post!]!
+  posts(first: Int! = 20, offset: Int! = 0): [Post!]!
 }
 
 type Post {
@@ -12,6 +12,6 @@ type Post {
 }
 
 type Query {
-  users: [User!]!
-  posts: [Post!]!
+  users(first: Int! = 20, offset: Int! = 0): [User!]!
+  posts(first: Int! = 20, offset: Int! = 0): [Post!]!
 }

@@ -2,156 +2,163 @@ package graphql
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
+
+	"github.com/vikstrous/dataloadgen"
 )
 
-// BatchFunc is a function that the developer must implement.
-// It receives a list of IDs, queries the DB once, and returns a map[ID]Data.
-type BatchFunc[K comparable, V any] func(ctx context.Context, keys []K) (map[K]V, error)
+// BatchFunc returns values by key. Missing entries become ErrNotFound.
+type BatchFunc[K comparable, V any] func(context.Context, []K) (map[K]V, error)
 
-// ConfigDL configures a DataLoader
-type ConfigDL struct {
-	Wait     time.Duration // Maximum wait time to batch requests (Default: 16ms)
-	MaxBatch int           // Maximum number of IDs in a single DB query (Default: 100)
+var (
+	ErrNotFound    = errors.New("graphql: key not found")
+	ErrLoaderLimit = errors.New("graphql: loader key budget exceeded")
+)
+
+// LoaderConfig bounds work for one request. Zero uses defaults; negative is invalid.
+type LoaderConfig struct {
+	Wait                 time.Duration
+	MaxBatch             int
+	MaxKeys              int
+	MaxConcurrentBatches int
 }
 
-// DataLoader prevents N+1 issues by batching individual data load requests into a single aggregate request.
+func DefaultLoaderConfig() LoaderConfig {
+	return LoaderConfig{Wait: time.Millisecond, MaxBatch: 100, MaxKeys: 1000, MaxConcurrentBatches: 4}
+}
+
+// DataLoader is request-scoped, including its memoized errors. Waiting for a
+// result requires the backend to complete or honor the request context.
 type DataLoader[K comparable, V any] struct {
-	batchFn  BatchFunc[K, V]
-	wait     time.Duration
-	maxBatch int
-
-	mu    sync.Mutex
-	cache map[K]V
-	batch *batch[K, V]
+	ctx      context.Context
+	loader   *dataloadgen.Loader[K, V]
+	mu       sync.Mutex
+	cached   map[K]bool
+	admitted int
+	maxKeys  int
 }
 
-type batch[K comparable, V any] struct {
-	keys    []K
-	done    chan struct{}
-	results map[K]V
-	err     error
-}
-
-// NewDataLoader initializes a new DataLoader
-func NewDataLoader[K comparable, V any](batchFn BatchFunc[K, V], opts ...ConfigDL) *DataLoader[K, V] {
-	wait := 16 * time.Millisecond
-	maxBatch := 100
-	if len(opts) > 0 {
-		if opts[0].Wait > 0 {
-			wait = opts[0].Wait
-		}
-		if opts[0].MaxBatch > 0 {
-			maxBatch = opts[0].MaxBatch
-		}
+func NewDataLoader[K comparable, V any](ctx context.Context, fn BatchFunc[K, V], cfg LoaderConfig) (*DataLoader[K, V], error) {
+	if ctx == nil || fn == nil {
+		return nil, errors.New("graphql: request context and batch function are required")
 	}
-	return &DataLoader[K, V]{
-		batchFn:  batchFn,
-		wait:     wait,
-		maxBatch: maxBatch,
-		cache:    make(map[K]V),
+	if cfg.Wait < 0 || cfg.MaxBatch < 0 || cfg.MaxKeys < 0 || cfg.MaxConcurrentBatches < 0 {
+		return nil, errors.New("graphql: loader limits must not be negative")
 	}
+	defaults := DefaultLoaderConfig()
+	if cfg.Wait == 0 {
+		cfg.Wait = defaults.Wait
+	}
+	if cfg.MaxBatch == 0 {
+		cfg.MaxBatch = defaults.MaxBatch
+	}
+	if cfg.MaxKeys == 0 {
+		cfg.MaxKeys = defaults.MaxKeys
+	}
+	if cfg.MaxConcurrentBatches == 0 {
+		cfg.MaxConcurrentBatches = defaults.MaxConcurrentBatches
+	}
+	slots := make(chan struct{}, cfg.MaxConcurrentBatches)
+	l := &DataLoader[K, V]{ctx: ctx, cached: make(map[K]bool), maxKeys: cfg.MaxKeys}
+	fetch := func(_ context.Context, keys []K) (values []V, errs []error) {
+		// Catch before the dependency's recovery, which includes the panic value.
+		defer func() {
+			if p := recover(); p != nil {
+				values = nil
+				errs = []error{RecoverFunc(ctx, p)}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			return nil, []error{ctx.Err()}
+		case slots <- struct{}{}:
+		}
+		defer func() { <-slots }()
+		if err := ctx.Err(); err != nil {
+			return nil, []error{err}
+		}
+		res, err := fn(ctx, keys)
+		values = make([]V, len(keys))
+		errs = make([]error, len(keys))
+		for i, k := range keys {
+			if err != nil {
+				errs[i] = err
+				continue
+			}
+			var found bool
+			values[i], found = res[k]
+			if !found {
+				errs[i] = ErrNotFound
+			}
+		}
+		return values, errs
+	}
+	l.loader = dataloadgen.NewLoader(fetch, dataloadgen.WithWait(cfg.Wait), dataloadgen.WithBatchCapacity(cfg.MaxBatch))
+	return l, nil
 }
 
-// Load loads data for 1 key. If the key is already in the cache, it returns immediately.
-// Otherwise, it waits a few milliseconds to batch with other Load() calls.
+func (l *DataLoader[K, V]) enqueue(ctx context.Context, key K) func() (V, error) {
+	failed := func(err error) func() (V, error) { return func() (V, error) { var zero V; return zero, err } }
+	if err := ctx.Err(); err != nil {
+		return failed(err)
+	}
+	if err := l.ctx.Err(); err != nil {
+		return failed(err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.cached[key] {
+		if l.admitted >= l.maxKeys {
+			return failed(ErrLoaderLimit)
+		}
+		l.admitted++
+		l.cached[key] = true
+	}
+	return l.loader.LoadThunk(l.ctx, key)
+}
 func (l *DataLoader[K, V]) Load(ctx context.Context, key K) (V, error) {
-	l.mu.Lock()
-
-	// 1. Check L1 Cache (lives only in the current request)
-	if val, ok := l.cache[key]; ok {
-		l.mu.Unlock()
-		return val, nil
-	}
-
-	// 2. Create or join an accumulating Batch
-	var b *batch[K, V]
-	if l.batch == nil || len(l.batch.keys) >= l.maxBatch {
-		b = &batch[K, V]{
-			done:    make(chan struct{}),
-			results: make(map[K]V),
-		}
-		l.batch = b
-		go l.dispatchBatch(ctx, b)
-	} else {
-		b = l.batch
-	}
-
-	b.keys = append(b.keys, key)
-	l.mu.Unlock()
-
-	// 3. Block this goroutine to wait for the Batch to finish querying the DB
-	<-b.done
-
-	if b.err != nil {
-		var zero V
-		return zero, b.err
-	}
-
-	val, ok := b.results[key]
-	if !ok {
-		// Key does not exist in the DB, return Zero value and nil error
-		var zero V
-		return zero, nil
-	}
-
-	return val, nil
+	return l.enqueue(ctx, key)()
 }
 
-// LoadAll supports loading multiple keys at once
+// LoadAll enqueues before waiting, without allocating a goroutine for each key.
+// Results and errors always correspond to the input order, including duplicates.
 func (l *DataLoader[K, V]) LoadAll(ctx context.Context, keys []K) ([]V, []error) {
-	results := make([]V, len(keys))
-	errors := make([]error, len(keys))
-
-	var wg sync.WaitGroup
-	wg.Add(len(keys))
-
-	for i, key := range keys {
-		go func(i int, key K) {
-			defer wg.Done()
-			results[i], errors[i] = l.Load(ctx, key)
-		}(i, key)
+	thunks := make([]func() (V, error), len(keys))
+	for i, k := range keys {
+		thunks[i] = l.enqueue(ctx, k)
 	}
-
-	wg.Wait()
-	return results, errors
+	values := make([]V, len(keys))
+	errs := make([]error, len(keys))
+	for i, thunk := range thunks {
+		values[i], errs[i] = thunk()
+	}
+	return values, errs
 }
 
-func (l *DataLoader[K, V]) dispatchBatch(ctx context.Context, b *batch[K, V]) {
-	// Wait an additional period to accumulate more IDs
-	time.Sleep(l.wait)
-
+// Clear permits an explicit retry. It does not reset the lifetime key budget.
+func (l *DataLoader[K, V]) Clear(key K) {
 	l.mu.Lock()
-	if l.batch == b {
-		l.batch = nil // Reset batch so subsequent Loads create a new batch
+	defer l.mu.Unlock()
+	delete(l.cached, key)
+	l.loader.Clear(key)
+}
+func (l *DataLoader[K, V]) ClearAll() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cached = make(map[K]bool)
+	l.loader.ClearAll()
+}
+
+// Prime never replaces an existing value; false also indicates an exhausted budget.
+func (l *DataLoader[K, V]) Prime(key K, value V) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ctx.Err() != nil || l.cached[key] || l.admitted >= l.maxKeys {
+		return false
 	}
-	l.mu.Unlock()
-
-	// Filter duplicate IDs to avoid redundant queries
-	keys := make([]K, 0, len(b.keys))
-	seen := make(map[K]bool)
-	for _, k := range b.keys {
-		if !seen[k] {
-			seen[k] = true
-			keys = append(keys, k)
-		}
-	}
-
-	// Execute Batch Function provided by Dev (Call DB/Redis)
-	res, err := l.batchFn(ctx, keys)
-	b.results = res
-	b.err = err
-
-	// Put results into Cache
-	if err == nil && res != nil {
-		l.mu.Lock()
-		for k, v := range res {
-			l.cache[k] = v
-		}
-		l.mu.Unlock()
-	}
-
-	// Wake up all goroutines waiting on <-b.done
-	close(b.done)
+	l.cached[key] = true
+	l.admitted++
+	return l.loader.Prime(key, value)
 }

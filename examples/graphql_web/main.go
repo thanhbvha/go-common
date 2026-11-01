@@ -9,13 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph"
-	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
-	"github.com/thanhbvha/go-common/examples/graphql_web/service"
 	common_graphql "github.com/thanhbvha/go-common/graphql"
 	echoadapter "github.com/thanhbvha/go-common/graphql/adapter/echo"
 	fiberadapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
@@ -25,7 +22,6 @@ import (
 	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
 	ginlog "github.com/thanhbvha/go-common/logger/middleware/gin"
 	nethttplog "github.com/thanhbvha/go-common/logger/middleware/nethttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/utils/graceful"
 	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
 	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
@@ -33,7 +29,10 @@ import (
 	nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
 )
 
+var development bool
+
 func main() {
+	flag.BoolVar(&development, "development", false, "Enable Playground and introspection for local development")
 	stack := flag.String("stack", "nethttp", "HTTP stack: nethttp, fiber, gin, or echo")
 	flag.Parse()
 
@@ -63,20 +62,21 @@ func main() {
 // ---------------------------------------------------------
 // Helper: Setup core GraphQL Server
 // ---------------------------------------------------------
-func setupCoreGraphQL() *handler.Server {
-	// 1. Initialize ExecutableSchema from gqlgen
-	es := graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{}})
-
-	// 2. Initialize core GraphQL Server (standard net/http)
-	coreSrv := common_graphql.NewServer(es, common_graphql.Config{
-		EnableTelemetry: true,
+func setupCoreGraphQL() *common_graphql.Server {
+	cfg := graph.Config{Resolvers: &graph.Resolver{}}
+	cfg.Complexity.Query.Users = graph.ListCost
+	cfg.Complexity.Query.Posts = graph.ListCost
+	cfg.Complexity.User.Posts = graph.ListCost
+	es := graph.NewExecutableSchema(cfg)
+	coreSrv, err := common_graphql.NewServer(es, common_graphql.Config{
+		EnableTelemetry:     true,
+		EnableIntrospection: development,
+		RequestSetup:        graph.WithLoaders,
 	})
-
+	if err != nil {
+		panic(err)
+	}
 	return coreSrv
-}
-
-func newUserLoader() *common_graphql.DataLoader[int, *model.User] {
-	return common_graphql.NewDataLoader(service.FetchUsersBatch, common_graphql.ConfigDL{MaxBatch: 100})
 }
 
 // =====================================================================
@@ -86,6 +86,9 @@ func RunNetHTTPExample() {
 	srv := &http.Server{
 		Addr:              ":3000",
 		Handler:           newNetHTTPHandler(),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -105,16 +108,12 @@ func RunNetHTTPExample() {
 
 func newNetHTTPHandler() http.Handler {
 	coreSrv := setupCoreGraphQL()
-	withDataLoader := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := ctxkey.SetDataLoader(r.Context(), newUserLoader())
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/query", withDataLoader(coreSrv))
-	mux.Handle("/", common_graphql.PlaygroundHandler("GraphQL API", "/query"))
+	mux.Handle("/query", coreSrv)
+	if development {
+		mux.Handle("/", common_graphql.PlaygroundHandler("GraphQL API", "/query"))
+	}
 	return nethttplog.RequestIDMiddleware(nethttplog.Middleware(nethttpmw.Recover(nethttpmw.Telemetry("GraphQL HTTP")(mux))))
 }
 
@@ -122,28 +121,7 @@ func newNetHTTPHandler() http.Handler {
 // 2. FIBER FRAMEWORK
 // =====================================================================
 func RunFiberExample() {
-	coreSrv := setupCoreGraphQL()
-
-	app := fiber.New(fiber.Config{
-		ErrorHandler: fibermw.ErrorHandler,
-	})
-	app.Use(fiberlog.RequestIDMiddleware(), fiberlog.Middleware(), fibermw.Recover(), fibermw.Telemetry("GraphQL HTTP"))
-
-	// 4. Wrap the Server with Fiber Adapter
-	gqlHandler := fiberadapter.NewHandler(coreSrv, fiberadapter.Config{
-		ContextSetup: func(ctx context.Context, c *fiber.Ctx) context.Context {
-			// Inject userLoader into the context of each Request using typed key
-			return ctxkey.SetDataLoader(ctx, newUserLoader())
-		},
-	})
-
-	// 5. Initialize Playground (also wrapped via Fiber Adapter)
-	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := fiberadapter.PlaygroundHandler(corePlayground)
-
-	// 6. Register Routes
-	app.All("/query", gqlHandler)
-	app.Get("/", playgroundHandler)
+	app := newFiberApp()
 
 	// 7. Start the server
 	go func() {
@@ -168,31 +146,16 @@ func RunFiberExample() {
 // 3. GIN FRAMEWORK
 // =====================================================================
 func RunGinExample() {
-	coreSrv := setupCoreGraphQL()
-
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(ginlog.RequestIDMiddleware(), ginlog.Middleware(), ginmw.Recover(), ginmw.Telemetry("GraphQL HTTP"))
-
-	// 4. Wrap the Server with Gin Adapter
-	gqlHandler := ginadapter.NewHandler(coreSrv, ginadapter.Config{
-		ContextSetup: func(ctx context.Context, c *gin.Context) context.Context {
-			return ctxkey.SetDataLoader(ctx, newUserLoader())
-		},
-	})
-
-	// 5. Initialize Playground
-	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := ginadapter.PlaygroundHandler(corePlayground)
-
-	// 6. Register Routes
-	r.Any("/query", gqlHandler)
-	r.GET("/", playgroundHandler)
+	r := newGinRouter()
 
 	// 7. Start the server
 	srv := &http.Server{
-		Addr:    ":3000",
-		Handler: r,
+		Addr:              ":3000",
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		common_logger.Info("[Gin] GraphQL Server is running at http://localhost:3000")
@@ -216,26 +179,7 @@ func RunGinExample() {
 // 4. ECHO FRAMEWORK
 // =====================================================================
 func RunEchoExample() {
-	coreSrv := setupCoreGraphQL()
-
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(echolog.RequestIDMiddleware(), echolog.Middleware(), echomw.Recover(), echomw.Telemetry("GraphQL HTTP"))
-
-	// 4. Wrap the Server with Echo Adapter
-	gqlHandler := echoadapter.NewHandler(coreSrv, echoadapter.Config{
-		ContextSetup: func(ctx context.Context, c echo.Context) context.Context {
-			return ctxkey.SetDataLoader(ctx, newUserLoader())
-		},
-	})
-
-	// 5. Initialize Playground
-	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
-	playgroundHandler := echoadapter.PlaygroundHandler(corePlayground)
-
-	// 6. Register Routes
-	e.Any("/query", gqlHandler)
-	e.GET("/", playgroundHandler)
+	e := newEchoRouter()
 
 	// 7. Start the server
 	go func() {
@@ -254,4 +198,95 @@ func RunEchoExample() {
 	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
 	shutdown.Wait()
+}
+
+func newFiberApp() *fiber.App {
+	coreSrv := setupCoreGraphQL()
+
+	app := fiber.New(fiber.Config{
+		ErrorHandler: fibermw.ErrorHandler,
+		BodyLimit:    int(common_graphql.DefaultConfig().MaxBodyBytes),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	})
+	app.Use(fiberlog.RequestIDMiddleware(), fiberlog.Middleware(), fibermw.Recover(), fibermw.Telemetry("GraphQL HTTP"))
+
+	// Wrap the bounded core; RequestSetup creates typed loaders on every stack.
+	gqlHandler := fiberadapter.NewHandler(coreSrv, fiberadapter.Config{
+		ContextSetup: func(ctx context.Context, c *fiber.Ctx) context.Context {
+			// Additional framework-specific context can be added here.
+			return ctx
+		},
+	})
+
+	// 5. Initialize Playground (also wrapped via Fiber Adapter)
+	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
+	playgroundHandler := fiberadapter.PlaygroundHandler(corePlayground)
+
+	// 6. Register Routes
+	app.All("/query", gqlHandler)
+	if development {
+		app.Get("/", playgroundHandler)
+	}
+
+	return app
+}
+
+func newGinRouter() *gin.Engine {
+	coreSrv := setupCoreGraphQL()
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(ginlog.RequestIDMiddleware(), ginlog.Middleware(), ginmw.Recover(), ginmw.Telemetry("GraphQL HTTP"))
+
+	// 4. Wrap the Server with Gin Adapter
+	gqlHandler := ginadapter.NewHandler(coreSrv, ginadapter.Config{
+		ContextSetup: func(ctx context.Context, c *gin.Context) context.Context {
+			return ctx
+		},
+	})
+
+	// 5. Initialize Playground
+	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
+	playgroundHandler := ginadapter.PlaygroundHandler(corePlayground)
+
+	// 6. Register Routes
+	r.Any("/query", gqlHandler)
+	if development {
+		r.GET("/", playgroundHandler)
+	}
+
+	return r
+}
+
+func newEchoRouter() *echo.Echo {
+	coreSrv := setupCoreGraphQL()
+
+	e := echo.New()
+	e.HideBanner = true
+	e.Server.ReadHeaderTimeout = 5 * time.Second
+	e.Server.ReadTimeout = 15 * time.Second
+	e.Server.WriteTimeout = 15 * time.Second
+	e.Server.IdleTimeout = 60 * time.Second
+	e.Use(echolog.RequestIDMiddleware(), echolog.Middleware(), echomw.Recover(), echomw.Telemetry("GraphQL HTTP"))
+
+	// 4. Wrap the Server with Echo Adapter
+	gqlHandler := echoadapter.NewHandler(coreSrv, echoadapter.Config{
+		ContextSetup: func(ctx context.Context, c echo.Context) context.Context {
+			return ctx
+		},
+	})
+
+	// 5. Initialize Playground
+	corePlayground := common_graphql.PlaygroundHandler("GraphQL API", "/query")
+	playgroundHandler := echoadapter.PlaygroundHandler(corePlayground)
+
+	// 6. Register Routes
+	e.Any("/query", gqlHandler)
+	if development {
+		e.GET("/", playgroundHandler)
+	}
+
+	return e
 }

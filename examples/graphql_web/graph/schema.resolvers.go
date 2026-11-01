@@ -7,41 +7,44 @@ package graph
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 	"github.com/thanhbvha/go-common/examples/graphql_web/service"
-	common_graphql "github.com/thanhbvha/go-common/graphql"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
 )
 
 // Author is the resolver for the author field.
 func (r *postResolver) Author(ctx context.Context, obj *model.Post) (*model.User, error) {
-	// Use DataLoader to fetch users instead of querying the DB directly (Solves N+1 issue)
-	loaderVal, ok := ctxkey.GetDataLoader(ctx)
-	if !ok {
-		return nil, fmt.Errorf("user DataLoader is not configured")
+	loaders, err := requestLoaders(ctx)
+	if err != nil {
+		return nil, err
 	}
-	loader, ok := loaderVal.(*common_graphql.DataLoader[int, *model.User])
-	if !ok || loader == nil {
-		return nil, fmt.Errorf("user DataLoader has an invalid type")
-	}
-	return loader.Load(ctx, obj.AuthorID)
+	return loaders.Users.Load(ctx, obj.AuthorID)
 }
 
 // Users is the resolver for the users field.
-func (r *queryResolver) Users(ctx context.Context) ([]*model.User, error) {
-	return service.GetUsers(), nil
+func (r *queryResolver) Users(ctx context.Context, first int, offset int) ([]*model.User, error) {
+	return page(service.GetUsers(), first, offset)
 }
 
 // Posts is the resolver for the posts field.
-func (r *queryResolver) Posts(ctx context.Context) ([]*model.Post, error) {
-	return service.GetPosts(), nil
+func (r *queryResolver) Posts(ctx context.Context, first int, offset int) ([]*model.Post, error) {
+	return page(service.GetPosts(), first, offset)
 }
 
 // Posts is the resolver for the posts field on User.
-func (r *userResolver) Posts(ctx context.Context, obj *model.User) ([]*model.Post, error) {
-	return service.GetPostsByAuthor(obj.ID), nil
+func (r *userResolver) Posts(ctx context.Context, obj *model.User, first int, offset int) ([]*model.Post, error) {
+	if _, err := page([]*model.Post{}, first, offset); err != nil {
+		return nil, err
+	}
+	loaders, err := requestLoaders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	posts, err := loaders.PostsByAuthor.Load(ctx, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	return page(posts, first, offset)
 }
 
 // Post returns PostResolver implementation.

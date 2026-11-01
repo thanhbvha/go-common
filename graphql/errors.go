@@ -6,41 +6,57 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/xerrors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// ErrorPresenter formats GraphQL errors if they belong to the xerrors system
+// ErrorPresenter treats xerrors 4xx messages as explicitly public. Other
+// resolver errors and all 5xx are masked; causes/extensions never escape.
 func ErrorPresenter(ctx context.Context, e error) *gqlerror.Error {
-	// Use the default formatter to get path and location
-	err := graphql.DefaultErrorPresenter(ctx, e)
-
-	var customErr *xerrors.CustomError
-	if errors.As(e, &customErr) {
-		err.Message = customErr.Message
-
-		if err.Extensions == nil {
-			err.Extensions = map[string]interface{}{}
+	original := graphql.DefaultErrorPresenter(ctx, e)
+	result := &gqlerror.Error{Path: original.Path, Locations: original.Locations}
+	code, status, message := "INTERNAL_ERROR", 500, "Internal Server Error"
+	var custom *xerrors.CustomError
+	switch {
+	case errors.Is(e, context.DeadlineExceeded):
+		code, status, message = "REQUEST_TIMEOUT", 408, "Request timed out"
+	case errors.Is(e, context.Canceled):
+		code, status, message = "REQUEST_CANCELLED", 408, "Request cancelled"
+	case errors.As(e, &custom):
+		if custom.HTTPStatus >= 400 && custom.HTTPStatus < 500 {
+			code, status, message = custom.Code, custom.HTTPStatus, custom.Message
 		}
-
-		// Push custom information out to the extension for the client
-		err.Extensions["code"] = customErr.Code
-		err.Extensions["http_status"] = customErr.HTTPStatus
-	} else {
-		// Hide the actual system error details from the outside if not using xerrors
-		err.Message = "Internal Server Error"
-		if err.Extensions == nil {
-			err.Extensions = map[string]interface{}{}
+	default:
+		// Engine codes are only public before resolver execution. Resolvers cannot
+		// publish arbitrary gqlerror messages by forging an engine code.
+		if executing, _ := ctx.Value(phaseKey{}).(bool); !executing {
+			engineCode, _ := original.Extensions["code"].(string)
+			switch engineCode {
+			case "GRAPHQL_PARSE_FAILED":
+				code, status, message = engineCode, 400, "Invalid GraphQL document"
+			case "GRAPHQL_VALIDATION_FAILED":
+				code, status, message = engineCode, 400, "Invalid GraphQL operation or variables"
+			case "COMPLEXITY_LIMIT_EXCEEDED", "QUERY_LIMIT_EXCEEDED":
+				code, status, message = engineCode, 422, "Operation exceeds query limits"
+			case "UNSUPPORTED_OPERATION":
+				code, status, message = engineCode, 400, "Operation not supported"
+			default:
+				if !graphql.HasOperationContext(ctx) && ctx.Value(stateKey{}) != nil {
+					code, status, message = "BAD_REQUEST", 400, "Invalid GraphQL request"
+				}
+			}
 		}
-		err.Extensions["code"] = "INTERNAL_ERROR"
-		err.Extensions["http_status"] = 500
 	}
-
-	return err
+	result.Message = message
+	result.Extensions = map[string]any{"code": code, "http_status": status}
+	return result
 }
 
-// RecoverFunc automatically catches panics in resolvers to prevent server crashes
-func RecoverFunc(ctx context.Context, err interface{}) error {
-	logger.Error("GraphQL Panic", "error", err)
-	return xerrors.New("INTERNAL_ERROR", "The system encountered an unexpected error, please try again later.", 500)
+// RecoverFunc deliberately omits panic values and causes from logs.
+func RecoverFunc(ctx context.Context, _ any) error {
+	id, _ := ctxkey.GetRequestID(ctx)
+	logger.Error("GraphQL panic recovered", "request_id", id, "trace_id", trace.SpanContextFromContext(ctx).TraceID().String())
+	return xerrors.New("INTERNAL_ERROR", "Internal Server Error", 500)
 }

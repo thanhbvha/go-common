@@ -31,6 +31,7 @@ require (
 	github.com/twmb/franz-go v1.22.0
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
 	github.com/twmb/franz-go/pkg/kmsg v1.14.0
+	github.com/vikstrous/dataloadgen v0.0.10
 	github.com/vektah/gqlparser/v2 v2.5.36
 	go.mongodb.org/mongo-driver/v2 v2.7.0
 	go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/v2/mongo/otelmongo v0.0.0-20260702233925-7155189f62b7

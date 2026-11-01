@@ -46,14 +46,14 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
-		Posts func(childComplexity int) int
-		Users func(childComplexity int) int
+		Posts func(childComplexity int, first int, offset int) int
+		Users func(childComplexity int, first int, offset int) int
 	}
 
 	User struct {
 		ID    func(childComplexity int) int
 		Name  func(childComplexity int) int
-		Posts func(childComplexity int) int
+		Posts func(childComplexity int, first int, offset int) int
 	}
 }
 
@@ -65,11 +65,11 @@ type PostResolver interface {
 	Author(ctx context.Context, obj *model.Post) (*model.User, error)
 }
 type QueryResolver interface {
-	Users(ctx context.Context) ([]*model.User, error)
-	Posts(ctx context.Context) ([]*model.Post, error)
+	Users(ctx context.Context, first int, offset int) ([]*model.User, error)
+	Posts(ctx context.Context, first int, offset int) ([]*model.Post, error)
 }
 type UserResolver interface {
-	Posts(ctx context.Context, obj *model.User) ([]*model.Post, error)
+	Posts(ctx context.Context, obj *model.User, first int, offset int) ([]*model.Post, error)
 }
 
 // endregion ************************** generated!.gotpl **************************
@@ -120,13 +120,23 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			break
 		}
 
-		return e.ComplexityRoot.Query.Posts(childComplexity), true
+		args, err := ec.field_Query_posts_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Posts(childComplexity, args["first"].(int), args["offset"].(int)), true
 	case "Query.users":
 		if e.ComplexityRoot.Query.Users == nil {
 			break
 		}
 
-		return e.ComplexityRoot.Query.Users(childComplexity), true
+		args, err := ec.field_Query_users_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Users(childComplexity, args["first"].(int), args["offset"].(int)), true
 
 	case "User.id":
 		if e.ComplexityRoot.User.ID == nil {
@@ -145,7 +155,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			break
 		}
 
-		return e.ComplexityRoot.User.Posts(childComplexity), true
+		args, err := ec.field_User_posts_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.User.Posts(childComplexity, args["first"].(int), args["offset"].(int)), true
 
 	}
 	return 0, false
@@ -389,6 +404,72 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 	return args, nil
 }
 
+func (ec *executionContext) field_Query_posts_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "first",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["first"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "offset",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["offset"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_users_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "first",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["first"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "offset",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["offset"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_User_posts_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "first",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["first"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "offset",
+		func(ctx context.Context, v any) (int, error) {
+			return ec.unmarshalNInt2int(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["offset"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field___Directive_args_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -559,7 +640,8 @@ func (ec *executionContext) _Query_users(ctx context.Context, field graphql.Coll
 			return ec.fieldContext_Query_users(ctx, field)
 		},
 		func(ctx context.Context) (any, error) {
-			return ec.Resolvers.Query().Users(ctx)
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Users(ctx, fc.Args["first"].(int), fc.Args["offset"].(int))
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.User) graphql.Marshaler {
@@ -569,7 +651,7 @@ func (ec *executionContext) _Query_users(ctx context.Context, field graphql.Coll
 		true,
 	)
 }
-func (ec *executionContext) fieldContext_Query_users(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_Query_users(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "Query",
 		Field:      field,
@@ -578,6 +660,17 @@ func (ec *executionContext) fieldContext_Query_users(_ context.Context, field gr
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return ec.childFields_User(ctx, field)
 		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_users_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
 	}
 	return fc, nil
 }
@@ -591,7 +684,8 @@ func (ec *executionContext) _Query_posts(ctx context.Context, field graphql.Coll
 			return ec.fieldContext_Query_posts(ctx, field)
 		},
 		func(ctx context.Context) (any, error) {
-			return ec.Resolvers.Query().Posts(ctx)
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Posts(ctx, fc.Args["first"].(int), fc.Args["offset"].(int))
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.Post) graphql.Marshaler {
@@ -601,7 +695,7 @@ func (ec *executionContext) _Query_posts(ctx context.Context, field graphql.Coll
 		true,
 	)
 }
-func (ec *executionContext) fieldContext_Query_posts(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_Query_posts(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "Query",
 		Field:      field,
@@ -610,6 +704,17 @@ func (ec *executionContext) fieldContext_Query_posts(_ context.Context, field gr
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return ec.childFields_Post(ctx, field)
 		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_posts_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
 	}
 	return fc, nil
 }
@@ -745,7 +850,8 @@ func (ec *executionContext) _User_posts(ctx context.Context, field graphql.Colle
 			return ec.fieldContext_User_posts(ctx, field)
 		},
 		func(ctx context.Context) (any, error) {
-			return ec.Resolvers.User().Posts(ctx, obj)
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.User().Posts(ctx, obj, fc.Args["first"].(int), fc.Args["offset"].(int))
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v []*model.Post) graphql.Marshaler {
@@ -755,7 +861,7 @@ func (ec *executionContext) _User_posts(ctx context.Context, field graphql.Colle
 		true,
 	)
 }
-func (ec *executionContext) fieldContext_User_posts(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_User_posts(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "User",
 		Field:      field,
@@ -764,6 +870,17 @@ func (ec *executionContext) fieldContext_User_posts(_ context.Context, field gra
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return ec.childFields_Post(ctx, field)
 		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_User_posts_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
 	}
 	return fc, nil
 }

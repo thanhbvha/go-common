@@ -1,3 +1,5 @@
+skip_mod_tidy: true
+
 schema:
   - graph/*.graphqls
 

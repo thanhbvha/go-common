@@ -31,11 +31,12 @@ func NewHandler(coreHandler http.Handler, cfg Config) fiber.Handler {
 	httpHandler := adaptor.HTTPHandler(wrapper)
 
 	return func(c *fiber.Ctx) error {
+		newCtx := c.UserContext()
 		if cfg.ContextSetup != nil {
-			newCtx := cfg.ContextSetup(c.UserContext(), c)
-			// Save newCtx to Locals so the net/http wrapper can retrieve and use it
-			c.Locals(contextKey{}, newCtx)
+			newCtx = cfg.ContextSetup(newCtx, c)
 		}
+		// Always preserve UserContext, including deadlines and middleware values.
+		c.Locals(contextKey{}, newCtx)
 
 		return httpHandler(c)
 	}

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/thanhbvha/go-common/examples/graphql_web/graph/model"
 )
@@ -40,8 +39,9 @@ func GetPostsByAuthor(authorID int) []*model.Post {
 }
 
 func FetchUsersBatch(ctx context.Context, ids []int) (map[int]*model.User, error) {
-	// Mock DB Query logging
-	fmt.Printf("[DB QUERY] SELECT * FROM users WHERE id IN %v\n", ids)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	res := make(map[int]*model.User)
 	for _, id := range ids {
@@ -53,4 +53,20 @@ func FetchUsersBatch(ctx context.Context, ids []int) (map[int]*model.User, error
 		}
 	}
 	return res, nil
+}
+
+func FetchPostsByAuthorBatch(ctx context.Context, ids []int) (map[int][]*model.Post, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := make(map[int][]*model.Post, len(ids))
+	for _, id := range ids {
+		result[id] = []*model.Post{}
+	}
+	for _, post := range posts {
+		if _, ok := result[post.AuthorID]; ok {
+			result[post.AuthorID] = append(result[post.AuthorID], post)
+		}
+	}
+	return result, nil
 }
