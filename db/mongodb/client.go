@@ -106,8 +106,3 @@ func disconnectClient(client *mongo.Client) error {
 	defer cancel()
 	return client.Disconnect(ctx)
 }
-
-// GetDatabase returns a reference to the configured database
-func GetDatabase(client *mongo.Client, dbName string) *mongo.Database {
-	return client.Database(dbName)
-}

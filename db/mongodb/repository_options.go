@@ -9,8 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// WithOptions variants preserve the original method signatures (including
-// interface/function-value compatibility) while retaining transaction guards.
+// WithOptions variants forward driver options while retaining transaction guards.
 func (r *Repository[T]) FindByIDWithOptions(ctx context.Context, id any, opts ...options.Lister[options.FindOneOptions]) (*T, error) {
 	return r.FindOneWithOptions(ctx, bson.M{"_id": id}, opts...)
 }

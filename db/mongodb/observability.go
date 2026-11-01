@@ -31,7 +31,6 @@ func (m *Manager) TransactionStats() TransactionStats {
 	defer m.mu.RUnlock()
 	return m.stats
 }
-func GetTransactionStats() TransactionStats { return globalManager.TransactionStats() }
 
 func observe(monitor *TransactionMonitor, event TransactionEvent) {
 	if monitor == nil || monitor.Event == nil {

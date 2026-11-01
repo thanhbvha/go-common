@@ -1,7 +1,8 @@
 # MongoDB production APIs
 
-The original client, manager and repository APIs remain available. New methods use
-separate names, preserving existing interfaces and function-value signatures.
+Use `NewManager()` to own database bindings, connection pools, managed transactions
+and statistics within one application. Use `New(ctx, cfg)` for a standalone client
+whose lifecycle the caller owns, and `client.Database(name)` for native handles.
 See [runnable examples](../../examples/db_mongodb/README.md) for complete fixtures.
 
 ## Startup and readiness
@@ -14,6 +15,31 @@ cfg := mongodb.Config{
     RequireTransactions: true,
 }
 ```
+
+Initialize and look up databases through the same manager:
+
+```go
+manager := mongodb.NewManager()
+if err := manager.Init(ctx, map[string]mongodb.Config{"orders": cfg}, "orders"); err != nil {
+    return err
+}
+defer func() {
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    // Propagate cleanup errors to the application's lifecycle owner.
+    result = errors.Join(result, manager.DisconnectAll(shutdownCtx))
+}()
+db, err := manager.Lookup("orders")
+if err != nil {
+    return err
+}
+repo := mongodb.NewRepository[Order](db, "orders")
+```
+
+This fragment assumes a named `result error` return and an application `Order`
+model. Inject the manager or its repositories into the components that need them.
+When using Foundation, pair manager initialization and disconnection in one
+resource component. A manager must not be copied after first use.
 
 `RequireTransactions` makes `New`/manager startup read `hello` after ping and reject
 standalone or unsupported topology with `ErrTransactionsUnsupported`. Leave it false
@@ -107,7 +133,7 @@ a native-driver escape hatch: scoped repositories retain transaction guards, whi
 callers of free functions/native collections must preserve the session themselves.
 Callbacks stop on errors. Cursor cleanup uses an independent bounded context, and
 cleanup errors are joined while preserving `errors.Is` for the primary error.
-`FindAll` and `Aggregate` still materialize results for compatibility; use streaming
+`FindAll` and `Aggregate` materialize results in memory; use streaming
 for large data. Count caps are not byte budgets; project large document fields out.
 
 ## Change Streams: watching future changes
@@ -180,7 +206,8 @@ Socket.IO dependency and no persistent checkpoint.
 `DeleteManyWithOptions`, `CountWithOptions`, `ExistsWithOptions`,
 `BulkWriteWithOptions`, and `CreateIndexWithOptions` forward driver options while
 retaining context/lifetime checks on transaction repositories. `InsertManyTyped`
-accepts `[]T`. Existing methods keep their signatures.
+accepts `[]T`. Use these variants when driver options are required; ordinary CRUD
+methods use driver defaults while retaining the same transaction guards.
 
 ```go
 _, err := scoped.UpdateOneWithOptions(tx.Context(), filter, update,

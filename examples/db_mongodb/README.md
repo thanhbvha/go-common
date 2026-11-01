@@ -1,8 +1,8 @@
 # MongoDB
 
-`db/mongodb` wraps the official Go driver v2. Prefer an instance manager for each
-service/test. Existing package-level `Init`, `Get`, `AddConnection`,
-`WithTransaction`, and `DisconnectAll` remain available through a shared manager.
+`db/mongodb` wraps the official Go driver v2. Each service/test creates its own
+`mongodb.NewManager()` and uses that instance for database bindings, transactions,
+statistics, and shutdown.
 
 ## Run the complete example
 
@@ -40,7 +40,6 @@ The default is `all`. Select one scenario with `-example <name>`:
 | `guards` | Group conflict, different client, nested transaction, undeclared alias, wrong context/deadline and use after callback |
 | `lifecycle` | Repeated `Init`, shutdown, closed-handle lookup and reinitialization with a fresh client |
 | `drain` | Cancellable lifecycle wait, shutdown timeout retaining clients, rejection of new work, active commit and shutdown retry |
-| `global` | Global `Init`, `Lookup`, `Get`, capabilities/statistics, legacy/scoped transactions with options, `DisconnectAll` |
 
 For example:
 
@@ -72,11 +71,10 @@ Code navigation:
 - [drain.go](drain.go): coordinated transaction/shutdown with cancellation and retry.
 - [watch.go](watch.go): notification change events and an application-owned sender callback.
 - [transactions.go](transactions.go): conditional stock update, stable request ID,
-  order/outbox atomicity, commit/replay/rollback and the legacy session API.
+  order/outbox atomicity, commit/replay/rollback and single-alias transactions.
 - [retry.go](retry.go): explicit demo-only transient error; no server failpoint or
   admin command is required. Production code must not fabricate error labels.
 - [guards.go](guards.go): expected error handling with `errors.Is`.
-- [global.go](global.go): deliberately shared process-global API compatibility.
 - [lifecycle.go](lifecycle.go): independent owner, repeated initialization and restart.
 
 ## What the new scenarios verify
@@ -135,7 +133,7 @@ if err != nil {
 repo := mongodb.NewRepository[Sample](db, "samples")
 ```
 
-## Configuration and compatibility
+## Configuration and lifecycle
 
 - Use a deployment-provided URI with authentication and verified TLS. Never log
   credentials or pass arbitrary user input as a connection URI.
@@ -164,13 +162,8 @@ repo := mongodb.NewRepository[Sample](db, "samples")
   transactions before closing clients. If draining times out, clients stay owned
   and closing; retry shutdown after active work ends. Stop raw client operations
   yourself and supply a fresh, bounded shutdown context.
-- Global `Get` retains panic-on-misconfiguration behavior. Prefer `Lookup` for
-  recoverable errors. Managers must not be copied after first use.
-
-Behavior changes: zero timeout fields no longer cause immediate ping expiration;
-zero pool fields no longer silently override the URI; default min pool is now 0
-(formerly 10); unspecified operations now have a 30s fallback timeout; query contents
-are excluded from traces; pagination owns skip/limit and defaults to `_id: 1` sorting.
+- `manager.Lookup(name)` returns a database or an error; an empty name selects
+  the configured default. Managers must not be copied after first use.
 
 ## Multiple databases and transaction scopes
 
@@ -195,7 +188,6 @@ if err := manager.Init(ctx, map[string]mongodb.Config{
     return err
 }
 
-// This API is also available as mongodb.WithTransactionAcross for the global manager.
 err := manager.WithTransactionAcross(ctx, []string{"orders", "inventory"}, func(tx *mongodb.Transaction) error {
     orders, err := mongodb.NewTransactionRepository[Order](tx, "orders", "orders")
     if err != nil {
@@ -232,9 +224,8 @@ flow, including quantity and matched-count checks, is in [transactions.go](trans
   context has none; zero defaults to 30s, negative values fail validation. An existing
   context deadline takes precedence. Cancellation is cooperative; callbacks must
   observe the context. Driver transaction/commit retries remain authoritative.
-- Both scope APIs accept driver transaction options. Existing global
-  `WithTransaction` retains its original signature; the instance method retains
-  its options parameter. Both reject a context containing an existing MongoDB
+- `manager.WithTransaction` and `manager.WithTransactionAcross` accept driver
+  transaction options. Both reject a context containing an existing MongoDB
   session (`ErrNestedTransaction`), including a session not currently in a transaction.
   This intentionally prevents silently replacing outer sessions or nested commits.
 - A transaction repository requires `tx.Context()` or a derived context preserving
@@ -274,8 +265,8 @@ err = repo.FindEach(ctx, bson.M{"group": "fixture"}, func(ctx context.Context, s
 
 Page defaults to 1, size defaults to 10 and is capped at 1000. Overflowing offsets
 fail before database access. Caller skip/limit options cannot bypass those bounds.
-`Sorts` is retained for compatibility but is not parsed; allowlist sort fields in
-business code and pass `SetSort` with ordered `bson.D`. Custom sorts should include
+Allowlist sort fields in business code and pass `options.Find().SetSort` with
+ordered `bson.D`. Custom sorts should include
 a unique tie-breaker. Count and items are separate reads, not one snapshot.
 
 `FindAll` and `Aggregate` materialize all results; use `FindEach` and `AggregateEach`
@@ -427,7 +418,7 @@ throughput or proves backup/restore guarantees.
 See [module production guide](../../db/mongodb/README.md) for capabilities,
 context-aware lifecycle/draining, transaction statistics/hooks, cursor pagination,
 streaming aggregation, typed configuration errors and `WithOptions` repository APIs.
-All 15 runnable scenarios above verify the public APIs. Startup uses
+All 14 runnable scenarios above verify the public APIs. Startup uses
 `RequireTransactions: true`, so a
 standalone server fails early with a clear message instead of failing mid-demo.
 

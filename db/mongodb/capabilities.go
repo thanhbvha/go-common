@@ -46,6 +46,3 @@ func (m *Manager) Capabilities(ctx context.Context, alias string) (Capabilities,
 	}
 	return DetectCapabilities(ctx, db.Client())
 }
-func GetCapabilities(ctx context.Context, alias string) (Capabilities, error) {
-	return globalManager.Capabilities(ctx, alias)
-}

@@ -109,23 +109,23 @@ func (s *exampleState) transactions(ctx context.Context) error {
 	if err := s.placeOrder(ctx, Order{ID: request.ID, SKU: request.SKU, Quantity: 1}); !errors.Is(err, errOrderConflict) {
 		return errors.New("conflicting idempotency key accepted")
 	}
-	// Existing single-alias API: operations still require its session context.
+	// Single-alias transactions require the callback's session context.
 	db, err := s.manager.Lookup("audit")
 	if err != nil {
 		return err
 	}
-	legacy := mongodb.NewRepository[OutboxEvent](db, "legacy_records")
-	if err := db.CreateCollection(ctx, "legacy_records"); err != nil {
+	records := mongodb.NewRepository[OutboxEvent](db, "transaction_records")
+	if err := db.CreateCollection(ctx, "transaction_records"); err != nil {
 		return err
 	}
 	if err := s.manager.WithTransaction(ctx, "audit", func(sessCtx context.Context) error {
-		_, err := legacy.InsertOne(sessCtx, &OutboxEvent{ID: "legacy-demo", Kind: "example.marker"})
+		_, err := records.InsertOne(sessCtx, &OutboxEvent{ID: "single-alias-demo", Kind: "example.marker"})
 		return err
 	}, options.Transaction().SetWriteConcern(writeconcern.Majority())); err != nil {
 		return err
 	}
-	if exists, err := legacy.Exists(ctx, bson.M{"_id": "legacy-demo"}); err != nil || !exists {
-		return errors.Join(errors.New("legacy transaction marker missing"), err)
+	if exists, err := records.Exists(ctx, bson.M{"_id": "single-alias-demo"}); err != nil || !exists {
+		return errors.Join(errors.New("single-alias transaction marker missing"), err)
 	}
 	return nil
 }

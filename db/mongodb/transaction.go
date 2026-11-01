@@ -49,7 +49,7 @@ func (tx *Transaction) Database(alias string) (*mongo.Database, error) {
 	return db, nil
 }
 
-// WithTransaction retains the single-alias callback API. Always pass sessCtx to
+// WithTransaction runs a callback against one database alias. Always pass sessCtx to
 // operations. Existing session contexts are rejected instead of being replaced.
 func (m *Manager) WithTransaction(ctx context.Context, alias string, fn func(context.Context) error, opts ...options.Lister[options.TransactionOptions]) error {
 	if fn == nil {
@@ -181,9 +181,4 @@ func (m *Manager) WithTransactionAcross(ctx context.Context, aliases []string, f
 	}, opts...)
 	completed = true
 	return err
-}
-
-// WithTransactionAcross is the package-level scope API and accepts driver options.
-func WithTransactionAcross(ctx context.Context, aliases []string, fn func(*Transaction) error, opts ...options.Lister[options.TransactionOptions]) error {
-	return globalManager.WithTransactionAcross(ctx, aliases, fn, opts...)
 }

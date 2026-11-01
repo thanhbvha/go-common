@@ -16,7 +16,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/event"
 )
 
-var exampleNames = []string{"connections", "capabilities", "diagnostics", "crud", "options", "pagination", "stream", "watch", "transaction", "retry", "observability", "guards", "lifecycle", "drain", "global"}
+var exampleNames = []string{"connections", "capabilities", "diagnostics", "crud", "options", "pagination", "stream", "watch", "transaction", "retry", "observability", "guards", "lifecycle", "drain"}
 
 type exampleState struct {
 	manager     *mongodb.Manager
@@ -127,7 +127,7 @@ func runExample(ctx context.Context, uri, selected string, out io.Writer) (resul
 		{"connections", s.connections}, {"capabilities", s.capabilities}, {"diagnostics", s.diagnostics},
 		{"crud", s.crud}, {"options", s.driverOptions}, {"pagination", s.pagination},
 		{"stream", s.stream}, {"watch", s.watch}, {"transaction", s.transactions}, {"retry", s.retry}, {"observability", s.observability},
-		{"guards", s.guards}, {"lifecycle", s.lifecycle}, {"drain", s.drain}, {"global", s.global},
+		{"guards", s.guards}, {"lifecycle", s.lifecycle}, {"drain", s.drain},
 	}
 	for _, step := range steps {
 		if selected != "all" && selected != step.name {

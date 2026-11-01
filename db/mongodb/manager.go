@@ -1,6 +1,6 @@
 // Package mongodb provides MongoDB clients, instance-scoped connection management,
-// OpenTelemetry instrumentation and generic repositories. Prefer NewManager for
-// isolated services and tests; package-level helpers use a shared manager.
+// OpenTelemetry instrumentation and generic repositories. Each Manager owns its
+// database bindings, clients, transaction lifecycle and statistics.
 package mongodb
 
 import (
@@ -66,8 +66,6 @@ type Manager struct {
 
 func NewManager() *Manager { return &Manager{} }
 
-var globalManager = NewManager()
-
 // Init initializes once until DisconnectAll. Repeated successful calls are no-ops.
 // Connections added earlier are preserved. Newly opened clients are rolled back
 // on failure and are published together only after every connection succeeds.
@@ -123,7 +121,7 @@ func (m *Manager) Init(ctx context.Context, configs map[string]Config, defaultDB
 		cfg := configs[name]
 		key := keyFor(name, cfg)
 		if _, exists := staged[name]; exists {
-			// Legacy ungrouped bindings keep their historical preserve-on-Init behavior.
+			// Init preserves existing private bindings.
 			if cfg.ClientGroup == "" {
 				continue
 			}
@@ -211,7 +209,7 @@ func (m *Manager) open(ctx context.Context, cfg Config) (*mongo.Client, error) {
 	return New(ctx, cfg)
 }
 
-// Lookup returns an error instead of panicking. Empty name selects the default.
+// Lookup returns a registered database. Empty name selects the default.
 func (m *Manager) Lookup(name string) (*mongo.Database, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -334,33 +332,4 @@ func (m *Manager) DisconnectAll(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func Init(ctx context.Context, configs map[string]Config, defaultDBName ...string) error {
-	return globalManager.Init(ctx, configs, defaultDBName...)
-}
-
-// Get preserves the legacy panic-on-misconfiguration API. Prefer Lookup.
-func Get(name ...string) *mongo.Database {
-	target := ""
-	if len(name) > 0 {
-		target = name[0]
-	}
-	db, err := Lookup(target)
-	if err != nil {
-		panic(err)
-	}
-	return db
-}
-
-func Lookup(name string) (*mongo.Database, error) { return globalManager.Lookup(name) }
-
-func AddConnection(ctx context.Context, name string, cfg Config, setAsDefault bool) error {
-	return globalManager.AddConnection(ctx, name, cfg, setAsDefault)
-}
-
-func DisconnectAll(ctx context.Context) error { return globalManager.DisconnectAll(ctx) }
-
-func WithTransaction(ctx context.Context, dbName string, fn func(context.Context) error) error {
-	return globalManager.WithTransaction(ctx, dbName, fn)
 }

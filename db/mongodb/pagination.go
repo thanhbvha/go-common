@@ -12,9 +12,8 @@ import (
 
 // PageRequest represents a standard pagination request from an API.
 type PageRequest struct {
-	Page  int      `json:"page" query:"page" form:"page"`
-	Size  int      `json:"size" query:"size" form:"size"`
-	Sorts []string `json:"sorts" query:"sorts" form:"sorts"` // Must be parsed into bson.D in business logic if needed
+	Page int `json:"page" query:"page" form:"page"`
+	Size int `json:"size" query:"size" form:"size"`
 }
 
 // PageResponse is a generic struct for returning paginated items.
@@ -46,7 +45,7 @@ func (p *PageRequest) GetSize() int {
 func (p *PageRequest) GetSkip() int64 {
 	skip, err := p.checkedSkip()
 	if err != nil {
-		return math.MaxInt64 // Saturate for legacy callers; pagination returns an error.
+		return math.MaxInt64 // Saturate for direct callers; pagination returns an error.
 	}
 	return skip
 }
