@@ -13,8 +13,26 @@ import (
 	"github.com/thanhbvha/go-common/websocket/routing"
 )
 
-// Hide optional deduper interfaces to exercise a Kafka-like publication contract.
-type noDedupeTransport struct{ transport.Transport }
+// Hide optional deduper interfaces to exercise a Kafka-like publication contract,
+// while preserving synchronous subscription provisioning from the memory driver.
+type noDedupeTransport struct {
+	transport.Transport
+	transport.SubscriptionProvisioner
+	eventConsumerReady <-chan struct{}
+}
+
+func (t noDedupeTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
+	if sub.Topology.Kind == transport.EventTopology {
+		// Hold the event consumer until after publication. Subscriber provisioning
+		// must happen during Start, not depend on when this goroutine is scheduled.
+		select {
+		case <-t.eventConsumerReady:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return t.Transport.Consume(ctx, sub, deliver)
+}
 
 func (t noDedupeTransport) Capabilities() transport.Capabilities {
 	c := t.Transport.Capabilities()
@@ -25,7 +43,13 @@ func (t noDedupeTransport) Capabilities() transport.Capabilities {
 func TestBridgePublicationDedupePolicy(t *testing.T) {
 	for _, policy := range []bridge.PublicationDedupePolicy{bridge.DedupeRequired, bridge.DedupeDisabled} {
 		t.Run(map[bridge.PublicationDedupePolicy]string{bridge.DedupeRequired: "required", bridge.DedupeDisabled: "disabled"}[policy], func(t *testing.T) {
-			b, err := bus.Open(bus.DefaultConfig(), bus.WithTransport(noDedupeTransport{memory.New()}))
+			eventConsumerReady := make(chan struct{})
+			backend := memory.New()
+			b, err := bus.Open(bus.DefaultConfig(), bus.WithTransport(noDedupeTransport{
+				Transport:               backend,
+				SubscriptionProvisioner: backend.(transport.SubscriptionProvisioner),
+				eventConsumerReady:      eventConsumerReady,
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,6 +108,7 @@ func TestBridgePublicationDedupePolicy(t *testing.T) {
 			if err = integration.PublishNotification(ctx, bridge.Notification{MessageID: "event-id", TenantID: "t", UserID: "u", Payload: []byte("payload")}); err != nil {
 				t.Fatal(err)
 			}
+			close(eventConsumerReady)
 			select {
 			case n := <-notifications:
 				if n.MessageID != "event-id" {
