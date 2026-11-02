@@ -100,8 +100,8 @@ runtime supervision, readiness, and graceful shutdown.
 - Do **not** combine a Foundation app with `utils/graceful`. Two lifecycle
   coordinators can handle the same signal, close a resource twice, or violate
   dependency shutdown order.
-- `utils/graceful` remains a legacy standalone helper only for applications
-  that have not migrated to Foundation.
+- Use `utils/graceful` for small standalone processes that need a focused,
+  one-shot shutdown coordinator without Foundation's runtime supervision.
 - If another process or host owns OS signals, create Foundation with
   `foundation.WithoutSignals()` and control it through the parent context or
   `app.Shutdown(ctx)`.

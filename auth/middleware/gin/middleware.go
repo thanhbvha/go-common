@@ -33,8 +33,8 @@ func Middleware(manager *auth.Manager) gin.HandlerFunc {
 
 		// Store UserInfo in Gin's context
 		userInfo := &claims.UserInfo
-		c.Set(string(ctxkey.UserInfo), userInfo)
-		c.Set(string(ctxkey.AuthClaims), claims.RegisteredClaims)
+		c.Set(ctxkey.LocalUserInfo, userInfo)
+		c.Set(ctxkey.LocalAuthClaims, claims.RegisteredClaims)
 		ctx := ctxkey.SetAuthClaims(c.Request.Context(), claims.RegisteredClaims)
 		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, userInfo))
 		c.Next()
@@ -64,8 +64,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) gin.Handl
 			return
 		}
 
-		c.Set(string(ctxkey.UserInfo), claims)
-		c.Set(string(ctxkey.AuthClaims), claims)
+		c.Set(ctxkey.LocalUserInfo, claims)
+		c.Set(ctxkey.LocalAuthClaims, claims)
 		ctx := ctxkey.SetAuthClaims(c.Request.Context(), claims)
 		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, claims))
 		c.Next()
@@ -101,8 +101,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gi
 		}
 
 		userInfo := &details.UserInfo
-		c.Set(string(ctxkey.UserInfo), userInfo)
-		c.Set(string(ctxkey.AuthClaims), details.RegisteredClaims)
+		c.Set(ctxkey.LocalUserInfo, userInfo)
+		c.Set(ctxkey.LocalAuthClaims, details.RegisteredClaims)
 		ctx := ctxkey.SetAuthClaims(c.Request.Context(), details.RegisteredClaims)
 		c.Request = c.Request.WithContext(ctxkey.SetUserInfo(ctx, userInfo))
 		c.Next()

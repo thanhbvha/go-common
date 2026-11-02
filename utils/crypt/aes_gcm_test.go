@@ -2,6 +2,7 @@ package crypt
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -42,8 +43,8 @@ func TestAESGCM(t *testing.T) {
 	tamperedCiphertext[len(tamperedCiphertext)-1] ^= 0xFF
 
 	_, err = DecryptAESGCM(key, tamperedCiphertext, aad)
-	if err == nil {
-		t.Error("decryption should have failed with tampered ciphertext")
+	if !errors.Is(err, ErrAuthenticationFailed) {
+		t.Errorf("tampered ciphertext error = %v", err)
 	}
 }
 

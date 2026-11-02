@@ -71,7 +71,9 @@ func runFiber(limiter ratelimit.Limiter, cfg ratelimit.Config) {
 	shutdown.Register(func(context.Context) error { return app.Shutdown() })
 	go func() { _ = app.Listen(address) }()
 	fmt.Printf("Fiber rate-limit example listening on http://localhost%s\n", address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runGin(limiter ratelimit.Limiter, cfg ratelimit.Config) {
@@ -93,7 +95,9 @@ func runEcho(limiter ratelimit.Limiter, cfg ratelimit.Config) {
 	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
 	go func() { _ = e.Start(address) }()
 	fmt.Printf("Echo rate-limit example listening on http://localhost%s\n", address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runHTTPServer(name string, server *http.Server) {
@@ -101,7 +105,9 @@ func runHTTPServer(name string, server *http.Server) {
 	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
 	go func() { _ = server.ListenAndServe() }()
 	fmt.Printf("%s rate-limit example listening on http://localhost%s\n", name, address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func envOrDefault(name, fallback string) string {

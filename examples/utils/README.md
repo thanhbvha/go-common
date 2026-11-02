@@ -1,23 +1,23 @@
-# Utils Module
+# Utils example
 
-## Overview
-The `utils` directory is a collection of helper packages designed to standardize common operations across microservices, such as cryptography, string manipulation, context keys, generic collections, and graceful shutdown coordination.
+The example in `main.go` demonstrates every public utils package with explicit
+error handling:
 
-## Sub-Packages and Covered Examples
-This example module contains a central `main.go` file demonstrating all sub-packages:
+- AES-256-GCM and ChaCha20-Poly1305 authenticated encryption.
+- Argon2id password hashing and verification.
+- SHA-2, SHA-3, and BLAKE2b checksum helpers.
+- Secure random strings and Unicode slug generation.
+- Collision-resistant context accessors.
+- Stable slice deduplication, filtering, and mapping. Standard operations such
+  as `Contains` use Go's `slices` package.
+- One-shot graceful shutdown with LIFO hooks and a shared timeout.
 
-1. **`RunCryptExample()`**: Modern, secure cryptographic utilities.
-   - Implements `AES-256 GCM` (AEAD, Recommended), `ChaCha20-Poly1305` (Fast AEAD for mobile/IoT), and `AES-256 CBC` (Legacy).
-   - Implements `Argon2id` for OWASP-recommended password hashing.
-   - Provides fast data hashing (`SHA-256`, `SHA3-256`, `BLAKE2b`).
-   - Provides cryptographically secure random number generators (`GenerateKey32`).
-2. **`RunStrExample()`**: Helpers for string manipulation (e.g., `Slugify`, `Random`).
-3. **`RunCtxKeyExample()`**: Strongly-typed context keys to prevent context value collisions (e.g., `ctxkey.UserIDKey`, `ctxkey.RequestIDKey`).
-4. **`RunSliceExample()`**: Go 1.18+ Generics for Slices. Includes `slice.Contains`, `slice.Unique`, `slice.Filter`, and `slice.Map` so you never have to write manual `for-range` loops again!
-5. **`RunMapsExample()`**: Go 1.18+ Generics for Maps. Quickly extract `maps.Keys` or `maps.Values`.
-6. **`RunGracefulExample()`**: A struct-based coordinator (`graceful.NewShutdown`) that traps OS signals (SIGINT/SIGTERM) and triggers registered shutdown hooks in reverse order (LIFO) with a timeout.
+Run it and press Ctrl+C after the examples finish:
 
-## 🚨 Best Practices for AI/Developers
-- **Cryptography (CRITICAL)**: Always use `AES-256 GCM` (`EncryptAESGCM`) for new symmetric encryption needs. Do NOT use CBC unless maintaining legacy systems, as it is vulnerable to padding oracle attacks. For passwords, ALWAYS use `HashPasswordArgon2id`; never use MD5, SHA1, or plain bcrypt.
-- **Context Keys**: Never use raw strings as keys when calling `context.WithValue`. Always use the predefined types in the `ctxkey` package.
-- **Generics vs Manual Loops**: Always check if `utils/slice` or `utils/maps` has the utility you need before manually writing a `for` loop to check for element existence or uniqueness.
+```bash
+go run ./examples/utils
+```
+
+The example deliberately does not print encryption keys or password hashes.
+All encryption examples use authenticated encryption; AES-CBC is no longer part
+of the module.

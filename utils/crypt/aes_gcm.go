@@ -4,13 +4,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"errors"
+	"fmt"
 	"io"
-)
-
-var (
-	ErrInvalidKeySize     = errors.New("crypt: invalid key size, must be 32 bytes for AES-256")
-	ErrCiphertextTooShort = errors.New("crypt: ciphertext too short")
 )
 
 // EncryptAESGCM encrypts the plaintext using AES-256 GCM.
@@ -71,7 +66,7 @@ func DecryptAESGCM(key, ciphertext, additionalData []byte) ([]byte, error) {
 	nonce, encryptedMessage := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := aesgcm.Open(nil, nonce, encryptedMessage, additionalData)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: AES-GCM", ErrAuthenticationFailed)
 	}
 
 	return plaintext, nil

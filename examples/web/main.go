@@ -68,11 +68,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -stack; use nethttp, fiber, gin, or echo")
 		os.Exit(2)
 	}
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+	}
 }
 
-func createdUser(req CreateUserRequest, stack string) map[string]any {
-	return map[string]any{"slug": str.Slugify(req.Name), "reference_id": str.Random(12), "email": req.Email, "stack": stack}
+func createdUser(req CreateUserRequest, stack string) (map[string]any, error) {
+	referenceID, err := str.Random(12)
+	if err != nil {
+		return nil, fmt.Errorf("generate reference ID: %w", err)
+	}
+	return map[string]any{"slug": str.Slugify(req.Name), "reference_id": referenceID, "email": req.Email, "stack": stack}, nil
 }
 
 func runNetHTTP(shutdown *graceful.Shutdown) {
@@ -85,7 +91,11 @@ func runNetHTTP(shutdown *graceful.Shutdown) {
 		if validationErrors := validator.Struct(&req); validationErrors != nil {
 			return nethttpresp.ValidationError(w, r, validationErrors)
 		}
-		return nethttpresp.Created(w, r, createdUser(req, "net/http"))
+		created, err := createdUser(req, "net/http")
+		if err != nil {
+			return err
+		}
+		return nethttpresp.Created(w, r, created)
 	}))
 	handler := nethttplog.RequestIDMiddleware(nethttplog.Middleware(nethttpmw.Recover(nethttpmw.Telemetry("HTTP Request")(mux))))
 	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
@@ -104,7 +114,11 @@ func runFiber(shutdown *graceful.Shutdown) {
 		if validationErrors := validator.Struct(&req); validationErrors != nil {
 			return fiberresp.ValidationError(c, validationErrors)
 		}
-		return fiberresp.Created(c, createdUser(req, "fiber"))
+		created, err := createdUser(req, "fiber")
+		if err != nil {
+			return err
+		}
+		return fiberresp.Created(c, created)
 	})
 	shutdown.Register(func(context.Context) error { return app.Shutdown() })
 	go func() { _ = app.Listen(address) }()
@@ -124,7 +138,12 @@ func runGin(shutdown *graceful.Shutdown) {
 			ginresp.ValidationError(c, validationErrors)
 			return
 		}
-		ginresp.Created(c, createdUser(req, "gin"))
+		created, err := createdUser(req, "gin")
+		if err != nil {
+			ginresp.Error(c, http.StatusInternalServerError, "Could not create user")
+			return
+		}
+		ginresp.Created(c, created)
 	})
 	server := &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
@@ -144,7 +163,11 @@ func runEcho(shutdown *graceful.Shutdown) {
 		if validationErrors := validator.Struct(&req); validationErrors != nil {
 			return echoresp.ValidationError(c, validationErrors)
 		}
-		return echoresp.Created(c, createdUser(req, "echo"))
+		created, err := createdUser(req, "echo")
+		if err != nil {
+			return err
+		}
+		return echoresp.Created(c, created)
 	})
 	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
 	go func() { _ = e.Start(address) }()

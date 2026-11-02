@@ -30,3 +30,16 @@ func TestAuthClaimsRoundTrip(t *testing.T) {
 		t.Fatalf("GetAuthClaims() = %#v, %v", got, ok)
 	}
 }
+
+func TestStringContextKeysDoNotCollide(t *testing.T) {
+	type externalKey string
+	ctx := context.WithValue(context.Background(), externalKey("request_id"), "external")
+	ctx = SetRequestID(ctx, "internal")
+
+	if got, _ := GetRequestID(ctx); got != "internal" {
+		t.Fatalf("GetRequestID() = %q", got)
+	}
+	if got := ctx.Value(externalKey("request_id")); got != "external" {
+		t.Fatalf("external context value = %v", got)
+	}
+}

@@ -49,7 +49,7 @@ Other native options are appended after wrapper options and may override them.
 The gRPC module owns protocol-specific draining; `foundation` owns application
 startup/shutdown order and signals when coordinating several services. A separate
 generic gRPC graceful coordinator is unnecessary. No gRPC entry point uses the
-deprecated process-global `utils/graceful.Register` or `Wait` API.
+removed process-global `utils/graceful` API.
 
 | API | Listener | Signal handling |
 | --- | --- | --- |

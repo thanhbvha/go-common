@@ -158,7 +158,9 @@ func runFiber(manager *auth.Manager) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runGin(manager *auth.Manager) {
@@ -217,7 +219,9 @@ func runEcho(manager *auth.Manager) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runHTTPServer(name string, server *http.Server) {
@@ -229,7 +233,9 @@ func runHTTPServer(name string, server *http.Server) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

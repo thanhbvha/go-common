@@ -81,7 +81,9 @@ func runFiber(checker *health.Checker) {
 	shutdown.Register(func(context.Context) error { return app.Shutdown() })
 	go func() { _ = app.Listen(address) }()
 	fmt.Printf("Fiber health example listening on http://localhost%s\n", address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runGin(checker *health.Checker) {
@@ -103,7 +105,9 @@ func runEcho(checker *health.Checker) {
 	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
 	go func() { _ = e.Start(address) }()
 	fmt.Printf("Echo health example listening on http://localhost%s\n", address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func runHTTPServer(name string, server *http.Server) {
@@ -111,5 +115,7 @@ func runHTTPServer(name string, server *http.Server) {
 	shutdown.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
 	go func() { _ = server.ListenAndServe() }()
 	fmt.Printf("%s health example listening on http://localhost%s\n", name, address)
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }

@@ -22,7 +22,7 @@ func TestGenericMiddlewareStoresClaims(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.GET("/profile", GenericMiddleware[*testClaims](testValidator{}), func(c *gin.Context) {
-		local, localOK := c.Get(string(ctxkey.UserInfo))
+		local, localOK := c.Get(ctxkey.LocalUserInfo)
 		localClaims, localTyped := local.(*testClaims)
 		value, contextOK := ctxkey.GetUserInfo(c.Request.Context())
 		fromContext, contextTyped := value.(*testClaims)

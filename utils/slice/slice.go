@@ -1,47 +1,49 @@
 // Package slice provides generic utility functions for Go slices.
 //
-// It leverages Go 1.18+ generics to offer common slice operations like filtering,
-// mapping, checking for existence (Contains), and deduplication in a type-safe manner.
+// It complements the standard library slices package with filtering, mapping,
+// and stable deduplication.
 package slice
 
-// Contains checks if a slice contains a specific item
-func Contains[T comparable](slice []T, item T) bool {
-	for _, v := range slice {
-		if v == item {
-			return true
-		}
+// Unique returns a new slice containing the first occurrence of every value.
+// It preserves input order and returns nil for a nil input.
+func Unique[T comparable](values []T) []T {
+	if values == nil {
+		return nil
 	}
-	return false
-}
-
-// Unique removes duplicates from a slice and returns a new slice
-func Unique[T comparable](slice []T) []T {
-	keys := make(map[T]bool)
-	var result []T
-	for _, entry := range slice {
-		if _, value := keys[entry]; !value {
-			keys[entry] = true
+	seen := make(map[T]struct{}, len(values))
+	result := make([]T, 0, len(values))
+	for _, entry := range values {
+		if _, exists := seen[entry]; !exists {
+			seen[entry] = struct{}{}
 			result = append(result, entry)
 		}
 	}
 	return result
 }
 
-// Filter filters a slice based on a condition function
-func Filter[T any](slice []T, condition func(T) bool) []T {
-	var result []T
-	for _, v := range slice {
-		if condition(v) {
+// Filter returns the values for which keep returns true. It returns nil for a
+// nil input and panics when keep is nil.
+func Filter[T any](values []T, keep func(T) bool) []T {
+	if values == nil {
+		return nil
+	}
+	result := make([]T, 0, len(values))
+	for _, v := range values {
+		if keep(v) {
 			result = append(result, v)
 		}
 	}
 	return result
 }
 
-// Map transforms a slice of type T to a slice of type U
-func Map[T any, U any](slice []T, transform func(T) U) []U {
-	result := make([]U, len(slice))
-	for i, v := range slice {
+// Map transforms every value while preserving order. It returns nil for a nil
+// input and panics when transform is nil.
+func Map[T any, U any](values []T, transform func(T) U) []U {
+	if values == nil {
+		return nil
+	}
+	result := make([]U, len(values))
+	for i, v := range values {
 		result[i] = transform(v)
 	}
 	return result

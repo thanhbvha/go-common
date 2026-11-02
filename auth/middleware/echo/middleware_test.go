@@ -21,7 +21,7 @@ func (testValidator) ValidateRequestToken(context.Context, string) (*testClaims,
 func TestGenericMiddlewareStoresClaims(t *testing.T) {
 	e := echo.New()
 	e.GET("/profile", func(c echo.Context) error {
-		local, localOK := c.Get(string(ctxkey.UserInfo)).(*testClaims)
+		local, localOK := c.Get(ctxkey.LocalUserInfo).(*testClaims)
 		value, contextOK := ctxkey.GetUserInfo(c.Request().Context())
 		fromContext, contextTyped := value.(*testClaims)
 		if !localOK || !contextOK || !contextTyped || local.ID != "user-1" || fromContext.ID != "user-1" {

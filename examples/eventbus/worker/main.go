@@ -35,7 +35,9 @@ func run(ctx context.Context, args []string) error {
 	waited := false
 	defer func() {
 		if !waited {
-			shutdown.Execute()
+			if err := shutdown.Execute(); err != nil {
+				logger.Error("graceful shutdown failed", "error", err)
+			}
 		}
 	}()
 	rt, err := demo.OpenRuntime(ctx, cfg, logger)
@@ -56,6 +58,5 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("worker ready", "task", demo.TaskName, "namespace", cfg.Namespace)
 	waited = true
-	shutdown.Wait()
-	return nil
+	return shutdown.Wait()
 }

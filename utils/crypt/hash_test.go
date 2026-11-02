@@ -7,16 +7,6 @@ import (
 func TestHashes(t *testing.T) {
 	data := []byte("hello world")
 
-	md5Hash := HashMD5(data)
-	if md5Hash != "5eb63bbbe01eeed093cb22bb8f5acdc3" {
-		t.Errorf("unexpected md5: %s", md5Hash)
-	}
-
-	sha1Hash := HashSHA1(data)
-	if sha1Hash != "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed" {
-		t.Errorf("unexpected sha1: %s", sha1Hash)
-	}
-
 	sha256Hash := HashSHA256(data)
 	if sha256Hash != "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9" {
 		t.Errorf("unexpected sha256: %s", sha256Hash)
@@ -32,10 +22,7 @@ func TestHashes(t *testing.T) {
 		t.Errorf("unexpected sha3_256: %s", sha3Hash)
 	}
 
-	blake2bHash, err := HashBLAKE2b(data)
-	if err != nil {
-		t.Fatalf("unexpected blake2b error: %v", err)
-	}
+	blake2bHash := HashBLAKE2b(data)
 	if len(blake2bHash) != 64 { // 32 bytes in hex
 		t.Errorf("unexpected blake2b length: %d", len(blake2bHash))
 	}

@@ -28,8 +28,8 @@ func Middleware(manager *auth.Manager) fiber.Handler {
 		// Store UserInfo in Fiber's context for downstream handlers
 		// Note: Fiber's Locals expects string keys, but we can use our ctxkey constants as strings
 		userInfo := &claims.UserInfo
-		c.Locals(string(ctxkey.UserInfo), userInfo)
-		c.Locals(string(ctxkey.AuthClaims), claims.RegisteredClaims)
+		c.Locals(ctxkey.LocalUserInfo, userInfo)
+		c.Locals(ctxkey.LocalAuthClaims, claims.RegisteredClaims)
 		ctx := ctxkey.SetAuthClaims(c.UserContext(), claims.RegisteredClaims)
 		c.SetUserContext(ctxkey.SetUserInfo(ctx, userInfo))
 
@@ -54,8 +54,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) fiber.Han
 			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
 		}
 
-		c.Locals(string(ctxkey.UserInfo), claims)
-		c.Locals(string(ctxkey.AuthClaims), claims)
+		c.Locals(ctxkey.LocalUserInfo, claims)
+		c.Locals(ctxkey.LocalAuthClaims, claims)
 		ctx := ctxkey.SetAuthClaims(c.UserContext(), claims)
 		c.SetUserContext(ctxkey.SetUserInfo(ctx, claims))
 		return c.Next()
@@ -85,8 +85,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *fi
 		}
 
 		userInfo := &details.UserInfo
-		c.Locals(string(ctxkey.UserInfo), userInfo)
-		c.Locals(string(ctxkey.AuthClaims), details.RegisteredClaims)
+		c.Locals(ctxkey.LocalUserInfo, userInfo)
+		c.Locals(ctxkey.LocalAuthClaims, details.RegisteredClaims)
 		ctx := ctxkey.SetAuthClaims(c.UserContext(), details.RegisteredClaims)
 		c.SetUserContext(ctxkey.SetUserInfo(ctx, userInfo))
 

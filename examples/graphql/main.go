@@ -103,7 +103,9 @@ func RunNetHTTPExample() {
 		common_logger.Info("Shutting down net/http server...")
 		return srv.Shutdown(ctx)
 	})
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func newNetHTTPHandler() http.Handler {
@@ -137,9 +139,11 @@ func RunFiberExample() {
 		common_logger.Info("Shutting down Fiber server...")
 		return app.ShutdownWithContext(ctx)
 	})
-	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
+	// Always call shutdown.Wait() in standalone GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 // =====================================================================
@@ -170,9 +174,11 @@ func RunGinExample() {
 		common_logger.Info("Shutting down Gin server...")
 		return srv.Shutdown(ctx)
 	})
-	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
+	// Always call shutdown.Wait() in standalone GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 // =====================================================================
@@ -195,9 +201,11 @@ func RunEchoExample() {
 		common_logger.Info("Shutting down Echo server...")
 		return e.Shutdown(ctx)
 	})
-	// CRITICAL: Always use graceful.Wait() in GraphQL servers. It blocks the main thread
+	// Always call shutdown.Wait() in standalone GraphQL servers. It blocks the main thread
 	// until an interrupt signal is received, preventing abrupt termination of queries.
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		fmt.Fprintln(os.Stderr, "graceful shutdown:", err)
+	}
 }
 
 func newFiberApp() *fiber.App {

@@ -1,6 +1,7 @@
 package crypt
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -32,5 +33,14 @@ func TestGenerateRandomString(t *testing.T) {
 	// 16 bytes = 32 hex characters
 	if len(s) != 32 {
 		t.Errorf("expected length 32, got %d", len(s))
+	}
+}
+
+func TestGenerateRandomRejectsNegativeLength(t *testing.T) {
+	if _, err := GenerateRandomBytes(-1); !errors.Is(err, ErrInvalidLength) {
+		t.Fatalf("GenerateRandomBytes(-1) error = %v", err)
+	}
+	if _, err := GenerateRandomString(-1); !errors.Is(err, ErrInvalidLength) {
+		t.Fatalf("GenerateRandomString(-1) error = %v", err)
 	}
 }

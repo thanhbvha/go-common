@@ -41,7 +41,11 @@ func run(ctx context.Context, args []string) error {
 		logger.Close()
 		return nil
 	})
-	defer shutdown.Execute()
+	defer func() {
+		if err := shutdown.Execute(); err != nil {
+			logger.Error("graceful shutdown failed", "error", err)
+		}
+	}()
 
 	metrics := demo.NewMetrics()
 	rt, err := demo.OpenRuntime(ctx, cfg, logger)

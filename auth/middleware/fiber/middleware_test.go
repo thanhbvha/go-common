@@ -20,7 +20,7 @@ func (testValidator) ValidateRequestToken(context.Context, string) (*testClaims,
 func TestGenericMiddlewareStoresClaims(t *testing.T) {
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
 	app.Get("/profile", GenericMiddleware[*testClaims](testValidator{}), func(c *fiber.Ctx) error {
-		local, localOK := c.Locals(string(ctxkey.UserInfo)).(*testClaims)
+		local, localOK := c.Locals(ctxkey.LocalUserInfo).(*testClaims)
 		value, contextOK := ctxkey.GetUserInfo(c.UserContext())
 		fromContext, typed := value.(*testClaims)
 		if !localOK || !contextOK || !typed || local.ID != "user-1" || fromContext.ID != "user-1" {

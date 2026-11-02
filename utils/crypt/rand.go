@@ -12,6 +12,9 @@ import (
 
 // GenerateRandomBytes generates cryptographically secure random bytes of given length.
 func GenerateRandomBytes(length int) ([]byte, error) {
+	if length < 0 {
+		return nil, ErrInvalidLength
+	}
 	b := make([]byte, length)
 	_, err := rand.Read(b)
 	if err != nil {

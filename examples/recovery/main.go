@@ -59,7 +59,9 @@ func main() {
 	shutdown.Register(func(ctx context.Context) error {
 		return app.ShutdownWithContext(ctx)
 	})
-	shutdown.Wait()
+	if err := shutdown.Wait(); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+	}
 }
 
 func runBackgroundJob(ctx context.Context) {

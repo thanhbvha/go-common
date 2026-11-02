@@ -1,20 +1,10 @@
-// Package graceful provides utilities for graceful shutdown of services.
-//
-// Preferred usage — struct-based, testable, supports multiple instances:
-//
-//	sd := graceful.NewShutdown(30 * time.Second)
-//	sd.Register(func(ctx context.Context) error { return server.Shutdown(ctx) })
-//	sd.Wait()
-//
-// Legacy usage — package-level functions kept for backward compatibility:
-//
-//	graceful.Register(func(ctx context.Context) error { ... })
-//	graceful.Wait(30 * time.Second)
+// Package graceful coordinates one-shot, LIFO service shutdown.
 package graceful
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -22,79 +12,90 @@ import (
 	"time"
 )
 
-// Shutdown coordinates graceful shutdown for a set of cleanup functions.
-// It is safe for concurrent use and supports multiple independent instances.
+// Hook releases one service resource. Hooks should stop promptly when ctx is
+// canceled and should return any incomplete cleanup as an error.
+type Hook func(ctx context.Context) error
+
+// Shutdown is a concurrency-safe, one-shot shutdown coordinator.
 type Shutdown struct {
 	mu      sync.Mutex
-	funcs   []func(ctx context.Context) error
+	hooks   []Hook
 	timeout time.Duration
+	started bool
+	once    sync.Once
+	err     error
+	done    chan struct{}
 }
 
-// NewShutdown creates a new Shutdown coordinator with the given cleanup timeout.
-// A timeout <= 0 defaults to 30 seconds.
+// NewShutdown creates a coordinator. It panics for a non-positive timeout,
+// which is a startup configuration error.
 func NewShutdown(timeout time.Duration) *Shutdown {
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		panic("graceful: timeout must be positive")
 	}
-	return &Shutdown{timeout: timeout}
+	return &Shutdown{timeout: timeout, done: make(chan struct{})}
 }
 
-// Register adds a cleanup function to be executed during shutdown.
-// Functions are executed in LIFO order (last registered = first to run).
-func (s *Shutdown) Register(fn func(ctx context.Context) error) {
+// Register adds a non-nil hook. Hooks execute in reverse registration order.
+// Register panics when hook is nil or shutdown has already started.
+func (s *Shutdown) Register(hook Hook) {
+	if hook == nil {
+		panic("graceful: hook must not be nil")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.funcs = append([]func(ctx context.Context) error{fn}, s.funcs...)
-}
-
-// Wait blocks until SIGINT or SIGTERM is received, then executes all cleanup functions.
-func (s *Shutdown) Wait() {
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	sig := <-quit
-	log.Printf("[Graceful] Received signal: %v. Starting graceful shutdown...", sig)
-	s.Execute()
-}
-
-// Execute runs all cleanup functions immediately (without waiting for a signal).
-// Useful for programmatic shutdown or testing.
-func (s *Shutdown) Execute() {
-	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	defer cancel()
-
-	s.mu.Lock()
-	funcs := make([]func(ctx context.Context) error, len(s.funcs))
-	copy(funcs, s.funcs)
-	s.mu.Unlock()
-
-	for i, fn := range funcs {
-		log.Printf("[Graceful] Running cleanup task %d/%d...", i+1, len(funcs))
-		if err := fn(ctx); err != nil {
-			log.Printf("[Graceful] Error in cleanup task %d: %v", i+1, err)
-		}
+	if s.started {
+		panic("graceful: cannot register a hook after shutdown has started")
 	}
-	log.Println("[Graceful] Shutdown completed.")
+	s.hooks = append(s.hooks, hook)
 }
 
-// ---- Package-level API (legacy, backward-compatible) ----
-
-var globalShutdown = NewShutdown(30 * time.Second)
-
-// Register adds a cleanup function to the global Shutdown instance.
-//
-// Deprecated: Use graceful.NewShutdown(timeout).Register(fn) for a testable,
-// struct-based approach. This global function will be removed in a future version.
-func Register(fn func(ctx context.Context) error) {
-	globalShutdown.Register(fn)
+// Wait waits for SIGINT or SIGTERM and then executes the registered hooks.
+func (s *Shutdown) Wait() error {
+	return s.WaitContext(context.Background())
 }
 
-// Wait blocks until an OS signal is received, then executes all registered
-// cleanup functions with the specified timeout.
-//
-// Deprecated: Use graceful.NewShutdown(timeout).Wait() instead.
-func Wait(timeout time.Duration) {
-	globalShutdown.mu.Lock()
-	globalShutdown.timeout = timeout
-	globalShutdown.mu.Unlock()
-	globalShutdown.Wait()
+// WaitContext waits for SIGINT, SIGTERM, or ctx cancellation and then executes
+// the registered hooks. Signal resources are released before it returns.
+func (s *Shutdown) WaitContext(ctx context.Context) error {
+	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	select {
+	case <-signalCtx.Done():
+	case <-s.done:
+	}
+	return s.Execute()
+}
+
+// Execute runs all hooks once with the configured shared timeout. Concurrent or
+// repeated calls wait for the first execution and return the same joined error.
+func (s *Shutdown) Execute() error {
+	s.once.Do(func() {
+		defer close(s.done)
+		s.mu.Lock()
+		s.started = true
+		hooks := append([]Hook(nil), s.hooks...)
+		s.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		defer cancel()
+
+		var hookErrors []error
+		for i := len(hooks) - 1; i >= 0; i-- {
+			if err := executeHook(ctx, hooks[i]); err != nil {
+				hookErrors = append(hookErrors, fmt.Errorf("graceful: hook %d: %w", i, err))
+			}
+		}
+		s.err = errors.Join(hookErrors...)
+	})
+	return s.err
+}
+
+func executeHook(ctx context.Context, hook Hook) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return hook(ctx)
 }

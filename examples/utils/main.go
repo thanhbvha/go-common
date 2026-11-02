@@ -5,189 +5,127 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/thanhbvha/go-common/utils/crypt"
 	"github.com/thanhbvha/go-common/utils/ctxkey"
 	"github.com/thanhbvha/go-common/utils/graceful"
-	"github.com/thanhbvha/go-common/utils/maps"
-	"github.com/thanhbvha/go-common/utils/slice"
+	utilslice "github.com/thanhbvha/go-common/utils/slice"
 	"github.com/thanhbvha/go-common/utils/str"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	fmt.Println("=== Utils Module Examples ===")
-
-	RunCryptExample()
-	RunStrExample()
-	RunCtxKeyExample()
-	RunSliceExample()
-	RunMapsExample()
-
-	// Run graceful shutdown last as it blocks
-	RunGracefulExample()
+	if err := runCryptExample(); err != nil {
+		return err
+	}
+	if err := runStringExample(); err != nil {
+		return err
+	}
+	runContextExample()
+	runSliceExample()
+	return runGracefulExample()
 }
 
-// =====================================================================
-// 1. Cryptography Examples
-// =====================================================================
-func RunCryptExample() {
-	fmt.Println("\n--- 1. Cryptography (utils/crypt) ---")
-
-	// Generate a cryptographically secure 32-byte key
-	secretKey, err := crypt.GenerateKey32()
+func runCryptExample() error {
+	fmt.Println("\n--- Cryptography ---")
+	key, err := crypt.GenerateKey32()
 	if err != nil {
-		log.Fatalf("Failed to generate key: %v", err)
+		return fmt.Errorf("generate encryption key: %w", err)
 	}
-	fmt.Printf("Generated 32-byte Key (Hex): %x\n", secretKey)
+	plaintext := []byte("sensitive message")
+	aad := []byte("tenant:example")
 
-	plainText := []byte("This is a highly sensitive message.")
+	ciphertext, err := crypt.EncryptAESGCM(key, plaintext, aad)
+	if err != nil {
+		return fmt.Errorf("encrypt AES-GCM: %w", err)
+	}
+	decrypted, err := crypt.DecryptAESGCM(key, ciphertext, aad)
+	if err != nil {
+		return fmt.Errorf("decrypt AES-GCM: %w", err)
+	}
+	fmt.Printf("AES-GCM ciphertext: %s\n", base64.StdEncoding.EncodeToString(ciphertext))
+	fmt.Printf("AES-GCM plaintext: %s\n", decrypted)
 
-	// A. AES-256 GCM (Recommended for Symmetric Encryption)
-	fmt.Println("\n--- A. AES-256 GCM (AEAD) ---")
-	aad := []byte("optional-additional-authenticated-data")
-	cipherGCM, _ := crypt.EncryptAESGCM(secretKey, plainText, aad)
-	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherGCM))
+	chachaCiphertext, err := crypt.EncryptChaCha20(key, plaintext, aad)
+	if err != nil {
+		return fmt.Errorf("encrypt ChaCha20-Poly1305: %w", err)
+	}
+	if _, err = crypt.DecryptChaCha20(key, chachaCiphertext, aad); err != nil {
+		return fmt.Errorf("decrypt ChaCha20-Poly1305: %w", err)
+	}
 
-	decryptedGCM, _ := crypt.DecryptAESGCM(secretKey, cipherGCM, aad)
-	fmt.Printf("Decrypted: %s\n", string(decryptedGCM))
-
-	// B. ChaCha20-Poly1305 (Fast AEAD)
-	fmt.Println("\n--- B. ChaCha20-Poly1305 (AEAD) ---")
-	cipherChaCha, _ := crypt.EncryptChaCha20(secretKey, plainText, nil)
-	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherChaCha))
-
-	decryptedChaCha, _ := crypt.DecryptChaCha20(secretKey, cipherChaCha, nil)
-	fmt.Printf("Decrypted: %s\n", string(decryptedChaCha))
-
-	// C. AES-256 CBC (Legacy)
-	fmt.Println("\n--- C. AES-256 CBC (Legacy) ---")
-	cipherCBC, _ := crypt.EncryptAESCBC(secretKey, plainText)
-	fmt.Printf("Encrypted (Base64): %s\n", base64.StdEncoding.EncodeToString(cipherCBC))
-
-	decryptedCBC, _ := crypt.DecryptAESCBC(secretKey, cipherCBC)
-	fmt.Printf("Decrypted: %s\n", string(decryptedCBC))
-
-	// D. Argon2id Password Hashing (OWASP Recommended)
-	fmt.Println("\n--- D. Argon2id Password Hashing ---")
-	userPassword := "SuperSecretPassword123!"
-	encodedHash, _ := crypt.HashPasswordArgon2id(userPassword)
-	fmt.Printf("Argon2id Encoded Hash: %s\n", encodedHash)
-
-	match, _ := crypt.VerifyPasswordArgon2id(userPassword, encodedHash)
-	fmt.Printf("Password Match? %v\n", match)
-
-	// E. Fast Hashing (SHA256, SHA3, BLAKE2b)
-	fmt.Println("\n--- E. Data Hashing ---")
-	data := []byte("hello world")
-	fmt.Printf("SHA-256: %s\n", crypt.HashSHA256(data))
-	fmt.Printf("SHA3-256: %s\n", crypt.HashSHA3_256(data))
-	blake2bHash, _ := crypt.HashBLAKE2b(data)
-	fmt.Printf("BLAKE2b: %s\n", blake2bHash)
+	passwordHash, err := crypt.HashPassword("correct horse battery staple")
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	match, err := crypt.VerifyPassword("correct horse battery staple", passwordHash)
+	if err != nil {
+		return fmt.Errorf("verify password: %w", err)
+	}
+	fmt.Printf("Password matches: %v\n", match)
+	fmt.Printf("SHA-256: %s\n", crypt.HashSHA256([]byte("hello world")))
+	fmt.Printf("SHA3-256: %s\n", crypt.HashSHA3_256([]byte("hello world")))
+	fmt.Printf("BLAKE2b-256: %s\n", crypt.HashBLAKE2b([]byte("hello world")))
+	return nil
 }
 
-// =====================================================================
-// 2. String Manipulation Examples
-// =====================================================================
-func RunStrExample() {
-	fmt.Println("\n--- 2. String Utils (utils/str) ---")
-
-	// Random String
-	randStr := str.Random(16)
-	fmt.Printf("Random 16-char string: %s\n", randStr)
-
-	// Slugify
-	title := "Xin chào Việt Nam 2026!"
-	slug := str.Slugify(title)
-	fmt.Printf("Slugified '%s' -> '%s'\n", title, slug)
+func runStringExample() error {
+	fmt.Println("\n--- Strings ---")
+	random, err := str.Random(16)
+	if err != nil {
+		return fmt.Errorf("generate reference ID: %w", err)
+	}
+	fmt.Printf("Random reference ID: %s\n", random)
+	fmt.Printf("Slug: %s\n", str.Slugify("Xin chào Việt Nam 2026!"))
+	return nil
 }
 
-// =====================================================================
-// 3. Context Key Examples
-// =====================================================================
-func RunCtxKeyExample() {
-	fmt.Println("\n--- 3. Context Keys (utils/ctxkey) ---")
-
-	ctx := context.Background()
-
-	// Set values safely without string collision
-	ctx = ctxkey.SetUserID(ctx, "user_999")
+func runContextExample() {
+	fmt.Println("\n--- Context values ---")
+	ctx := ctxkey.SetUserID(context.Background(), "user_999")
 	ctx = ctxkey.SetRequestID(ctx, "req-abcd-1234")
-
-	// Retrieve safely
 	userID, ok := ctxkey.GetUserID(ctx)
-	fmt.Printf("Extracted UserID: %s (Found: %v)\n", userID, ok)
+	fmt.Printf("User ID: %s (found: %v)\n", userID, ok)
 }
 
-// =====================================================================
-// 4. Slice Generics Examples
-// =====================================================================
-func RunSliceExample() {
-	fmt.Println("\n--- 4. Slice Generics (utils/slice) ---")
-
-	numbers := []int{1, 2, 2, 3, 4, 4, 5}
-	fmt.Printf("Original slice: %v\n", numbers)
-
-	// Unique
-	uniqueNums := slice.Unique(numbers)
-	fmt.Printf("Unique slice: %v\n", uniqueNums)
-
-	// Contains
-	hasThree := slice.Contains(uniqueNums, 3)
-	fmt.Printf("Contains 3? %v\n", hasThree)
-
-	// Filter
-	evenNums := slice.Filter(uniqueNums, func(v int) bool { return v%2 == 0 })
-	fmt.Printf("Filtered even numbers: %v\n", evenNums)
-
-	// Map
-	strNums := slice.Map(evenNums, func(v int) string { return fmt.Sprintf("Num-%d", v) })
-	fmt.Printf("Mapped to strings: %v\n", strNums)
+func runSliceExample() {
+	fmt.Println("\n--- Slices ---")
+	unique := utilslice.Unique([]int{1, 2, 2, 3, 4, 4, 5})
+	even := utilslice.Filter(unique, func(value int) bool { return value%2 == 0 })
+	labels := utilslice.Map(even, func(value int) string { return fmt.Sprintf("Num-%d", value) })
+	fmt.Printf("Unique: %v; contains 3: %v; labels: %v\n", unique, slices.Contains(unique, 3), labels)
 }
 
-// =====================================================================
-// 5. Map Generics Examples
-// =====================================================================
-func RunMapsExample() {
-	fmt.Println("\n--- 5. Map Generics (utils/maps) ---")
+func runGracefulExample() error {
+	fmt.Println("\n--- Graceful shutdown ---")
+	fmt.Println("Press Ctrl+C to run cleanup hooks...")
+	shutdown := graceful.NewShutdown(5 * time.Second)
+	shutdown.Register(func(ctx context.Context) error {
+		fmt.Println("Closing database...")
+		return waitFor(ctx, 500*time.Millisecond)
+	})
+	shutdown.Register(func(ctx context.Context) error {
+		fmt.Println("Stopping HTTP server...")
+		return waitFor(ctx, 500*time.Millisecond)
+	})
+	return shutdown.Wait()
+}
 
-	userAges := map[string]int{
-		"Alice": 25,
-		"Bob":   30,
-		"Carol": 22,
+func waitFor(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	keys := maps.Keys(userAges)
-	values := maps.Values(userAges)
-
-	fmt.Printf("Map Keys: %v\n", keys)
-	fmt.Printf("Map Values: %v\n", values)
-}
-
-// =====================================================================
-// 6. Graceful Shutdown Example
-// =====================================================================
-func RunGracefulExample() {
-	fmt.Println("\n--- 6. Graceful Shutdown (utils/graceful) ---")
-	fmt.Println("Press Ctrl+C to trigger graceful shutdown...")
-
-	// Create a new Shutdown coordinator with a 5-second timeout
-	sd := graceful.NewShutdown(5 * time.Second)
-
-	// Register a cleanup hook (e.g. closing DB connections)
-	sd.Register(func(ctx context.Context) error {
-		fmt.Println("[Hook 1] Closing Database Connection...")
-		time.Sleep(500 * time.Millisecond) // Simulate work
-		return nil
-	})
-
-	// Register another hook (executed in LIFO order)
-	sd.Register(func(ctx context.Context) error {
-		fmt.Println("[Hook 2] Stopping HTTP Server...")
-		time.Sleep(500 * time.Millisecond) // Simulate work
-		return nil
-	})
-
-	// Wait for OS Signal (SIGINT/SIGTERM), then execute all hooks
-	sd.Wait()
 }
