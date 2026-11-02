@@ -2,64 +2,213 @@ package cron
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
 	"github.com/thanhbvha/go-common/cache"
 )
 
-// DistributedConfig contains configuration for a distributed job.
+// ErrLeaseLost is the job context cause when lease ownership becomes uncertain.
+var ErrLeaseLost = errors.New("cron: execution lease lost")
+
+// DistributedConfig describes a best-effort distributed job. Redis and all
+// replicas must use the same namespace, name, schedule and timezone.
 type DistributedConfig struct {
-	// JobName is a unique identifier for the job across the cluster.
-	JobName string
-	// Schedule is the cron expression (e.g. "0/5 * * * * *").
+	JobName  string
 	Schedule string
-	// LockTTL is how long the Redis lock should be held.
-	// It should be slightly less than the cron interval to ensure the lock expires
-	// before the next run, but long enough to prevent other nodes from acquiring it simultaneously.
+	// LockTTL is a renewable execution lease, independent of the cron interval.
+	// Minimum 30ms; use several seconds or more in production.
 	LockTTL time.Duration
-	// RunFunc is the actual job logic to execute.
-	RunFunc func(ctx context.Context)
+	// LockTimeout bounds each Redis operation. Default: min(LockTTL/6, 5s).
+	// It must be positive and less than LockTTL/3.
+	LockTimeout time.Duration
+	// DeduplicationTTL retains markers for completed/attempted schedule slots.
+	// Default 24h. After retention expires a sufficiently delayed node can repeat
+	// a slot. Markers are not a durable execution history or retry queue.
+	DeduplicationTTL time.Duration
+	// Timeout bounds the callback context. Zero means no execution deadline.
+	Timeout time.Duration
+	// Run executes the job. Honor cancellation and return business errors.
+	Run func(context.Context) error
 }
 
-// AddDistributedJob adds a job that will only run on one node at a time.
-// It uses cache.RedisLock to perform Leader Election.
+// AddDistributedJob registers a renewable lease and retained slot marker job.
 func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.RedisLock) (cron.EntryID, error) {
-	lockKey := "cron:lock:" + cfg.JobName
-
-	wrapper := func() {
-		ctx := context.Background()
-
-		// Attempt to acquire the lock. If false, another node is already running this job.
-		acquired, err := redisLock.Acquire(ctx, lockKey, cfg.LockTTL)
-		if err != nil {
-			log.Printf("[Cron] [%s] Error acquiring lock: %v", cfg.JobName, err)
-			return
+	for _, field := range strings.Fields(cfg.Schedule) {
+		if field == "@every" {
+			return 0, errors.New("cron: distributed jobs require calendar schedules; @every is relative to each replica startup")
 		}
-
-		if !acquired {
-			// Another node won the election. Skip execution.
-			log.Printf("[Cron] [%s] Skipped (Another node is running this job)", cfg.JobName)
-			return
-		}
-
-		// We won the election! Run the job.
-		log.Printf("[Cron] [%s] Started execution (Lock acquired)", cfg.JobName)
-		startTime := time.Now()
-
-		// Execute the actual user function
-		cfg.RunFunc(ctx)
-
-		duration := time.Since(startTime)
-		log.Printf("[Cron] [%s] Completed execution in %s", cfg.JobName, duration)
-
-		// Note: We deliberately DO NOT release the lock here!
-		// The lock will naturally expire after LockTTL.
-		// If we release it immediately after a fast job, another node whose clock is slightly
-		// behind might trigger its cron, see the lock is free, and run the job again!
-		// Relying on TTL ensures strict "At most once per interval" execution across the cluster.
 	}
+	if strings.TrimSpace(s.namespace) == "" {
+		return 0, errors.New("cron: namespace must not be empty")
+	}
+	if cfg.LockTTL < 30*time.Millisecond {
+		return 0, errors.New("cron: LockTTL must be at least 30ms")
+	}
+	if cfg.LockTimeout == 0 {
+		cfg.LockTimeout = min(cfg.LockTTL/6, 5*time.Second)
+	}
+	if cfg.LockTimeout <= 0 || cfg.LockTimeout >= cfg.LockTTL/3 {
+		return 0, errors.New("cron: LockTimeout must be positive and less than LockTTL/3")
+	}
+	if cfg.DeduplicationTTL == 0 {
+		cfg.DeduplicationTTL = 24 * time.Hour
+	}
+	if cfg.DeduplicationTTL < cfg.LockTTL {
+		return 0, errors.New("cron: DeduplicationTTL must be at least LockTTL")
+	}
+	if cfg.Timeout < 0 {
+		return 0, errors.New("cron: timeout must not be negative")
+	}
+	if cfg.Run == nil {
+		return 0, errors.New("cron: nil callback")
+	}
+	if _, err := redisLock.NewSession(); err != nil {
+		return 0, err
+	}
+	prefix := url.QueryEscape(s.namespace)
+	name := url.QueryEscape(cfg.JobName)
+	lockKey := prefix + ":lock:" + name
+	var busy atomic.Bool
+	return s.register(cfg.JobName, cfg.Schedule, func(at time.Time) {
+		s.execute(cfg.JobName, at, func(r *Result) {
+			// Also prevent overlap on this replica if a callback ignores cancellation
+			// after its lease has been lost.
+			if !busy.CompareAndSwap(false, true) {
+				r.Status = "skipped_running"
+				return
+			}
+			defer busy.Store(false)
+			jobCtx, jobCancel := executionContext(s.ctx, cfg.JobName, at, cfg.Timeout)
+			defer jobCancel()
+			ctx, cancel := context.WithCancelCause(jobCtx)
+			defer cancel(nil)
+			defer func() {
+				finishContext(r, ctx)
+				if errors.Is(context.Cause(ctx), ErrLeaseLost) {
+					r.Status = "lease_lost"
+				}
+			}()
+			lease, err := redisLock.NewSession()
+			if err != nil {
+				r.Err = err
+				return
+			}
+			acquiredAt := time.Now()
+			acquired, err := acquire(ctx, lease, lockKey, cfg.LockTTL, cfg.LockTimeout)
+			if err != nil {
+				r.Err = fmt.Errorf("acquire execution lease: %w", err)
+				return
+			}
+			if !acquired {
+				r.Status = "skipped_lock"
+				return
+			}
+			leaseCtx, leaseCancel := context.WithCancel(context.Background())
+			leaseDone := make(chan struct{})
+			go func() {
+				defer close(leaseDone)
+				maintainLease(leaseCtx, acquiredAt, cfg.LockTTL, cfg.LockTimeout, func(opCtx context.Context) (bool, error) { return lease.Extend(opCtx, lockKey, cfg.LockTTL) }, cancel)
+			}()
+			defer func() {
+				leaseCancel()
+				<-leaseDone
+				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), cfg.LockTimeout)
+				defer releaseCancel()
+				if err := lease.Release(releaseCtx, lockKey); err != nil {
+					s.logger.Warn("cron lease release failed", "job", cfg.JobName, "error", err)
+				}
+			}()
+			// Keep this marker after completion, failure or panic. Releasing only the
+			// execution lease cannot let a late replica repeat the same schedule slot.
+			slotKey := prefix + ":slot:" + name + ":" + strconv.FormatInt(at.UnixNano(), 10)
+			claimed, err := acquire(ctx, lease, slotKey, cfg.DeduplicationTTL, cfg.LockTimeout)
+			if err != nil {
+				r.Err = fmt.Errorf("claim schedule slot: %w", err)
+				return
+			}
+			if !claimed {
+				r.Status = "skipped_slot"
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			// SETNX may have consumed the entire initial lease before the supervisor
+			// was scheduled. Fail closed rather than starting with an expired lease.
+			if time.Since(acquiredAt) >= cfg.LockTTL {
+				cancel(ErrLeaseLost)
+				return
+			}
+			r.Err = cfg.Run(ctx)
+		})
+	})
+}
 
-	return s.AddFunc(cfg.Schedule, wrapper)
+func acquire(ctx context.Context, lock *cache.RedisLock, key string, ttl, timeout time.Duration) (bool, error) {
+	opCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return lock.Acquire(opCtx, key, ttl)
+}
+
+type renewal struct {
+	started time.Time
+	ok      bool
+	err     error
+}
+
+// maintainLease fails closed on an uncertain renewal. The independent expiry
+// timer cancels the job even if a Redis operation ignores its context deadline.
+// Only one renewal is in flight. Results use request start time conservatively,
+// since a slow response does not extend the confirmed validity window.
+func maintainLease(ctx context.Context, acquiredAt time.Time, ttl, timeout time.Duration, extend func(context.Context) (bool, error), cancel context.CancelCauseFunc) {
+	validUntil := acquiredAt.Add(ttl)
+	expiry := time.NewTimer(max(time.Until(validUntil), 0))
+	defer expiry.Stop()
+	tick := time.NewTicker(ttl / 3)
+	defer tick.Stop()
+	results := make(chan renewal, 1)
+	pending := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-expiry.C:
+			cancel(ErrLeaseLost)
+			return
+		case <-tick.C:
+			if !time.Now().Before(validUntil) {
+				cancel(ErrLeaseLost)
+				return
+			}
+			if pending {
+				continue
+			}
+			pending = true
+			go func() {
+				opCtx, opCancel := context.WithTimeout(ctx, timeout)
+				defer opCancel()
+				started := time.Now()
+				ok, err := extend(opCtx)
+				results <- renewal{started: started, ok: ok, err: err}
+			}()
+		case result := <-results:
+			if ctx.Err() != nil {
+				return
+			}
+			pending = false
+			if result.err != nil || !result.ok || !time.Now().Before(validUntil) || time.Since(result.started) >= timeout {
+				cancel(ErrLeaseLost)
+				return
+			}
+			validUntil = result.started.Add(ttl)
+			expiry.Reset(max(time.Until(validUntil), 0))
+		}
+	}
 }

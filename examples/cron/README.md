@@ -1,15 +1,36 @@
-# Cron Module
+# Cron examples
 
-## Overview
-The `cron` module is a high-level wrapper around the popular `robfig/cron/v3` library. It provides second-level precision cron scheduling and adds out-of-the-box support for **Distributed Job Execution** across a cluster using Redis-backed Leader Election.
+Run either mode from the repository root:
 
-## Key Features
-1. **Standard Cron**: Basic job scheduling for a single server/node (`scheduler.AddFunc`).
-2. **Distributed Cron**: Ensures that a background job only runs on exactly **one node** at a time, even if you have 10 identical containers running the same application. This prevents data duplication and race conditions (`scheduler.AddDistributedJob`).
+```sh
+# Named local job: AddJob(JobConfig{Run: func(context.Context) error}).
+go run ./examples/cron -mode=local
 
-## 🚨 Best Practices for AI/Developers
-- **When to use Standard vs Distributed**:
-  - Use **Standard Cron** for tasks that MUST run on every node independently (e.g., clearing local memory cache, emitting instance metrics).
-  - Use **Distributed Cron** for business logic tasks that interact with a central database (e.g., calculating daily reports, sending batch emails).
-- **Lock TTL (CRITICAL)**: When configuring a `DistributedConfig`, the `LockTTL` **MUST** be slightly less than the cron interval (e.g., if cron runs every 10 seconds, set LockTTL to 9 seconds). If the TTL is longer than the interval, the lock will still be held when the next tick occurs, causing the job to be skipped.
-- **Graceful Stop**: Always call `scheduler.Stop()` during application shutdown to ensure no new jobs are spawned while the app is closing.
+# Redis must be available at localhost:6379. Run in several terminals to
+# exercise AddDistributedJob(DistributedConfig{Run: ...}, redisLock).
+go run ./examples/cron -mode=distributed
+```
+
+Both modes use `NewScheduler`, register jobs with checked errors, call `Start`
+and finish with `Shutdown(ctx)`. Every callback receives a context and returns an
+error; there are no alternate callback or shutdown APIs.
+
+The distributed example uses a renewable execution lease, schedule-slot markers,
+UTC, a service/environment namespace, a context-aware callback and an error
+observer. It reads `ExecutionFromContext(ctx)` to show an occurrence-based
+idempotency key; a real business write must enforce that key in its database.
+The lease TTL can exceed the cron interval; it is renewed while work continues. Busy executions skip later invocations rather than queueing them.
+
+For an isolated Redis endpoint/namespace, add
+`-redis-addr=127.0.0.1:6380 -namespace=reports:testing`.
+
+Both examples handle SIGINT and SIGTERM with `Shutdown(ctx)` before dependencies
+close. Interrupting an active job logs `status=canceled` at INFO, keeps the
+cancellation error available to observers and does not report a business failure.
+If the grace period expires, the example continues waiting to avoid closing
+Redis under a running callback; the process supervisor sets any hard kill deadline.
+
+Distributed scheduling is best effort. Write business operations with idempotency
+keys; lease/slot markers do not provide exactly-once delivery, durable retries or
+catch-up after downtime. See [the module contract](../../cron/README.md) for
+retention, cancellation, rollout and Redis failure limitations.

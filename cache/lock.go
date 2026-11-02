@@ -37,6 +37,16 @@ func NewRedisLock(client redis.UniversalClient) *RedisLock {
 	}
 }
 
+// NewSession returns an independent ownership token backed by the same client.
+// Use a new session for each execution so a stale owner cannot renew/release a
+// later execution's lease, even when one RedisLock instance is shared.
+func (l *RedisLock) NewSession() (*RedisLock, error) {
+	if l == nil || l.client == nil {
+		return nil, errors.New("cache: nil Redis lock/client")
+	}
+	return NewRedisLock(l.client), nil
+}
+
 // Acquire attempts to acquire a lock for a given key with a specified TTL.
 func (l *RedisLock) Acquire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	success, err := l.client.SetNX(ctx, key, l.token, ttl).Result()

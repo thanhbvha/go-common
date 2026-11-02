@@ -27,7 +27,7 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `auth` | Enterprise Authentication with Encrypted JWT (AES-GCM) and Dynamic Token Binding |
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
 | `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
-| `cron` | Distributed Job Scheduler with Redis-backed Leader Election |
+| `cron` | Job scheduler with renewable Redis leases, slot deduplication, and graceful shutdown |
 | `health` | Kubernetes-ready health checks (`/live`, `/ready`) with concurrent Checkers and HTTP adapters |
 | `grpc` | Pre-configured gRPC server with unified Interceptors (Recovery, Logging, Auth) |
 
