@@ -18,6 +18,13 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
+type delayedDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c delayedDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
 func TestExampleScenarios(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "certs")
 	if err := devcert.Generate(directory); err != nil {
@@ -178,6 +185,36 @@ func TestRequestBoundaries(t *testing.T) {
 	cancel()
 	if err := pause(ctx, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatal("delay ignores cancellation")
+	}
+}
+
+func TestWatchLifetimeEnded(t *testing.T) {
+	now := time.Now()
+	activeCtx, stopActive := context.WithDeadline(context.Background(), now.Add(time.Hour))
+	defer stopActive()
+	deadlineElapsedBeforeErr := delayedDeadlineContext{Context: context.Background(), deadline: now.Add(-time.Second)}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name    string
+		ctx     context.Context
+		updates int
+		err     error
+		want    bool
+	}{
+		{"canceled at elapsed deadline", deadlineElapsedBeforeErr, 1, status.Error(codes.Canceled, "stream closed"), true},
+		{"deadline exceeded before context update", deadlineElapsedBeforeErr, 1, status.Error(codes.DeadlineExceeded, "stream closed"), true},
+		{"parent canceled", canceledCtx, 1, status.Error(codes.Canceled, "stream closed"), true},
+		{"no status received", deadlineElapsedBeforeErr, 0, status.Error(codes.Canceled, "stream closed"), false},
+		{"early cancellation", activeCtx, 1, status.Error(codes.Canceled, "stream closed"), false},
+		{"unexpected stream error", deadlineElapsedBeforeErr, 1, status.Error(codes.Unavailable, "stream closed"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := watchLifetimeEnded(tc.ctx, tc.updates, tc.err); got != tc.want {
+				t.Fatalf("watchLifetimeEnded() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }
 

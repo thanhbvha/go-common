@@ -141,15 +141,13 @@ func runScenario(ctx context.Context, conn *grpc.ClientConn, o ClientOptions) er
 			return rpcFailure("Health.Watch", err)
 		}
 		updates := 0
-		deadline, _ := watchCtx.Deadline()
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
 				// Watch is intentionally infinite; this scenario owns and cancels its lifetime.
-				// gRPC may report deadline expiry just before ctx.Err becomes
-				// observable on this goroutine. Check the actual deadline too.
-				expired := status.Code(err) == codes.DeadlineExceeded && !time.Now().Before(deadline)
-				if updates > 0 && (watchCtx.Err() != nil || expired) {
+				// At the deadline boundary gRPC can surface either Canceled or
+				// DeadlineExceeded before ctx.Err is observable on this goroutine.
+				if watchLifetimeEnded(watchCtx, updates, err) {
 					logger.Info("Health.Watch lifetime ended", "updates", updates)
 					return nil
 				}
@@ -160,6 +158,21 @@ func runScenario(ctx context.Context, conn *grpc.ClientConn, o ClientOptions) er
 		}
 	}
 	return nil
+}
+
+func watchLifetimeEnded(ctx context.Context, updates int, err error) bool {
+	if updates == 0 {
+		return false
+	}
+	code := status.Code(err)
+	if code != codes.Canceled && code != codes.DeadlineExceeded {
+		return false
+	}
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func rpcFailure(operation string, err error) error {
