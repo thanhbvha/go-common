@@ -1,57 +1,34 @@
-# logger
+# Logger
 
-Async structured logger with request middleware for standard `net/http`, Fiber,
-Gin, and Echo. Framework adapters live in isolated subpackages so applications
-only import the stack they use.
+Structured logging with `log/slog`, optional file rotation, and an explicitly owned runtime.
+Synchronous logging is the default. Enable async mode only after measuring the workload.
 
 ```go
-import "github.com/thanhbvha/go-common/logger"
-
-// Create with defaults (stdout, INFO level).
-log := logger.New(logger.DefaultOptions())
-logger.SetDefault(log)
-defer logger.Close()
-
-// Synchronous
-logger.Info("server started", "port", 8080)
-logger.Error("handler error", "err", err)
-
-// Async (non-blocking, worker pool flushes in background)
-logger.InfoAsync("request processed", "latency_ms", 12)
-logger.WarnAsync("cache miss", "key", key)
-
-// With file rotation (lumberjack)
-log := logger.New(logger.Options{
-    Level:  slog.LevelDebug,
-    StdOut: true,
-    File: &logger.FileOptions{
-        Path:       "/var/log/myapp/app.log",
-        MaxSizeMB:  50,
-        MaxBackups: 7,
-        MaxAgeDays: 30,
-        Compress:   true,
-    },
-})
-
-// Attach request-id via context
-ctx = ctxkey.SetRequestID(ctx, requestID)
-log.InfoWithContext(ctx, "request received", "method", r.Method)
+runtime := logger.New(logger.DefaultOptions())
+log := runtime.Logger()                  // *slog.Logger
+worker := log.With("component", "worker") // fields only; no lifecycle ownership
+worker.InfoContext(ctx, "started")
+// Stop producers first, then drain accepted records and close owned files.
+if err := runtime.Shutdown(shutdownCtx); err != nil { return err }
 ```
 
-HTTP middleware import paths:
+`logger.SetDefault(runtime)` is optional process bootstrap configuration. `logger.With`
+returns a native slog logger and never creates hidden workers. `Close()` is a five-second
+convenience; use `Shutdown(ctx)` to observe errors. Repeated/concurrent shutdown shares
+one drain. After shutdown, the handler returns `ErrClosed` and accepts no new records.
+Slog's convenience methods do not return handler errors.
 
-- `logger/middleware/nethttp`
-- `logger/middleware/fiber`
-- `logger/middleware/gin`
-- `logger/middleware/echo`
+For async mode set `Options.Async=true`; queue capacity defaults to 1024 and workers to
+one. `OverflowSync` writes on the caller when full; `OverflowDrop` reports `ErrDropped`
+through `OnError`. All logging methods follow the configured mode, including the
+`*Async` convenience methods. A queue does not guarantee ordering across workers.
 
-### Key types
+`OnError` must be prompt and concurrency-safe; it must not invoke shutdown on the same
+runtime. Values in async `slog.Any` attributes must remain immutable until drained.
+Use scalar attributes or pre-serialize mutable payloads before logging. A caller's
+shutdown deadline bounds waiting; cleanup continues, so a blocked writer is never
+closed underneath an active write. Supplied `Writer` values are borrowed and never closed.
 
-| Symbol | Description |
-|---|---|
-| `Options` | Top-level config (level, stdout, file, workers, buffer) |
-| `FileOptions` | lumberjack rotation config (optional — nil = no file) |
-| `Logger` | Struct — `Info/Error/Warn/Debug` sync; `*Async` async variants |
-| `SetDefault(l)` | Register as process-wide default |
-| `Default()` | Retrieve default (nil if not set) |
-| `Close()` | Flush & shut down default logger |
+File rotation is opt-in through `Options.File`. HTTP adapters remain in
+`logger/middleware/{nethttp,gin,echo,fiber}`. Request IDs use `utils/ctxkey`.
+See [validation and maturity](../docs/PRODUCTION.md) and [v2 API changes](../docs/V2.md).

@@ -2,10 +2,12 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // ============================================================
@@ -52,16 +54,13 @@ func (c *Client) QueueSubscribe(subject, queue string, handler gonats.MsgHandler
 
 // Request sends data to subject and waits for a single reply.
 func (c *Client) Request(ctx context.Context, subject string, data []byte) (*gonats.Msg, error) {
-	nc, _, err := c.requireConnected()
+	nc, _, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	deadline, ok := ctx.Deadline()
-	timeout := 5 * time.Second
-	if ok {
-		timeout = time.Until(deadline)
-	}
-	return nc.Request(subject, data, timeout)
+	request, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return nc.RequestWithContext(request, subject, data)
 }
 
 // Unsubscribe drains and removes the subscription.
@@ -92,7 +91,7 @@ type StreamInfo struct {
 // AddStream creates a new stream. If the stream already exists with identical
 // configuration the call is a no-op; differing configuration returns an error.
 func (c *Client) AddStream(ctx context.Context, name string, subjects []string, opts ...StreamOption) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -112,17 +111,17 @@ func (c *Client) AddStream(ctx context.Context, name string, subjects []string, 
 		o(cfg)
 	}
 
-	_, err = js.AddStream(cfg)
+	_, err = js.AddStream(cfg, gonats.Context(ctx))
 	return err
 }
 
 // UpdateStream updates an existing stream's configuration.
 func (c *Client) UpdateStream(ctx context.Context, name string, opts ...StreamOption) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
-	info, err := js.StreamInfo(name)
+	info, err := js.StreamInfo(name, gonats.Context(ctx))
 	if err != nil {
 		return fmt.Errorf("nats: stream %q not found: %w", name, err)
 	}
@@ -130,26 +129,26 @@ func (c *Client) UpdateStream(ctx context.Context, name string, opts ...StreamOp
 	for _, o := range opts {
 		o(cfg)
 	}
-	_, err = js.UpdateStream(cfg)
+	_, err = js.UpdateStream(cfg, gonats.Context(ctx))
 	return err
 }
 
 // DeleteStream permanently removes a stream and all its messages.
 func (c *Client) DeleteStream(ctx context.Context, name string) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
-	return js.DeleteStream(name)
+	return js.DeleteStream(name, gonats.Context(ctx))
 }
 
 // GetStreamInfo returns metadata and current state of a stream.
 func (c *Client) GetStreamInfo(ctx context.Context, name string) (*StreamInfo, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	info, err := js.StreamInfo(name)
+	info, err := js.StreamInfo(name, gonats.Context(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -158,34 +157,34 @@ func (c *Client) GetStreamInfo(ctx context.Context, name string) (*StreamInfo, e
 
 // ListStreams returns metadata for all streams visible to this connection.
 func (c *Client) ListStreams(ctx context.Context) ([]StreamInfo, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var result []StreamInfo
-	for info := range js.StreamsInfo() {
+	for info := range js.StreamsInfo(gonats.Context(ctx)) {
 		result = append(result, *toStreamInfo(info))
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 // PurgeStream removes all messages from a stream without deleting the stream itself.
 // Equivalent to issuing XDel for every message ID.
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
-	return js.PurgeStream(name)
+	return js.PurgeStream(name, gonats.Context(ctx))
 }
 
 // StreamExists returns true when a stream with the given name exists.
 func (c *Client) StreamExists(ctx context.Context, name string) (bool, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return false, err
 	}
-	_, err = js.StreamInfo(name)
+	_, err = js.StreamInfo(name, gonats.Context(ctx))
 	if err == gonats.ErrStreamNotFound {
 		return false, nil
 	}
@@ -206,7 +205,7 @@ type PubAck struct {
 // JSPublish appends data to the stream bound to subject (at-least-once delivery).
 // Blocks until the server acknowledges persistence. Equivalent to XADD.
 func (c *Client) JSPublish(ctx context.Context, subject string, data []byte) (*PubAck, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +218,7 @@ func (c *Client) JSPublish(ctx context.Context, subject string, data []byte) (*P
 
 // JSPublishMsg appends a pre-built message to JetStream.
 func (c *Client) JSPublishMsg(ctx context.Context, msg *gonats.Msg) (*PubAck, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +255,7 @@ type ConsumerInfo struct {
 
 // AddConsumer creates or updates a durable consumer on stream.
 func (c *Client) AddConsumer(ctx context.Context, stream, durable string, opts ...ConsumerOption) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -268,26 +267,26 @@ func (c *Client) AddConsumer(ctx context.Context, stream, durable string, opts .
 	for _, o := range opts {
 		o(cfg)
 	}
-	_, err = js.AddConsumer(stream, cfg)
+	_, err = js.AddConsumer(stream, cfg, gonats.Context(ctx))
 	return err
 }
 
 // DeleteConsumer removes a consumer from stream.
 func (c *Client) DeleteConsumer(ctx context.Context, stream, consumer string) error {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return err
 	}
-	return js.DeleteConsumer(stream, consumer)
+	return js.DeleteConsumer(stream, consumer, gonats.Context(ctx))
 }
 
 // GetConsumerInfo returns state for a specific consumer.
 func (c *Client) GetConsumerInfo(ctx context.Context, stream, consumer string) (*ConsumerInfo, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	info, err := js.ConsumerInfo(stream, consumer)
+	info, err := js.ConsumerInfo(stream, consumer, gonats.Context(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -297,24 +296,24 @@ func (c *Client) GetConsumerInfo(ctx context.Context, stream, consumer string) (
 // ListConsumers returns state for all consumers on stream.
 // Equivalent to XINFO GROUPS / XINFO CONSUMERS.
 func (c *Client) ListConsumers(ctx context.Context, stream string) ([]ConsumerInfo, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var result []ConsumerInfo
-	for info := range js.ConsumersInfo(stream) {
+	for info := range js.ConsumersInfo(stream, gonats.Context(ctx)) {
 		result = append(result, *toConsumerInfo(info))
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 // ConsumerExists returns true when the named consumer exists on stream.
 func (c *Client) ConsumerExists(ctx context.Context, stream, consumer string) (bool, error) {
-	_, js, err := c.requireConnected()
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return false, err
 	}
-	_, err = js.ConsumerInfo(stream, consumer)
+	_, err = js.ConsumerInfo(stream, consumer, gonats.Context(ctx))
 	if err == gonats.ErrConsumerNotFound {
 		return false, nil
 	}
@@ -331,8 +330,11 @@ type MsgHandler func(*Msg)
 // JSSubscribe creates a push-based subscription for a durable consumer.
 // handler is called in a goroutine for every delivered message.
 // Call WithManualAck() when you want to ACK/Nak explicitly.
-func (c *Client) JSSubscribe(subject, durable string, handler MsgHandler, opts ...SubOption) (*gonats.Subscription, error) {
-	_, js, err := c.requireConnected()
+func (c *Client) JSSubscribe(ctx context.Context, subject, durable string, handler MsgHandler, opts ...SubOption) (*gonats.Subscription, error) {
+	if handler == nil {
+		return nil, errors.New("nats: nil message handler")
+	}
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +344,7 @@ func (c *Client) JSSubscribe(subject, durable string, handler MsgHandler, opts .
 		o(so)
 	}
 
-	jsOpts := []gonats.SubOpt{gonats.Durable(durable)}
+	jsOpts := []gonats.SubOpt{gonats.Durable(durable), gonats.Context(ctx)}
 	if so.manualAck {
 		jsOpts = append(jsOpts, gonats.ManualAck())
 	}
@@ -356,8 +358,11 @@ func (c *Client) JSSubscribe(subject, durable string, handler MsgHandler, opts .
 }
 
 // JSQueueSubscribe creates a push-based queue subscription (competing consumers).
-func (c *Client) JSQueueSubscribe(subject, queue, durable string, handler MsgHandler, opts ...SubOption) (*gonats.Subscription, error) {
-	_, js, err := c.requireConnected()
+func (c *Client) JSQueueSubscribe(ctx context.Context, subject, queue, durable string, handler MsgHandler, opts ...SubOption) (*gonats.Subscription, error) {
+	if handler == nil {
+		return nil, errors.New("nats: nil message handler")
+	}
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -367,11 +372,14 @@ func (c *Client) JSQueueSubscribe(subject, queue, durable string, handler MsgHan
 		o(so)
 	}
 
-	jsOpts := []gonats.SubOpt{gonats.Durable(durable)}
+	jsOpts := []gonats.SubOpt{gonats.Durable(durable), gonats.Context(ctx)}
 	if so.manualAck {
 		jsOpts = append(jsOpts, gonats.ManualAck())
 	}
 
+	if so.maxAckPending > 0 {
+		jsOpts = append(jsOpts, gonats.MaxAckPending(so.maxAckPending))
+	}
 	return js.QueueSubscribe(subject, queue, func(m *gonats.Msg) {
 		handler(wrapMsg(m))
 	}, jsOpts...)
@@ -388,12 +396,20 @@ type PullSubscription struct {
 
 // PullSubscribe creates a pull-based subscription backed by a durable consumer.
 // Callers explicitly call Fetch to retrieve batches of messages.
-func (c *Client) PullSubscribe(subject, durable string, opts ...SubOption) (*PullSubscription, error) {
-	_, js, err := c.requireConnected()
+func (c *Client) PullSubscribe(ctx context.Context, subject, durable string, opts ...SubOption) (*PullSubscription, error) {
+	_, js, err := c.requireContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	sub, err := js.PullSubscribe(subject, durable)
+	so := &subOptions{}
+	for _, option := range opts {
+		option(so)
+	}
+	options := []gonats.SubOpt{gonats.Context(ctx)}
+	if so.maxAckPending > 0 {
+		options = append(options, gonats.MaxAckPending(so.maxAckPending))
+	}
+	sub, err := js.PullSubscribe(subject, durable, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -403,12 +419,17 @@ func (c *Client) PullSubscribe(subject, durable string, opts ...SubOption) (*Pul
 // Fetch retrieves up to count messages, blocking until at least one arrives
 // or the fetch timeout elapses. Default timeout: 5s.
 // Equivalent to XREADGROUP with COUNT and BLOCK.
-func (c *Client) Fetch(ps *PullSubscription, count int, opts ...FetchOption) ([]*Msg, error) {
+func (c *Client) Fetch(ctx context.Context, ps *PullSubscription, count int, opts ...FetchOption) ([]*Msg, error) {
 	fo := &fetchOptions{timeout: 5 * time.Second}
 	for _, o := range opts {
 		o(fo)
 	}
-	raw, err := ps.sub.Fetch(count, gonats.MaxWait(fo.timeout))
+	fetchCtx, cancel := context.WithTimeout(ctx, fo.timeout)
+	defer cancel()
+	if ps == nil || ps.sub == nil {
+		return nil, errors.New("nats: nil pull subscription")
+	}
+	raw, err := ps.sub.Fetch(count, gonats.Context(fetchCtx))
 	if err != nil {
 		return nil, err
 	}
@@ -421,9 +442,14 @@ func (c *Client) Fetch(ps *PullSubscription, count int, opts ...FetchOption) ([]
 
 // FetchNoWait retrieves up to count messages without blocking.
 // Returns immediately with whatever is available (may be empty).
-func (c *Client) FetchNoWait(ps *PullSubscription, count int) ([]*Msg, error) {
-	raw, err := ps.sub.Fetch(count, gonats.MaxWait(time.Millisecond))
-	if err == gonats.ErrTimeout {
+func (c *Client) FetchNoWait(ctx context.Context, ps *PullSubscription, count int) ([]*Msg, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+	if ps == nil || ps.sub == nil {
+		return nil, errors.New("nats: nil pull subscription")
+	}
+	raw, err := ps.sub.Fetch(count, gonats.Context(fetchCtx))
+	if err == gonats.ErrTimeout || (errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
 		return nil, nil
 	}
 	if err != nil {
@@ -491,76 +517,73 @@ type KVEntry struct {
 	Bucket    string
 	Key       string
 	Value     []byte
-	Revision  uint64            // use for optimistic locking in KVUpdate
-	Operation gonats.KeyValueOp // KeyValuePut / KeyValueDelete / KeyValuePurge
+	Revision  uint64               // use for optimistic locking in KVUpdate
+	Operation jetstream.KeyValueOp // KeyValuePut / KeyValueDelete / KeyValuePurge
 }
 
 // KVCreate creates a new KV bucket with the given options.
-// If the bucket already exists this is a no-op (idempotent).
+// An existing bucket must have compatible configuration.
 func (c *Client) KVCreate(ctx context.Context, bucket string, opts ...KVOption) error {
-	_, js, err := c.requireConnected()
+	js, err := c.keyValueContext(ctx)
 	if err != nil {
 		return err
 	}
-	storage := gonats.MemoryStorage
+	storage := jetstream.MemoryStorage
 	if c.cfg.DefaultStorage == FileStorage {
-		storage = gonats.FileStorage
+		storage = jetstream.FileStorage
 	}
-	cfg := &gonats.KeyValueConfig{
-		Bucket:   bucket,
-		Storage:  storage,
-		Replicas: c.cfg.DefaultReplicas,
-		History:  1,
+	cfg := jetstream.KeyValueConfig{Bucket: bucket, Storage: storage, Replicas: c.cfg.DefaultReplicas, History: 1}
+	for _, option := range opts {
+		option(&cfg)
 	}
-	for _, o := range opts {
-		o(cfg)
-	}
-	_, err = js.CreateKeyValue(cfg)
+	_, err = js.CreateKeyValue(ctx, cfg)
 	return err
 }
 
-// KVDeleteBucket removes the KV bucket and all its data permanently.
+// KVDeleteBucket removes a KV bucket and all of its data permanently.
 func (c *Client) KVDeleteBucket(ctx context.Context, bucket string) error {
-	_, js, err := c.requireConnected()
+	js, err := c.keyValueContext(ctx)
 	if err != nil {
 		return err
 	}
-	return js.DeleteKeyValue(bucket)
+	return js.DeleteKeyValue(ctx, bucket)
+}
+func (c *Client) keyValueContext(ctx context.Context) (jetstream.JetStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	nc, _, err := c.requireConnected()
+	if err != nil {
+		return nil, err
+	}
+	return jetstream.New(nc)
 }
 
 // kvBucket is an internal helper that returns the KeyValue handle.
-func (c *Client) kvBucket(js gonats.JetStreamContext, bucket string) (gonats.KeyValue, error) {
-	kv, err := js.KeyValue(bucket)
+func (c *Client) kvBucket(ctx context.Context, bucket string) (jetstream.KeyValue, error) {
+	js, err := c.keyValueContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("nats: KV bucket %q not found: %w", bucket, err)
+		return nil, err
 	}
-	return kv, nil
+	return js.KeyValue(ctx, bucket)
 }
 
 // KVPut sets key to value and returns the new revision number.
 func (c *Client) KVPut(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return 0, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return 0, err
-	}
-	return kv.Put(key, value)
+	return kv.Put(ctx, key, value)
 }
 
 // KVGet retrieves the current value for key.
 func (c *Client) KVGet(ctx context.Context, bucket, key string) (*KVEntry, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	entry, err := kv.Get(key)
+	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -569,15 +592,11 @@ func (c *Client) KVGet(ctx context.Context, bucket, key string) (*KVEntry, error
 
 // KVGetRevision retrieves a specific historical revision of key.
 func (c *Client) KVGetRevision(ctx context.Context, bucket, key string, revision uint64) (*KVEntry, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	entry, err := kv.GetRevision(key, revision)
+	entry, err := kv.GetRevision(ctx, key, revision)
 	if err != nil {
 		return nil, err
 	}
@@ -588,108 +607,76 @@ func (c *Client) KVGetRevision(ctx context.Context, bucket, key string, revision
 // Returns the new revision on success, or an error if a concurrent write occurred
 // (optimistic locking).
 func (c *Client) KVUpdate(ctx context.Context, bucket, key string, value []byte, lastRevision uint64) (uint64, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return 0, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return 0, err
-	}
-	return kv.Update(key, value, lastRevision)
+	return kv.Update(ctx, key, value, lastRevision)
 }
 
 // KVCreate2 sets key to value only if the key does not yet exist.
 // Equivalent to Redis SET NX.
 func (c *Client) KVCreate2(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return 0, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return 0, err
-	}
-	return kv.Create(key, value)
+	return kv.Create(ctx, key, value)
 }
 
 // KVDeleteKey soft-deletes a key by placing a delete marker (history preserved).
 func (c *Client) KVDeleteKey(ctx context.Context, bucket, key string) error {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return err
-	}
-	return kv.Delete(key)
+	return kv.Delete(ctx, key)
 }
 
 // KVPurgeKey removes a key and all its history permanently.
 func (c *Client) KVPurgeKey(ctx context.Context, bucket, key string) error {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return err
-	}
-	return kv.Purge(key)
+	return kv.Purge(ctx, key)
 }
 
 // KVKeys returns all active keys in the bucket.
 func (c *Client) KVKeys(ctx context.Context, bucket string) ([]string, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	return kv.Keys()
+	return kv.Keys(ctx)
 }
 
 // KVWatch watches a single key and sends updates to the returned watcher.
 // Call watcher.Stop() when done.
-func (c *Client) KVWatch(ctx context.Context, bucket, key string) (gonats.KeyWatcher, error) {
-	_, js, err := c.requireConnected()
+func (c *Client) KVWatch(ctx context.Context, bucket, key string) (jetstream.KeyWatcher, error) {
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	return kv.Watch(key)
+	return kv.Watch(ctx, key)
 }
 
 // KVWatchAll watches all keys in the bucket.
-func (c *Client) KVWatchAll(ctx context.Context, bucket string) (gonats.KeyWatcher, error) {
-	_, js, err := c.requireConnected()
+func (c *Client) KVWatchAll(ctx context.Context, bucket string) (jetstream.KeyWatcher, error) {
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	return kv.WatchAll()
+	return kv.WatchAll(ctx)
 }
 
 // KVHistory returns all stored revisions for a key (requires bucket History > 1).
 func (c *Client) KVHistory(ctx context.Context, bucket, key string) ([]KVEntry, error) {
-	_, js, err := c.requireConnected()
+	kv, err := c.kvBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	kv, err := c.kvBucket(js, bucket)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := kv.History(key)
+	entries, err := kv.History(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -697,7 +684,7 @@ func (c *Client) KVHistory(ctx context.Context, bucket, key string) ([]KVEntry, 
 	for i, e := range entries {
 		result[i] = *toKVEntry(e)
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 // ============================================================
@@ -753,7 +740,7 @@ func toConsumerInfo(info *gonats.ConsumerInfo) *ConsumerInfo {
 	}
 }
 
-func toKVEntry(e gonats.KeyValueEntry) *KVEntry {
+func toKVEntry(e jetstream.KeyValueEntry) *KVEntry {
 	return &KVEntry{
 		Bucket:    e.Bucket(),
 		Key:       e.Key(),

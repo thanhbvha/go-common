@@ -1,4 +1,4 @@
-// Package main demonstrates basic usage of the github.com/thanhbvha/go-common/kafka package.
+// Package main demonstrates basic usage of the github.com/thanhbvha/go-common/v2/kafka package.
 // Run with: go run ./examples/kafka/
 package main
 
@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thanhbvha/go-common/kafka"
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/kafka"
+	"github.com/thanhbvha/go-common/v2/logger"
 )
 
 func main() {
@@ -96,7 +96,9 @@ func main() {
 	})
 
 	// ---- 5. Consume ----
+	consumerDone := make(chan struct{})
 	go func() {
+		defer close(consumerDone)
 		log.Printf("kafka: starting consumer for topic %q", topic)
 		if err := client.Subscribe(ctx, []string{topic}, func(ctx context.Context, r kafka.ConsumeRecord) error {
 			log.Printf("kafka: received topic=%s partition=%d offset=%d key=%s value=%s",
@@ -125,5 +127,11 @@ func main() {
 
 	// ---- 7. Wait for interrupt ----
 	<-ctx.Done()
+	<-consumerDone
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer flushCancel()
+	if err := client.Flush(flushCtx); err != nil {
+		log.Printf("kafka: flush error: %v", err)
+	}
 	log.Println("kafka: shutting down example")
 }

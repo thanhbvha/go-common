@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/v2/health"
 )
 
 func statusCode(result health.HealthResponse) int {

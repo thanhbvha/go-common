@@ -3,18 +3,18 @@
 package contracttest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
+	"runtime/pprof"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 // Harness adapts a real transport to the Bus-level contract suite.
@@ -267,6 +267,7 @@ func Run(t *testing.T, h Harness) {
 		backend := &reconnectTransport{
 			Transport: h.New(t), forced: reconnects, lifetime: lifetime,
 			completed: make(chan int, reconnects),
+			label:     fmt.Sprintf("reconnect-%d", time.Now().UnixNano()),
 		}
 		topo := h.Topology(t.Name(), transport.TaskTopology)
 		handled := make(chan struct{}, 1)
@@ -287,12 +288,20 @@ func Run(t *testing.T, h Harness) {
 		if backend.maxActive.Load() != 1 {
 			t.Fatalf("overlapping consume sessions = %d, want 1", backend.maxActive.Load())
 		}
-		if growth := backend.goroutineGrowth(); growth > 8 {
-			t.Fatalf("goroutines grew by %d across repeated reconnects", growth)
-		}
 		mustEnqueue(t, bus, topo.JobType)
 		receive(t, handled, h.ReceiveWithin)
 		drain(t, bus, h.ReceiveWithin)
+		if backend.active.Load() != 0 {
+			t.Fatalf("consume sessions still active after drain: %d", backend.active.Load())
+		}
+		if backend.maxActive.Load() != 1 {
+			t.Fatalf("overlapping consume sessions = %d, want 1", backend.maxActive.Load())
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), h.ReceiveWithin)
+		defer cancel()
+		if err := waitSessionGoroutines(cleanup, backend.label); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -306,27 +315,30 @@ type reconnectTransport struct {
 	maxActive atomic.Int32
 	completed chan int
 
-	mu               sync.Mutex
-	goroutineSamples []int
+	label string
 }
 
+const sessionGoroutineLabel = "eventbus.contract.session"
+
 func (t *reconnectTransport) Consume(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
-	call := t.calls.Add(1)
-	if call > t.forced {
-		return t.Transport.Consume(ctx, sub, deliver)
-	}
+	// Labels are inherited by driver goroutines created in this Consume scope.
+	// They identify owned session work independently of unrelated SDK goroutines.
+	sessionCtx := pprof.WithLabels(ctx, pprof.Labels(sessionGoroutineLabel, t.label))
+	pprof.SetGoroutineLabels(sessionCtx)
+	defer pprof.SetGoroutineLabels(ctx)
 	active := t.active.Add(1)
+	defer t.active.Add(-1)
 	for current := t.maxActive.Load(); active > current && !t.maxActive.CompareAndSwap(current, active); current = t.maxActive.Load() {
 	}
-	sessionCtx, cancel := context.WithCancel(ctx)
+	call := t.calls.Add(1)
+	if call > t.forced {
+		return t.Transport.Consume(sessionCtx, sub, deliver)
+	}
+	sessionCtx, cancel := context.WithCancel(sessionCtx)
 	timer := time.AfterFunc(t.lifetime, cancel)
 	err := t.Transport.Consume(sessionCtx, sub, deliver)
 	timer.Stop()
 	cancel()
-	t.active.Add(-1)
-	t.mu.Lock()
-	t.goroutineSamples = append(t.goroutineSamples, runtime.NumGoroutine())
-	t.mu.Unlock()
 	t.completed <- int(call)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return fmt.Errorf("contract reconnect session %d ended", call)
@@ -334,13 +346,28 @@ func (t *reconnectTransport) Consume(ctx context.Context, sub transport.Subscrip
 	return err
 }
 
-func (t *reconnectTransport) goroutineGrowth() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(t.goroutineSamples) < 2 {
-		return 0
+// Native clients may cancel broker loops during Close without waiting for every
+// goroutine's final return. Wait on the actual invariant: after Drain, no worker
+// inherited from any owned Consume scope may remain. Never sample global count
+// during live reconnects; lazy SDK startup and asynchronous exits make it noisy.
+func waitSessionGoroutines(ctx context.Context, label string) error {
+	marker := fmt.Sprintf("%q:%q", sessionGoroutineLabel, label)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var profile bytes.Buffer
+		if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+			return err
+		}
+		if !strings.Contains(profile.String(), marker) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("session goroutines remain after drain: %w\n%s", ctx.Err(), profile.String())
+		case <-ticker.C:
+		}
 	}
-	return t.goroutineSamples[len(t.goroutineSamples)-1] - t.goroutineSamples[0]
 }
 
 func newTaskBus(t *testing.T, h Harness, cfg eventbus.Config, option eventbus.TopologyOption, handler eventbus.Handler) (transport.Transport, eventbus.Bus, transport.Topology) {

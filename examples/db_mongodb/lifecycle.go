@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/mongodb"
+	"github.com/thanhbvha/go-common/v2/db/mongodb"
 )
 
 func (s *exampleState) lifecycle(ctx context.Context) (result error) {

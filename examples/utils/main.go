@@ -8,11 +8,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/thanhbvha/go-common/utils/crypt"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/utils/graceful"
-	utilslice "github.com/thanhbvha/go-common/utils/slice"
-	"github.com/thanhbvha/go-common/utils/str"
+	"github.com/thanhbvha/go-common/v2/utils/crypt"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
+	utilslice "github.com/thanhbvha/go-common/v2/utils/slice"
+	"github.com/thanhbvha/go-common/v2/utils/str"
 )
 
 func main() {

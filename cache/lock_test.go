@@ -13,8 +13,14 @@ func TestRedisLock_AcquireRelease(t *testing.T) {
 	ctx := context.Background()
 	lockKey := "test_lock_key"
 
-	lock1 := NewRedisLock(client)
-	lock2 := NewRedisLock(client)
+	lock1, err := NewRedisLock(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock2, err := NewRedisLock(client)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Clean up before test
 	client.Del(ctx, lockKey)
@@ -61,7 +67,10 @@ func TestRedisLock_Extend(t *testing.T) {
 	ctx := context.Background()
 	lockKey := "test_lock_extend_key"
 
-	lock := NewRedisLock(client)
+	lock, err := NewRedisLock(client)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client.Del(ctx, lockKey)
 
 	success, _ := lock.Acquire(ctx, lockKey, 2*time.Second)
@@ -70,7 +79,7 @@ func TestRedisLock_Extend(t *testing.T) {
 	}
 
 	// Extend the TTL
-	success, err := lock.Extend(ctx, lockKey, 10*time.Second)
+	success, err = lock.Extend(ctx, lockKey, 10*time.Second)
 	if err != nil || !success {
 		t.Fatalf("Failed to extend lock: %v", err)
 	}

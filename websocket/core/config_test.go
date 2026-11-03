@@ -83,3 +83,19 @@ func TestLifecycleLoggingCanBeDisabled(t *testing.T) {
 		t.Fatal("lifecycle logging was not disabled")
 	}
 }
+
+func TestProductionConfigRequiresExplicitAuthorizer(t *testing.T) {
+	config := DefaultManagerConfig()
+	if err := config.ValidateProduction(); err == nil {
+		t.Fatal("missing authorizer accepted")
+	}
+	var typedNil *denyAuthorizer
+	config.Authorizer = typedNil
+	if err := config.ValidateProduction(); err == nil {
+		t.Fatal("typed nil authorizer accepted")
+	}
+	config.Authorizer = denyAuthorizer{}
+	if err := config.ValidateProduction(); err != nil {
+		t.Fatal(err)
+	}
+}

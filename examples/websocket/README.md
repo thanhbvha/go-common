@@ -444,13 +444,24 @@ Business handlers return validation or room-operation errors as:
   "type": "error",
   "data": {
     "source": "room.join",
-    "message": "websocket operation unauthorized"
+    "code": "FORBIDDEN",
+    "message": "You do not have permission to perform this operation"
   },
   "request_id": "client-alice-laptop"
 }
 ```
 
-Authorization failures rejected before handler execution are counted as dropped events and do not automatically generate this response.
+The error projection publishes only `source`, `code`, and `message`. Known core
+authorization, payload, connection, timeout, and room-limit failures map to fixed
+public messages. Application validation errors explicitly authored as `xerrors`
+with a 4xx status retain their public code/message; their wrapped causes stay in
+server logs. Unknown errors and all 5xx failures use `INTERNAL_ERROR` and a generic
+message. Raw `err.Error()`, error fields, and stacks never reach clients.
+
+`sendError` logs the diagnostic cause with request/source context and returns that
+cause after queuing the public response so core event/trace error accounting can
+observe it. Authorization failures rejected before handler execution are counted
+as dropped events and do not automatically generate this response.
 
 ## Client Flags
 
@@ -896,3 +907,11 @@ git diff --check
 The separate [cluster example](cluster/README.md) runs two gateways with a Redis
 session registry, NATS or Redis targeted delivery, independent business workers,
 and a shared EventBus realtime-router group. It includes enqueue p95/p99 sampling.
+
+Production bootstrap calls `ManagerConfig.ValidateProduction()` before creating
+the manager. The shared demo token authenticates access to this example, while
+query-selected identities are for exercising scenarios. Replace that resolver
+with verified per-user credentials and derive tenant/account/session from those
+credentials before using this bootstrap in a project. Legacy user/room IDs must
+be globally unique; use the tenant-scoped router shown in `cluster/` when IDs are
+only unique within a tenant.

@@ -12,9 +12,10 @@
 package response
 
 import (
+	"errors"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 const internalErrorMessage = "An unexpected internal error occurred"
@@ -56,6 +57,9 @@ func NewSuccess(data any, requestID string) Response {
 
 // NewError creates a standard error payload used by response adapters.
 func NewError(statusCode int, message, requestID string) Response {
+	if statusCode < 400 || statusCode > 599 {
+		statusCode = http.StatusInternalServerError
+	}
 	if statusCode >= http.StatusInternalServerError {
 		message = internalErrorMessage
 	}
@@ -93,7 +97,10 @@ func NewPaginated[T any](items []T, totalRows int64, totalPages, page, size int,
 
 // NewHTTPError creates a transport-safe HTTP error payload.
 func NewHTTPError(statusCode int, status, message, requestID string) ErrorResponse {
-	if statusCode == http.StatusInternalServerError {
+	if statusCode < 400 || statusCode > 599 {
+		statusCode, status = http.StatusInternalServerError, "INTERNAL_ERROR"
+	}
+	if statusCode >= http.StatusInternalServerError {
 		message = internalErrorMessage
 	}
 	return ErrorResponse{
@@ -108,12 +115,11 @@ func NewHTTPError(statusCode int, status, message, requestID string) ErrorRespon
 // Unknown/internal errors never expose their raw message.
 func FromError(err error, requestID string) ErrorResponse {
 	if err == nil {
-		return NewHTTPError(http.StatusOK, "", "", requestID)
+		return ErrorResponse{Code: http.StatusOK, RequestID: requestID}
 	}
-	return NewHTTPError(
-		xerrors.HTTPStatusCode(err),
-		xerrors.GetCode(err),
-		err.Error(),
-		requestID,
-	)
+	var custom *xerrors.CustomError
+	if errors.As(err, &custom) && custom != nil {
+		return NewHTTPError(custom.HTTPStatus, custom.Code, custom.Message, requestID)
+	}
+	return NewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "", requestID)
 }

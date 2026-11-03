@@ -1,206 +1,147 @@
-# Auth
+# Auth (v2)
 
-The `auth` module provides standard HS256 JWT managers, encrypted JWT payloads
-using AES-256 GCM, generic claims, Redis-backed refresh tokens, and token
-revocation. Framework middleware is isolated by import path:
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
 
-- `auth/middleware/nethttp`
-- `auth/middleware/fiber`
-- `auth/middleware/gin`
-- `auth/middleware/echo`
+`auth` provides HS256 JWT signing, encrypted payloads, key rotation, revocation,
+and a Redis session store. It has no HTTP framework dependency; middleware lives
+under `auth/middleware/{nethttp,fiber,gin,echo}`.
 
-All middleware validates a Bearer token and places `*auth.UserInfo` and the
-validated registered claims in standard `context.Context` through
-`ctxkey.SetUserInfo` and `ctxkey.SetAuthClaims`.
-
-## Standard JWT
-
-Load the signing key from a secret source and configure an explicit claim
-policy. HMAC keys must contain at least 32 bytes.
+## JWT policy
 
 ```go
 manager, err := auth.NewManagerWithOptions(auth.ManagerOptions{
-    SecretKey:      os.Getenv("AUTH_JWT_SECRET"),
-    Issuer:         "identity-service",
-    Audience:       []string{"payments-api"},
-    Leeway:         30 * time.Second,
-    MaxLifetime:    time.Hour,
-    MaxTokenSize:   16 * 1024,
-    MaxPayloadSize: 8 * 1024,
-    Revocation:     redisBackedManager,
-})
-if err != nil {
-    return err
-}
-
-token, err := manager.GenerateToken(auth.UserInfo{
-    ID:   "user-1",
-    Role: "admin",
-}, time.Hour)
-```
-
-The legacy constructors accept pre-upgrade tokens that have no `sub`, `jti`,
-or `kid`. Options-based constructors are strict by default. Set
-`AllowLegacyClaims` only for a bounded migration window; remove old keys and
-disable the flag after the longest old-token lifetime has elapsed.
-
-Issued tokens contain `exp`, `iat`, `nbf`, `sub`, and a random `jti`. User ID
-and positive lifetime are required. Validation is restricted to HS256 and, when
-configured, enforces issuer, every expected audience, expiration, size limits,
-and revocation.
-
-Standard `net/http` integration:
-
-```go
-protected := nethttpauth.Middleware(manager)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    value, ok := ctxkey.GetUserInfo(r.Context())
-    user, valid := value.(*auth.UserInfo)
-    if !ok || !valid || user == nil {
-        http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-        return
-    }
-    // Use user.ID and user.Role.
-}))
-```
-
-Fiber, Gin, and Echo expose equivalent `Middleware(manager)` functions.
-
-## Key Rotation
-
-Use a `KeyProvider` to issue with one active key while retaining previous keys
-for verification. New tokens carry the active key ID in the `kid` header.
-
-```go
-keyring, err := auth.NewStaticKeyProvider("v2", map[string][]byte{
-    "v1": oldSigningKey,
-    "v2": newSigningKey,
-})
-manager, err := auth.NewManagerWithOptions(auth.ManagerOptions{
-    SigningKeys: keyring,
-    Issuer:      "identity-service",
-    Audience:    []string{"payments-api"},
-})
-```
-
-During migration from tokens that predate `kid`, use
-`NewStaticKeyProviderWithLegacy(activeID, legacyID, keys)`. Key IDs must never
-be reused for different key material. Implement `KeyProvider` to integrate a
-KMS or secret manager; its methods receive the request context.
-
-## Encrypted JWT
-
-Encrypted managers hide claims from token holders and can bind authentication to
-application-supplied Additional Authenticated Data (AAD):
-
-```go
-manager, err := auth.NewEncryptedManagerWithOptions(auth.EncryptedManagerOptions{
-    SecretKey: os.Getenv("AUTH_JWT_SECRET"),
-    AESKey:    os.Getenv("AUTH_AES_KEY"), // exactly 32 bytes
-    AADPolicy: auth.RequireAAD,
-})
-if err != nil {
-    return err
-}
-
-aad, err := (auth.AADContext{
-    Issuer: "identity-service", Audience: "payments-api", SessionID: sessionID,
-}).Bytes()
-token, err := manager.GenerateToken(user, time.Hour, aad)
-```
-
-The same AAD must be supplied during validation. Generate binding values with a
-cryptographically secure random source. Browser cookies carrying binding data
-should use `HttpOnly`, `Secure`, an explicit `SameSite` policy, and a narrow
-`Path`.
-
-AAD and encrypted claims are defense in depth. They do not replace TLS, CSP and
-XSS prevention, CSRF controls, secure token storage, rotation, or revocation.
-
-This encrypted-token format is application-specific, versioned, and is not a
-standards-compliant JWE. It signs public registered claims and an AES-256-GCM
-ciphertext payload. For interoperability use a dedicated JWE implementation;
-for centrally validated sessions consider a smaller opaque random token.
-
-Encrypted key rotation uses separate `SigningKeys` and `EncryptionKeys` in
-`EncryptedManagerOptions`. Tokens carry signing `kid` and encryption `ekid`.
-
-## Generic Claims And Redis Sessions
-
-`GenericManager[T]` and `GenericEncryptedManager[T]` support custom claims,
-refresh tokens, and Redis-backed revocation:
-
-```go
-manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*CustomClaims]{
-    SecretKey:   os.Getenv("AUTH_JWT_SECRET"),
-    Redis:       redisClient,
-    Issuer:      "identity-service",
-    Audience:    []string{"payments-api"},
+    SecretKey: os.Getenv("AUTH_JWT_SECRET"), // at least 32 bytes
+    Issuer: "identity-service",
+    Audience: []string{"orders-api"},
     MaxLifetime: 15 * time.Minute,
-    TokenID: func(claims *CustomClaims) (string, error) {
-        return claims.ID, nil
-    },
+    Leeway: 30 * time.Second,
+    Revocation: revocations, // optional auth.RevocationChecker
 })
-if err != nil {
-    return err
-}
-
-refreshToken, err := manager.GenerateRefreshToken(ctx, userID, 7*24*time.Hour)
-revoked, err := manager.IsRevoked(ctx, claims.ID)
-err = manager.RevokeToken(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
+if err != nil { return err }
+token, err := manager.GenerateTokenContext(ctx, auth.UserInfo{ID: "user-1"}, 15*time.Minute)
+claims, err := manager.ValidateTokenContext(ctx, token)
 ```
 
-To authenticate generic claims in net/http, Fiber, Gin, or Echo, build one
-validator and pass it to that framework's `GenericMiddleware`. The claims
-factory must return a new value for every request. Supplying a token-ID
-extractor enables fail-closed Redis revocation checks:
+All managers require `kid`, `exp`, `iat`, `nbf`, `sub`, and a nonempty `jti`.
+Validation restricts the signing algorithm to HS256, enforces configured issuer,
+all expected audiences, lifetime and size limits, and propagates revocation
+backend errors. Revocation dependency failures preserve both
+`errors.Is(err, auth.ErrAuthBackendUnavailable)` and the underlying cause.
+All HTTP adapters return a generic 503 for this sentinel; invalid, expired,
+and revoked credentials remain 401. Custom ContextTokenValidator implementations
+can wrap the same sentinel to identify their dependency outages without exposing
+the cause. Default limits are 16 KiB encoded token and 8 KiB payload.
+Issuance rejects missing identities and nonpositive/over-policy lifetimes.
+
+`GenerateToken`/`ValidateToken` are convenience methods for local providers;
+use the context methods when keys or revocation require I/O. Legacy constructors,
+legacy claim flags, and key lookup without `kid` have been removed in v2.
+
+Keyrings are immutable copies:
 
 ```go
-validator, err := auth.NewGenericTokenValidator(
-    manager,
-    func() *CustomClaims { return &CustomClaims{} },
-	nil, // Manager options already enable fail-closed revocation.
-)
-if err != nil {
-    return err
-}
-
-protected := nethttpauth.GenericMiddleware(validator)(handler)
+keys, err := auth.NewStaticKeyProvider("current", map[string][]byte{
+    "previous": previousKey,
+    "current": currentKey,
+})
+// Pass SigningKeys: keys instead of SecretKey.
 ```
 
-Validated generic claims are available through both `ctxkey.GetUserInfo` and
-`ctxkey.GetAuthClaims`. Omit the token-ID extractor only if access-token
-revocation is intentionally disabled. Newly issued refresh tokens are stored as
-SHA-256 digests in Redis; verification remains compatible with existing
-plaintext entries during migration.
+Retain old key IDs until their tokens expire. Never reuse a key ID for different
+key material. Implement `KeyProvider` for a secret manager or KMS; methods must
+be concurrency-safe and honor their context.
 
-Use the request context for Redis operations. Do not silently treat a Redis
-lookup failure as "not revoked" on security-sensitive endpoints.
+## Encrypted payloads
 
-## Deprecated Compatibility API
+`NewEncryptedManagerWithOptions` applies the same policy, with `AESKey` (exactly
+32 bytes), optional `EncryptionKeys`, and `AADPolicy`. Set `auth.RequireAAD` when
+binding tokens to session data. `auth.AADContext.Bytes()` encodes an unambiguous
+binding; supply identical AAD during issuance and validation.
 
-The following v1 APIs remain source-compatible but should not be used in new
-code:
+The encrypted format is version 1, carries `kid` and signed `ekid`, and combines
+HS256 with AES-256-GCM. It is application-specific and is not JWE. TLS, secure
+storage, CSRF controls, and authorization remain application responsibilities.
 
-- `NewManager`: use `NewManagerWithOptions`.
-- `NewEncryptedManager`: use `NewEncryptedManagerWithOptions`.
-- `ExtractUserInfo`: use `ValidateTokenContext` so registered claims remain
-  available.
-- `GenericOptions` and `NewGenericManager`: use `GenericManagerOptions[T]` and
-  `NewGenericManagerWithOptions`.
+Generic encrypted payloads use the same encryption and claim engine:
 
-Compatibility constructors accept legacy token shapes and use static keys.
-They are retained for the v1 line and are candidates for removal in v2.
+```go
+manager, err := auth.NewGenericEncryptedManagerWithOptions(
+    auth.GenericEncryptedManagerOptions[MyPayload]{
+        EncryptedManagerOptions: auth.EncryptedManagerOptions{
+            SigningKeys: signingKeys, EncryptionKeys: encryptionKeys,
+            Issuer: "identity", Audience: []string{"api"},
+            MaxLifetime: time.Hour, AADPolicy: auth.RequireAAD,
+        },
+        Subject: func(value MyPayload) (string, error) { return value.UserID, nil },
+    },
+)
+token, err := manager.GenerateTokenContext(ctx, payload, time.Hour, aad)
+validated, err := manager.ValidateTokenContext(ctx, token, aad)
+// validated.Payload and validated.RegisteredClaims retain identity/audit data.
+```
 
-## Security Rules
+## Generic signed claims and revocation
 
-- Never hardcode or log signing keys, encryption keys, access tokens, or refresh
-  tokens.
-- Send bearer tokens in the `Authorization` header, not query strings.
-- Return generic authentication errors and log internal causes server-side.
-- Authenticate logout and derive the token ID from validated claims rather than
-  trusting a caller-supplied JTI.
-- Use checked context assertions.
-- Protect refresh and revocation endpoints with explicit abuse controls.
+`NewGenericManagerWithOptions` supports custom `jwt.Claims` with all required
+registered claims populated by the application. `TokenID` selects the revocation
+key; supplying it requires a `Revocation` checker or Redis. Redis-backed JTI
+revocation also requires `Namespace`; keys contain a SHA-256 digest of the ID.
+Different projects/issuers must use different namespaces.
 
-See [`examples/auth`](../examples/auth) for runnable standard, encrypted,
-generic Redis-backed, revocation, refresh-rotation, and key-rotation flows.
+`NewGenericTokenValidator(manager, freshClaimsFactory, nil)` adapts the manager
+to `GenericMiddleware`. The factory must allocate fresh claims per request.
+Middleware validates with the request context and stores validated values via
+`ctxkey.SetAuthClaims` and `ctxkey.SetUserInfo`. Errors returned to callers are
+generic; authorization must use checked assertions and validated identity.
+
+## Atomic refresh sessions
+
+```go
+sessions, err := auth.NewRedisSessionStore(auth.SessionStoreOptions{
+    Redis: redisClient, // redis.UniversalClient, including Cluster/Sentinel
+    Namespace: "orders:identity",
+})
+session, err := sessions.Create(ctx, userID, 7*24*time.Hour)
+replacement, err := sessions.Rotate(ctx, session.ID, session.RefreshToken)
+err = sessions.Revoke(ctx, session.ID)
+```
+
+Each sign-in creates an independent session ID and a 256-bit random refresh
+credential. Redis stores only credential digests. Rotation consumes the old
+credential and writes the replacement atomically within one Redis Cluster slot.
+A replay of an already consumed credential revokes the entire session; a random
+invalid credential does not revoke it. Unknown, expired, and revoked sessions
+fail closed. Backend errors are returned rather than treated as valid sessions.
+
+Session expiry is assigned once from Redis TIME and PEXPIREAT, remains identical
+across rotations, and does not depend on application clock skew or reply latency. TTLs must be whole
+milliseconds. Replay history is bounded by `MaxRotations` (default 1024, maximum
+10000); exhausting it requires a new sign-in. A lost response after a committed
+rotation requires reauthentication. Serialize refresh requests per session;
+concurrent use of one credential is replay and invalidates the session.
+
+To bind access tokens to session revocation, include `sid` in generic claims,
+set `Revocation: sessions`, and make `TokenID` return that `sid`. Keep a distinct
+random `jti` on every access token. Expired/logout/replayed sessions then reject
+existing access tokens immediately. The runnable generic example demonstrates
+this pattern, fail-closed login/refresh rate limits, and multiple sign-ins.
+
+The old per-user verify-then-write refresh API is removed. Never log a refresh
+session/token or put credentials in query strings. Production identity endpoints
+must verify credentials and load roles from an authoritative store; the example
+uses an explicitly fixed demonstration identity.
+
+## Verification
+
+```sh
+go test -race ./auth/... ./examples/auth
+```
+
+Tests cover strict claims, HS256 restriction, signing/encryption rotation, AAD,
+size limits, failed revocation lookups, session replay/concurrency/expiry/budgets,
+and middleware context propagation. See [examples](../examples/auth/README.md).
+
+Real Redis contracts are available with `-tags=integration` and
+`EVENTBUS_REDIS_ADDR` / `EVENTBUS_REDIS_CLUSTER_ADDRS`. Supplying a fixture makes
+connection or contract failures fatal; absent modes skip. These tests validate
+TIME/PEXPIREAT expiry and atomic replay behavior on standalone and Cluster.

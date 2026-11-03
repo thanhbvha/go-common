@@ -11,7 +11,7 @@ import (
 	"time"
 
 	gql "github.com/99designs/gqlgen/graphql"
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"

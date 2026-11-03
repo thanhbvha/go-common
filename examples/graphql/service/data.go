@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"github.com/thanhbvha/go-common/examples/graphql/graph/model"
+	"github.com/thanhbvha/go-common/v2/examples/graphql/graph/model"
 )
 
 var (

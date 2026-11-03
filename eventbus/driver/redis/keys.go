@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 // Raw URL base64 contains neither ':' nor braces. Encoding each tuple field

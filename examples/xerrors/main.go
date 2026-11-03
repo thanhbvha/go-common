@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 func main() {

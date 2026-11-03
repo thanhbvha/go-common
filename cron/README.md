@@ -1,5 +1,7 @@
 # Cron scheduler
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 In-process scheduling with six-field cron expressions (seconds first), optional
 Redis leases, cancellation, panic recovery and execution observations. Scheduling
 is **best effort**: there is no exactly-once delivery, durable retry queue or
@@ -13,7 +15,7 @@ Use `cron.ExecutionFromContext(ctx)` inside callbacks to obtain `JobName` and
 | --- | --- |
 | `NewScheduler(options ...Option)` | Configure timezone, namespace, logger, observer and local overlap policy. |
 | `AddJob(JobConfig)` | Register a named local job with `Run func(context.Context) error`. |
-| `AddDistributedJob(DistributedConfig, *cache.RedisLock)` | Register a named distributed job with the same callback contract. |
+| `AddDistributedJob(DistributedConfig, LeaseProvider)` | Register a named distributed job with the same callback contract. |
 | `Start()` | Begin dispatching jobs; repeated calls have no effect. |
 | `Shutdown(context.Context) error` | Stop dispatch, cancel callbacks and wait within the caller's deadline. |
 | `ExecutionFromContext(context.Context)` | Read the job name and scheduled timestamp for an idempotency key. |
@@ -85,7 +87,7 @@ _, err := scheduler.AddDistributedJob(cron.DistributedConfig{
         slog.InfoContext(ctx, "generating report", "idempotency_key", key)
         return nil
     },
-}, cache.NewRedisLock(rdb))
+}, cronredis.New(rdb))
 if err != nil { return err }
 scheduler.Start()
 // On SIGTERM / SIGINT, before closing DB/Redis:
@@ -99,7 +101,7 @@ if err := scheduler.Shutdown(ctx); err != nil {
 ```
 
 The snippets use `context`, `errors`, `log/slog`, `time`, `go-redis/v9` and the
-`cache`/`cron` packages. They belong inside an application function returning
+`cron` and `cron/lease/redis` packages (alias `cronredis`). They belong inside an application function returning
 `error`. See `examples/cron` for complete runnable programs.
 
 ## Execution and delivery contract
@@ -197,3 +199,10 @@ go vet ./cron ./cache ./examples/cron
 Cron tests use isolated miniredis instances, independent schedulers and explicit
 slot times for deterministic concurrency checks. Also validate transport failures,
 failover and deployment shutdown against the actual Redis topology before rollout.
+
+
+The core cron package uses a generic LeaseProvider and does not import cache or
+Redis. Import `cronredis "github.com/thanhbvha/go-common/v2/cron/lease/redis"`
+for Redis sessions. The adapter borrows its client; close it after scheduler drain.
+Custom providers must honor operation contexts and create independent ownership
+sessions. Session keys cannot be reacquired after success or an ambiguous result.

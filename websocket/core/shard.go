@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 const (
@@ -207,7 +207,8 @@ func (s *Shard) SendToRoom(roomID string, message []byte) {
 	}
 }
 
-// JoinRoom idempotently adds an active connection to a logical room.
+// JoinRoom serializes room operations per connection. Registry I/O never holds
+// shard or membership locks; an inactive connection cannot commit a late join.
 func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -215,57 +216,69 @@ func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) e
 	if roomID == "" || conn == nil {
 		return ErrConnectionInactive
 	}
-	select {
-	case <-s.ctx.Done():
-		return ErrShardStopped
-	default:
-	}
 	if err := s.authorizer().CanSubscribe(ctx, conn.identity, roomID); err != nil {
 		return ErrUnauthorized
 	}
+	conn.roomOperationMu.Lock()
+	defer conn.roomOperationMu.Unlock()
 	conn.roomsMu.Lock()
-	defer conn.roomsMu.Unlock()
-	if _, exists := conn.rooms[roomID]; !exists && len(conn.rooms) >= conn.config.MaxRoomsPerConnection {
-		return ErrRoomLimit
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, active := s.activeConns[conn]; !active || conn.IsClosed() {
-		delete(conn.rooms, roomID)
+	if _, active := s.activeConns[conn]; !active || conn.IsClosed() || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		conn.roomsMu.Unlock()
 		return ErrConnectionInactive
 	}
 	if _, joined := conn.rooms[roomID]; joined {
+		s.mu.Unlock()
+		conn.roomsMu.Unlock()
 		return nil
 	}
-	roomUsers, exists := s.chatRooms[roomID]
-	if !exists {
-		roomUsers = make(map[string]map[*Connection]struct{})
-		s.chatRooms[roomID] = roomUsers
+	if len(conn.rooms) >= conn.config.MaxRoomsPerConnection {
+		s.mu.Unlock()
+		conn.roomsMu.Unlock()
+		return ErrRoomLimit
 	}
-	userConns, exists := roomUsers[conn.userID]
-	if !exists {
-		userConns = make(map[*Connection]struct{})
-		roomUsers[conn.userID] = userConns
+	// Reserve capacity and local membership while the remote generation is joined.
+	if s.chatRooms[roomID] == nil {
+		s.chatRooms[roomID] = make(map[string]map[*Connection]struct{})
 	}
-	userConns[conn] = struct{}{}
+	if s.chatRooms[roomID][conn.userID] == nil {
+		s.chatRooms[roomID][conn.userID] = make(map[*Connection]struct{})
+	}
+	s.chatRooms[roomID][conn.userID][conn] = struct{}{}
 	conn.rooms[roomID] = struct{}{}
-	if gateway := s.config.Distributed; gateway != nil {
-		if err := gateway.JoinRoom(ctx, conn.routingLocation(), roomID); err != nil {
-			delete(userConns, conn)
-			if len(userConns) == 0 {
-				delete(roomUsers, conn.userID)
-			}
-			if len(roomUsers) == 0 {
-				delete(s.chatRooms, roomID)
-			}
-			delete(conn.rooms, roomID)
-			return err
+	s.mu.Unlock()
+	conn.roomsMu.Unlock()
+	gateway := s.config.Distributed
+	var err error
+	if gateway != nil {
+		err = gateway.JoinRoom(ctx, conn.routingLocation(), roomID)
+	}
+	conn.roomsMu.Lock()
+	s.mu.Lock()
+	_, active := s.activeConns[conn]
+	valid := active && !conn.IsClosed() && s.ctx.Err() == nil
+	if err != nil || !valid {
+		s.removeRoomLocked(roomID, conn)
+	}
+	s.mu.Unlock()
+	conn.roomsMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !valid {
+		if gateway != nil {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = gateway.LeaveRoom(cleanup, conn.routingLocation(), roomID)
+			cancel()
 		}
+		return ErrConnectionInactive
 	}
 	return nil
 }
 
-// LeaveRoom idempotently removes a connection from a logical room.
+// LeaveRoom removes local membership before network I/O. A generation-fenced
+// remote cleanup failure is reported; session expiry remains the fallback.
 func (s *Shard) LeaveRoom(ctx context.Context, roomID string, conn *Connection) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -273,28 +286,32 @@ func (s *Shard) LeaveRoom(ctx context.Context, roomID string, conn *Connection) 
 	if roomID == "" || conn == nil {
 		return nil
 	}
+	conn.roomOperationMu.Lock()
+	defer conn.roomOperationMu.Unlock()
 	conn.roomsMu.Lock()
-	defer conn.roomsMu.Unlock()
-	delete(conn.rooms, roomID)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	roomUsers, exists := s.chatRooms[roomID]
-	if !exists {
-		return nil
-	}
-	if userConns, exists := roomUsers[conn.userID]; exists {
-		delete(userConns, conn)
-		if len(userConns) == 0 {
-			delete(roomUsers, conn.userID)
-		}
-	}
-	if len(roomUsers) == 0 {
-		delete(s.chatRooms, roomID)
-	}
+	s.removeRoomLocked(roomID, conn)
+	s.mu.Unlock()
+	conn.roomsMu.Unlock()
 	if gateway := s.config.Distributed; gateway != nil {
 		return gateway.LeaveRoom(ctx, conn.routingLocation(), roomID)
 	}
 	return nil
+}
+
+// Caller owns conn.roomsMu and s.mu. Repeated removal is harmless.
+func (s *Shard) removeRoomLocked(roomID string, conn *Connection) {
+	delete(conn.rooms, roomID)
+	users := s.chatRooms[roomID]
+	if connections := users[conn.userID]; connections != nil {
+		delete(connections, conn)
+		if len(connections) == 0 {
+			delete(users, conn.userID)
+		}
+	}
+	if len(users) == 0 {
+		delete(s.chatRooms, roomID)
+	}
 }
 
 // GetRoomSize returns the number of active physical connections in a room.

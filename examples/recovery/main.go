@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/logger"
-	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/utils/graceful"
-	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
+	"github.com/thanhbvha/go-common/v2/logger"
+	fiberlog "github.com/thanhbvha/go-common/v2/logger/middleware/fiber"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
+	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
 )
 
 func main() {
@@ -68,7 +68,6 @@ func runBackgroundJob(ctx context.Context) {
 	defer panicrecovery.Catch(func(report panicrecovery.Report) {
 		logger.ErrorWithContext(ctx, "background panic recovered",
 			slog.String("panic_type", report.Type),
-			slog.String("panic_message", report.Message),
 			slog.String("file", report.Origin.File),
 			slog.Int("line", report.Origin.Line),
 			slog.String("function", report.Origin.Function),

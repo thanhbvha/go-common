@@ -19,7 +19,10 @@ func TestHttpClient_Success(t *testing.T) {
 	defer ts.Close()
 
 	cfg := DefaultConfig(ts.URL)
-	client := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
 		return req.Get("/")
@@ -45,20 +48,23 @@ func TestHttpClient_CircuitBreaker_Open(t *testing.T) {
 	cfg.CircuitBreaker.ReadyToTripMinRequests = 3
 	cfg.CircuitBreaker.ReadyToTripFailRatio = 1.0
 
-	client := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Send 3 requests, all will fail (500), which should trip the breaker (MinRequests=3)
 	for i := 0; i < 3; i++ {
 		_, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
 			return req.Get("/")
 		})
-		if err == nil {
-			t.Errorf("Expected error on request %d, got nil", i+1)
+		if err != nil {
+			t.Errorf("HTTP status must not change return-error semantics: %v", err)
 		}
 	}
 
 	// The 4th request should be blocked by the Circuit Breaker
-	_, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
+	_, err = client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
 		return req.Get("/")
 	})
 
@@ -85,7 +91,10 @@ func TestHttpClient_Retry(t *testing.T) {
 	cfg.Retry.MaxRetries = 3
 	cfg.Retry.WaitTime = 10 * time.Millisecond
 
-	client := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
 		return req.Get("/")

@@ -4,6 +4,9 @@
 package httpclient
 
 import (
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"net/http"
 	"time"
 
 	"github.com/sony/gobreaker/v2"
@@ -16,6 +19,11 @@ type Config struct {
 	Retry           RetryConfig
 	CircuitBreaker  CBConfig
 	EnableTelemetry bool
+	Transport       http.RoundTripper
+	TracerProvider  trace.TracerProvider
+	Propagator      propagation.TextMapPropagator
+	// MaxResponseBodyBytes caps buffered Resty responses; zero uses 4 MiB.
+	MaxResponseBodyBytes int
 }
 
 // RetryConfig configures the auto-retry mechanism.
@@ -53,7 +61,7 @@ func DefaultConfig(baseURL string) Config {
 		CircuitBreaker: CBConfig{
 			Enabled:                true,
 			Name:                   "default-cb",
-			MaxRequests:            0,                // Unlimited when half-open by default (gobreaker standard: 1)
+			MaxRequests:            0,                // Defaults to one half-open probe
 			Interval:               0,                // Cyclic period
 			Timeout:                30 * time.Second, // Time in open state before transitioning to half-open
 			ReadyToTripMinRequests: 5,                // Minimum requests before checking failure ratio

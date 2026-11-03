@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm"
+	"github.com/thanhbvha/go-common/v2/db/orm"
 )
 
 func demoManager(ctx context.Context, opt options) (result error) {

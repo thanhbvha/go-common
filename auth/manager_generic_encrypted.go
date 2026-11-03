@@ -2,241 +2,81 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/utils/crypt"
 )
 
-// GenericEncryptedManager defines the interface for managing generic encrypted JWTs,
-// refresh tokens, and token revocation via a Redis backend.
-type GenericEncryptedManager[T any] interface {
-	// GenerateToken encrypts the payload using AES-256 GCM and creates a signed JWT.
-	GenerateToken(payload T, duration time.Duration, aad []byte) (string, error)
-
-	// VerifyToken validates the JWT signature, decrypts the payload, and unmarshals it into emptyPayload.
-	VerifyToken(tokenString string, emptyPayload *T, aad []byte) error
-
-	// GenerateRefreshToken creates a secure random refresh token and stores only
-	// its digest in Redis with the given expiration.
-	GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error)
-
-	// VerifyRefreshToken checks if the refresh token is valid in Redis.
-	VerifyRefreshToken(ctx context.Context, userID, token string) (bool, error)
-
-	// RevokeRefreshToken deletes a refresh token from Redis.
-	RevokeRefreshToken(ctx context.Context, userID string) error
-
-	// RevokeToken adds a JWT token ID (jti) to the Redis blacklist until it expires.
-	RevokeToken(ctx context.Context, tokenID string, expiration time.Duration) error
-
-	// IsRevoked checks if a JWT token ID (jti) is in the Redis blacklist.
-	IsRevoked(ctx context.Context, tokenID string) (bool, error)
+// GenericEncryptedManagerOptions applies the same policy and key providers as
+// EncryptedManager. Subject binds the encrypted payload to signed identity.
+type GenericEncryptedManagerOptions[T any] struct {
+	EncryptedManagerOptions
+	Subject func(T) (string, error)
 }
 
-type genericEncryptedManager[T any] struct {
-	jwtSecret   []byte
-	aesKey      []byte
-	redisClient redis.UniversalClient
+type GenericEncryptedManager[T any] struct {
+	engine  *EncryptedManager
+	subject func(T) (string, error)
 }
 
-// GenericEncryptedOptions holds configuration for creating a GenericEncryptedManager.
-type GenericEncryptedOptions struct {
-	SecretKey string
-	AESKey    string
-	Redis     redis.UniversalClient // Optional: Required only for refresh tokens & revocation
+type EncryptedPayload[T any] struct {
+	Payload T
+	jwt.RegisteredClaims
+	EncryptionKeyID string
+	FormatVersion   int
 }
 
-// NewGenericEncryptedManager creates a new GenericEncryptedManager instance.
-func NewGenericEncryptedManager[T any](opts GenericEncryptedOptions) (GenericEncryptedManager[T], error) {
-	if len(opts.SecretKey) < 32 {
-		return nil, ErrInvalidKey
+func NewGenericEncryptedManagerWithOptions[T any](opts GenericEncryptedManagerOptions[T]) (*GenericEncryptedManager[T], error) {
+	if opts.Subject == nil {
+		return nil, fmt.Errorf("auth: subject extractor is required")
 	}
-	keyBytes := []byte(opts.AESKey)
-	if len(keyBytes) != 32 {
-		return nil, crypt.ErrInvalidKeySize
+	engine, err := NewEncryptedManagerWithOptions(opts.EncryptedManagerOptions)
+	if err != nil {
+		return nil, err
 	}
-
-	return &genericEncryptedManager[T]{
-		jwtSecret:   []byte(opts.SecretKey),
-		aesKey:      keyBytes,
-		redisClient: opts.Redis,
-	}, nil
+	return &GenericEncryptedManager[T]{engine: engine, subject: opts.Subject}, nil
 }
 
-func (m *genericEncryptedManager[T]) GenerateToken(payload T, duration time.Duration, aad []byte) (string, error) {
-	// 1. Serialize T to JSON
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal payload: %w", err)
+func (m *GenericEncryptedManager[T]) GenerateTokenContext(ctx context.Context, payload T, duration time.Duration, aad []byte) (string, error) {
+	if m == nil {
+		return "", ErrInvalidManager
 	}
-
-	// 2. Encrypt the JSON payload using AES-256 GCM
-	ciphertext, err := crypt.EncryptAESGCM(m.aesKey, payloadBytes, aad)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt payload: %w", err)
-	}
-
-	// 3. Encode to Base64 to safely embed in JSON
-	payloadB64 := base64.StdEncoding.EncodeToString(ciphertext)
-
-	now := time.Now()
-	claims := EncryptedClaims{
-		Payload: payloadB64,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(duration)),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-		},
-	}
-
-	// 4. Sign the JWT
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString(m.jwtSecret)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
-	}
-
-	return signedToken, nil
-}
-
-func (m *genericEncryptedManager[T]) VerifyToken(tokenString string, emptyPayload *T, aad []byte) error {
-	// 1. Parse and validate the JWT signature
-	token, err := jwt.ParseWithClaims(tokenString, &EncryptedClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if t.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return m.jwtSecret, nil
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
-
-	if err != nil {
-		if errors.Is(err, jwt.ErrTokenExpired) {
-			return ErrExpiredToken
-		}
-		return fmt.Errorf("%w: %w", ErrInvalidToken, err)
-	}
-
-	claims, ok := token.Claims.(*EncryptedClaims)
-	if !ok || !token.Valid {
-		return ErrInvalidToken
-	}
-
-	// 2. Decode the Base64 payload
-	ciphertext, err := base64.StdEncoding.DecodeString(claims.Payload)
-	if err != nil {
-		return fmt.Errorf("%w: invalid base64 encoding", ErrDecryptionFailed)
-	}
-
-	// 3. Decrypt the payload using AES-256 GCM
-	plaintext, err := crypt.DecryptAESGCM(m.aesKey, ciphertext, aad)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
-	}
-
-	// 4. Deserialize JSON back to generic type T
-	if err := json.Unmarshal(plaintext, emptyPayload); err != nil {
-		return fmt.Errorf("%w: invalid json structure", ErrDecryptionFailed)
-	}
-
-	return nil
-}
-
-// --- Redis Methods (Identical to GenericManager) ---
-
-func (m *genericEncryptedManager[T]) GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error) {
-	if m.redisClient == nil {
-		return "", ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(userID) == "" {
+	if isNilValue(payload) {
 		return "", ErrInvalidIdentity
 	}
-	if duration <= 0 {
-		return "", ErrInvalidDuration
-	}
-
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	rt := hex.EncodeToString(b)
-
-	key := refreshTokenPrefix + userID
-	if err := m.redisClient.Set(ctx, key, hashRefreshToken(rt), duration).Err(); err != nil {
-		return "", fmt.Errorf("failed to store refresh token: %w", err)
-	}
-
-	return rt, nil
-}
-
-func (m *genericEncryptedManager[T]) VerifyRefreshToken(ctx context.Context, userID, token string) (bool, error) {
-	if m.redisClient == nil {
-		return false, ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(userID) == "" || token == "" {
-		return false, nil
-	}
-
-	key := refreshTokenPrefix + userID
-	storedToken, err := m.redisClient.Get(ctx, key).Result()
+	subject, err := m.subject(payload)
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return false, nil // not found
-		}
-		return false, err
+		return "", fmt.Errorf("%w: subject unavailable", ErrInvalidIdentity)
 	}
-
-	want := hashRefreshToken(token)
-	if strings.HasPrefix(storedToken, refreshTokenHashPrefix) {
-		return constantTimeEqual(storedToken, want), nil
-	}
-	return constantTimeEqual(storedToken, token), nil
+	return m.engine.generatePayload(ctx, subject, payload, duration, aad)
 }
 
-func (m *genericEncryptedManager[T]) RevokeRefreshToken(ctx context.Context, userID string) error {
-	if m.redisClient == nil {
-		return ErrRedisNotConfigured
+func (m *GenericEncryptedManager[T]) ValidateTokenContext(ctx context.Context, token string, aad []byte) (*EncryptedPayload[T], error) {
+	if m == nil {
+		return nil, ErrInvalidManager
 	}
-	if strings.TrimSpace(userID) == "" {
-		return ErrInvalidIdentity
-	}
-	key := refreshTokenPrefix + userID
-	return m.redisClient.Del(ctx, key).Err()
-}
-
-func (m *genericEncryptedManager[T]) RevokeToken(ctx context.Context, tokenID string, expiration time.Duration) error {
-	if m.redisClient == nil {
-		return ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(tokenID) == "" {
-		return ErrInvalidIdentity
-	}
-	if expiration <= 0 {
-		return ErrInvalidDuration
-	}
-	key := blacklistPrefix + tokenID
-	return m.redisClient.Set(ctx, key, "revoked", expiration).Err()
-}
-
-func (m *genericEncryptedManager[T]) IsRevoked(ctx context.Context, tokenID string) (bool, error) {
-	if m.redisClient == nil {
-		return false, ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(tokenID) == "" {
-		return false, ErrInvalidIdentity
-	}
-
-	key := blacklistPrefix + tokenID
-	count, err := m.redisClient.Exists(ctx, key).Result()
+	plaintext, claims, err := m.engine.validatePayload(ctx, token, aad)
 	if err != nil {
-		return false, fmt.Errorf("failed to check token revocation: %w", err)
+		return nil, err
 	}
-	return count > 0, nil
+	var payload T
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON structure", ErrDecryptionFailed)
+	}
+	if isNilValue(payload) {
+		return nil, ErrInvalidIdentity
+	}
+	subject, err := m.subject(payload)
+	if err != nil {
+		return nil, ErrInvalidIdentity
+	}
+	if err := validateUserClaims(UserInfo{ID: subject}, claims.RegisteredClaims, m.engine.maxLifetime); err != nil {
+		return nil, err
+	}
+	if err := checkRevocation(ctx, m.engine.revocation, claims.ID); err != nil {
+		return nil, err
+	}
+	return &EncryptedPayload[T]{Payload: payload, RegisteredClaims: claims.RegisteredClaims, EncryptionKeyID: claims.EncryptionKeyID, FormatVersion: claims.Version}, nil
 }

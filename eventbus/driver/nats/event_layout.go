@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func (t *natsTransport) ensureEventLayoutMarker(ctx context.Context, topology transport.Topology, kv gonats.KeyValue) error {

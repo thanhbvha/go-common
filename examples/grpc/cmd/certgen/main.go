@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/thanhbvha/go-common/examples/grpc/internal/devcert"
+	"github.com/thanhbvha/go-common/v2/examples/grpc/internal/devcert"
 )
 
 func main() {

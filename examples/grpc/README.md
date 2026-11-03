@@ -71,9 +71,9 @@ server process rather than the `go run` wrapper.
 ## Configuration: YAML or environment
 
 Both servers share the same `ParseServer` and YAML/env schema. The client has its
-own schema. The loader uses repository `config.Load(config.DefaultOptions(), ...)`
-with `AutomaticEnv` enabled, plus explicit Viper field binding for keys absent from
-YAML and environment-only deployments.
+own schema. The loader uses repository `config.Load(config.DefaultOptions(), ...)`;
+the config package itself binds tagged fields that are absent from YAML, including
+environment-only deployments.
 
 Precedence: **explicit CLI flags > process environment > YAML > defaults**.
 Nonempty `GRPC_DEMO_TOKEN` is a special shared override above command-specific

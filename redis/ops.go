@@ -26,7 +26,7 @@ func (c *Client) BuildKey(key string) string {
 func (c *Client) requireConnected() (goredis.UniversalClient, error) {
 	c.mu.RLock()
 	rc := c.rc
-	ok := c.connected
+	ok := !c.closed
 	c.mu.RUnlock()
 	if !ok || rc == nil {
 		return nil, goredis.ErrClosed
@@ -119,82 +119,40 @@ func (c *Client) Type(ctx context.Context, key string) (string, error) {
 // When key does not exist it is initialised to 0 before incrementing.
 // If expiration > 0 and the key was just created (val == 1), the TTL is set.
 func (c *Client) Incr(ctx context.Context, key string, expiration time.Duration) (int64, error) {
-	rc, err := c.requireConnected()
-	if err != nil {
-		return 0, err
-	}
-	val, err := rc.Incr(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	if val == 1 && expiration > 0 {
-		rc.Expire(ctx, key, expiration)
-	}
-	return val, nil
+	return c.IncrBy(ctx, key, 1, expiration)
 }
 
-// IncrBy atomically increments the integer stored at key by increment.
+// increment atomically sets an initial TTL only when creating a counter.
+func (c *Client) increment(ctx context.Context, key, command string, delta any, expiration time.Duration) *goredis.Cmd {
+	rc, err := c.requireConnected()
+	if err != nil {
+		return goredis.NewCmdResult(nil, err)
+	}
+	if expiration < 0 {
+		return goredis.NewCmdResult(nil, fmt.Errorf("redis: negative counter expiration"))
+	}
+	ttl := int64(0)
+	if expiration > 0 {
+		ttl = max(expiration.Milliseconds(), 1)
+	}
+	return rc.Eval(ctx, `local exists=redis.call("EXISTS",KEYS[1])
+redis.call(ARGV[1],KEYS[1],ARGV[2])
+if exists==0 and tonumber(ARGV[3])>0 then redis.call("PEXPIRE",KEYS[1],ARGV[3]) end
+return redis.call("GET",KEYS[1])`, []string{key}, command, delta, ttl)
+}
+
+// IncrBy increments a counter and gives newly created keys the requested TTL.
 func (c *Client) IncrBy(ctx context.Context, key string, increment int64, expiration time.Duration) (int64, error) {
-	rc, err := c.requireConnected()
-	if err != nil {
-		return 0, err
-	}
-	val, err := rc.IncrBy(ctx, key, increment).Result()
-	if err != nil {
-		return 0, err
-	}
-	if val == increment && expiration > 0 {
-		rc.Expire(ctx, key, expiration)
-	}
-	return val, nil
+	return c.increment(ctx, key, "INCRBY", increment, expiration).Int64()
 }
-
-// IncrByFloat atomically increments the float stored at key by increment.
 func (c *Client) IncrByFloat(ctx context.Context, key string, increment float64, expiration time.Duration) (float64, error) {
-	rc, err := c.requireConnected()
-	if err != nil {
-		return 0, err
-	}
-	val, err := rc.IncrByFloat(ctx, key, increment).Result()
-	if err != nil {
-		return 0, err
-	}
-	if val == increment && expiration > 0 {
-		rc.Expire(ctx, key, expiration)
-	}
-	return val, nil
+	return c.increment(ctx, key, "INCRBYFLOAT", increment, expiration).Float64()
 }
-
-// Decr atomically decrements the integer stored at key by 1.
 func (c *Client) Decr(ctx context.Context, key string, expiration time.Duration) (int64, error) {
-	rc, err := c.requireConnected()
-	if err != nil {
-		return 0, err
-	}
-	val, err := rc.Decr(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	if val == -1 && expiration > 0 {
-		rc.Expire(ctx, key, expiration)
-	}
-	return val, nil
+	return c.DecrBy(ctx, key, 1, expiration)
 }
-
-// DecrBy atomically decrements the integer stored at key by decrement.
 func (c *Client) DecrBy(ctx context.Context, key string, decrement int64, expiration time.Duration) (int64, error) {
-	rc, err := c.requireConnected()
-	if err != nil {
-		return 0, err
-	}
-	val, err := rc.DecrBy(ctx, key, decrement).Result()
-	if err != nil {
-		return 0, err
-	}
-	if val == -decrement && expiration > 0 {
-		rc.Expire(ctx, key, expiration)
-	}
-	return val, nil
+	return c.increment(ctx, key, "DECRBY", decrement, expiration).Int64()
 }
 
 // ---- Hash operations ----

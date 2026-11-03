@@ -30,35 +30,33 @@ type RevocationChecker interface {
 
 // ManagerOptions configures standard JWT issuance and validation.
 type ManagerOptions struct {
-	SecretKey         string
-	SigningKeys       KeyProvider
-	Revocation        RevocationChecker
-	Issuer            string
-	Audience          []string
-	Leeway            time.Duration
-	MaxLifetime       time.Duration
-	Clock             Clock
-	MaxTokenSize      int
-	MaxPayloadSize    int
-	AllowLegacyClaims bool
+	SecretKey      string
+	SigningKeys    KeyProvider
+	Revocation     RevocationChecker
+	Issuer         string
+	Audience       []string
+	Leeway         time.Duration
+	MaxLifetime    time.Duration
+	Clock          Clock
+	MaxTokenSize   int
+	MaxPayloadSize int
 }
 
 // EncryptedManagerOptions configures encrypted JWT issuance and validation.
 type EncryptedManagerOptions struct {
-	SecretKey         string
-	AESKey            string
-	SigningKeys       KeyProvider
-	EncryptionKeys    KeyProvider
-	Revocation        RevocationChecker
-	AADPolicy         AADPolicy
-	Issuer            string
-	Audience          []string
-	Leeway            time.Duration
-	MaxLifetime       time.Duration
-	Clock             Clock
-	MaxTokenSize      int
-	MaxPayloadSize    int
-	AllowLegacyClaims bool
+	SecretKey      string
+	AESKey         string
+	SigningKeys    KeyProvider
+	EncryptionKeys KeyProvider
+	Revocation     RevocationChecker
+	AADPolicy      AADPolicy
+	Issuer         string
+	Audience       []string
+	Leeway         time.Duration
+	MaxLifetime    time.Duration
+	Clock          Clock
+	MaxTokenSize   int
+	MaxPayloadSize int
 }
 
 func normalizeTokenOptions(issuer string, audience []string, leeway, maxLifetime time.Duration, clock Clock) (string, []string, time.Duration, time.Duration, Clock, error) {
@@ -108,12 +106,11 @@ func newTokenID() (string, error) {
 	return hex.EncodeToString(value), nil
 }
 
-func validateUserClaims(user UserInfo, claims jwt.RegisteredClaims, maxLifetime time.Duration, allowLegacy bool) error {
+func validateUserClaims(user UserInfo, claims jwt.RegisteredClaims, maxLifetime time.Duration) error {
 	if strings.TrimSpace(user.ID) == "" || claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.NotBefore == nil {
 		return ErrInvalidToken
 	}
-	legacyClaims := claims.Subject == "" && claims.ID == ""
-	if (!allowLegacy || !legacyClaims) && (claims.Subject == "" || claims.Subject != user.ID || claims.ID == "") {
+	if strings.TrimSpace(claims.Subject) == "" || claims.Subject != user.ID || strings.TrimSpace(claims.ID) == "" {
 		return ErrInvalidToken
 	}
 	if claims.ExpiresAt.Before(claims.IssuedAt.Time) || claims.ExpiresAt.Before(claims.NotBefore.Time) {
@@ -131,12 +128,26 @@ func checkRevocation(ctx context.Context, checker RevocationChecker, tokenID str
 	}
 	revoked, err := checker.IsRevoked(ctx, tokenID)
 	if err != nil {
-		return fmt.Errorf("auth: revocation check failed: %w", err)
+		return classifyRevocationError(err)
 	}
 	if revoked {
 		return ErrTokenRevoked
 	}
 	return nil
+}
+
+func classifyRevocationError(err error) error {
+	if errors.Is(err, ErrAuthBackendUnavailable) {
+		return err
+	}
+	// A checker may also reject a malformed session identity. These remain
+	// credential failures, while dependency failures preserve both identities.
+	for _, credential := range []error{ErrInvalidToken, ErrExpiredToken, ErrTokenRevoked, ErrInvalidRefreshToken, ErrRefreshReplay, ErrSessionExhausted, ErrInvalidIdentity} {
+		if errors.Is(err, credential) {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: %w", ErrAuthBackendUnavailable, err)
 }
 
 func normalizeSizeLimit(value, fallback int) int {

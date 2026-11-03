@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/thanhbvha/go-common/eventbus/driver/memory"
-	"github.com/thanhbvha/go-common/eventbus/registry"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	_ "github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func TestEngine_C4_StateMachine(t *testing.T) {

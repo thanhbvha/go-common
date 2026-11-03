@@ -74,7 +74,7 @@ func (v *genericTokenValidator[T]) ValidateRequestToken(ctx context.Context, tok
 	}
 	revoked, err := v.manager.IsRevoked(ctx, tokenID)
 	if err != nil {
-		return zero, fmt.Errorf("auth: revocation check failed: %w", err)
+		return zero, classifyRevocationError(err)
 	}
 	if revoked {
 		return zero, ErrTokenRevoked

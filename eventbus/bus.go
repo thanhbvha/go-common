@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thanhbvha/go-common/eventbus/registry"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 // CapabilityProvider optionally exposes a bus transport's guarantees without

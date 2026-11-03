@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -29,7 +29,7 @@ type OTelMetrics struct {
 }
 
 func NewOTelMetrics() (*OTelMetrics, error) {
-	meter := otel.Meter("github.com/thanhbvha/go-common/eventbus")
+	meter := otel.Meter("github.com/thanhbvha/go-common/v2/eventbus")
 	m := &OTelMetrics{}
 	var err error
 	if m.publish, err = meter.Int64Counter("eventbus.publish"); err != nil {
@@ -119,7 +119,7 @@ func (m *OTelMetrics) ObserveStats(name string, stats transport.TopologyStats) {
 type OTelTracer struct{ tracer trace.Tracer }
 
 func NewOTelTracer() *OTelTracer {
-	return &OTelTracer{tracer: otel.Tracer("github.com/thanhbvha/go-common/eventbus")}
+	return &OTelTracer{tracer: otel.Tracer("github.com/thanhbvha/go-common/v2/eventbus")}
 }
 
 func (t *OTelTracer) Start(ctx context.Context, operation string, carrier eventbus.Headers) (context.Context, func()) {

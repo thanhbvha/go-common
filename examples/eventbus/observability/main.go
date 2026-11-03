@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
-	commontelemetry "github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/examples/eventbus/internal/demo"
+	commontelemetry "github.com/thanhbvha/go-common/v2/telemetry"
 )
 
 func main() {
@@ -38,7 +38,7 @@ func run(ctx context.Context, args []string) (returnErr error) {
 	telCfg := commontelemetry.DefaultConfig("eventbus-example")
 	telCfg.Endpoint = *otelEndpoint
 	telCfg.ExportInterval = 2 * time.Second
-	tel, err := commontelemetry.Init(ctx, telCfg)
+	tel, err := commontelemetry.New(ctx, telCfg)
 	if err != nil {
 		return fmt.Errorf("initialize OpenTelemetry: %w", err)
 	}
@@ -48,6 +48,9 @@ func run(ctx context.Context, args []string) (returnErr error) {
 		returnErr = errors.Join(returnErr, tel.Shutdown(shutdownCtx))
 	}()
 
+	if err := tel.InstallGlobal(); err != nil {
+		return err
+	}
 	metrics, err := demo.NewOTelMetrics()
 	if err != nil {
 		return fmt.Errorf("create EventBus metrics: %w", err)

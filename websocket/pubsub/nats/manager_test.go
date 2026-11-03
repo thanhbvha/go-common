@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 func TestLoopbackHandlerContinuesAfterPanic(t *testing.T) {

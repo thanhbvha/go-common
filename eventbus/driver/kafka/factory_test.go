@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -71,11 +71,8 @@ func TestNewWithConfigPropagatesFactoryToInternalConsumers(t *testing.T) {
 	}
 }
 
-func TestMainConsumerOverridesFactoryAutoCommit(t *testing.T) {
+func TestMainConsumerUsesExplicitManualCommitPolicy(t *testing.T) {
 	cfg := commonkafka.DefaultConfig()
-	if cfg.ConsumerCommitInterval <= 0 {
-		t.Fatal("test requires the default auto-commit policy")
-	}
 	factory, err := commonkafka.NewNativeClientFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -191,15 +188,12 @@ func TestNewWithClientRejectsDisconnectedClient(t *testing.T) {
 }
 
 func TestNewWithConfigAcceptsManualCommitPolicy(t *testing.T) {
-	for _, interval := range []time.Duration{0, -time.Second} {
-		cfg := commonkafka.DefaultConfig()
-		cfg.ConsumerCommitInterval = interval
-		backend, err := NewWithConfig(cfg)
-		if err != nil {
-			t.Fatalf("manual commit policy: %v", err)
-		}
-		if err := backend.Close(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+	cfg := commonkafka.DefaultConfig()
+	backend, err := NewWithConfig(cfg)
+	if err != nil {
+		t.Fatalf("manual commit policy: %v", err)
+	}
+	if err := backend.Close(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

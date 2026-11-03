@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 func TestExtractRequestIDSupportsSharedAndLegacyKeys(t *testing.T) {

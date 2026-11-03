@@ -21,7 +21,11 @@
 //	defer redis.Close()
 package redis
 
-import "time"
+import (
+	"crypto/tls"
+	"fmt"
+	"time"
+)
 
 // ConnectionMode defines the Redis topology used when creating a client.
 type ConnectionMode int
@@ -39,6 +43,12 @@ const (
 // Use DefaultConfig to obtain a value pre-filled with sensible defaults,
 // then override only the fields you need.
 type Config struct {
+	// TLSConfig enables verified TLS. Configuration is cloned by New.
+	TLSConfig        *tls.Config
+	Username         string
+	SentinelUsername string
+	SentinelPassword string
+
 	// --- Connection ---
 
 	// Host is the Redis server hostname or IP (ModeSingle only). Default: "localhost".
@@ -141,4 +151,33 @@ func DefaultConfig() Config {
 		MaxRetryBackoff: 1000 * time.Millisecond,
 		MaxConnRetries:  3,
 	}
+}
+
+// Validate rejects invalid topology and resource settings before dialing.
+func (c Config) Validate() error {
+	if c.Mode < ModeSingle || c.Mode > ModeSentinel {
+		return fmt.Errorf("redis: invalid connection mode")
+	}
+	if c.Mode == ModeSingle && (c.Host == "" || c.Port < 1 || c.Port > 65535) {
+		return fmt.Errorf("redis: valid host/port required")
+	}
+	if c.Mode == ModeCluster && len(c.ClusterAddrs) == 0 {
+		return fmt.Errorf("redis: cluster addresses required")
+	}
+	if c.Mode == ModeSentinel && (len(c.SentinelAddrs) == 0 || c.MasterName == "") {
+		return fmt.Errorf("redis: sentinel addresses and master required")
+	}
+	if c.DB < 0 || c.MaxRetries < -1 {
+		return fmt.Errorf("redis: invalid database or retry count")
+	}
+	if c.PoolSize < 0 || c.MinIdleConns < 0 || c.MaxIdleConns < 0 || c.MaxConnRetries < 0 || c.DialTimeout < 0 || c.ConnMaxIdleTime < 0 || c.ConnMaxLifetime < 0 || c.MinRetryBackoff < 0 || c.MaxRetryBackoff < 0 {
+		return fmt.Errorf("redis: negative resource setting")
+	}
+	if c.PoolSize > 0 && (c.MinIdleConns > c.PoolSize || c.MaxIdleConns > c.PoolSize) {
+		return fmt.Errorf("redis: idle connections exceed pool size")
+	}
+	if c.MaxRetryBackoff > 0 && c.MinRetryBackoff > c.MaxRetryBackoff {
+		return fmt.Errorf("redis: retry backoff range invalid")
+	}
+	return nil
 }

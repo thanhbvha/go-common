@@ -5,26 +5,18 @@ package kafka
 import (
 	"context"
 	"errors"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	bus "github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestProvisioningBypassesCachedMissingLayoutTopic(t *testing.T) {
-	if os.Getenv("WS_KAFKA_INTEGRATION") != "1" {
-		t.Skip("set WS_KAFKA_INTEGRATION=1 and WS_KAFKA_BROKERS")
-	}
-	brokers := strings.Split(os.Getenv("WS_KAFKA_BROKERS"), ",")
-	if brokers[0] == "" {
-		t.Fatal("WS_KAFKA_BROKERS is required")
-	}
+	brokers := kafkaIntegrationBrokers(t)
 	// Keep a negative lookup fresh for the entire test unless provisioning bypasses it.
 	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.MetadataMinAge(30*time.Minute), kgo.MetadataMaxAge(time.Hour))
 	if err != nil {

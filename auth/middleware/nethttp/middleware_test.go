@@ -10,9 +10,9 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 type genericHTTPClaims struct {
@@ -26,7 +26,7 @@ const (
 )
 
 func TestMiddleware(t *testing.T) {
-	manager, err := auth.NewManager(testJWTSecret)
+	manager, err := auth.NewManagerWithOptions(auth.ManagerOptions{SecretKey: testJWTSecret})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestMiddlewareWithNilManagerFailsClosed(t *testing.T) {
 }
 
 func TestEncryptedMiddlewareUsesAAD(t *testing.T) {
-	manager, err := auth.NewEncryptedManager(testJWTSecret, testAESKey)
+	manager, err := auth.NewEncryptedManagerWithOptions(auth.EncryptedManagerOptions{SecretKey: testJWTSecret, AESKey: testAESKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +164,7 @@ func TestGenericMiddlewareValidatesAndStoresClaims(t *testing.T) {
 	manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*genericHTTPClaims]{
 		SecretKey:   testJWTSecret,
 		Redis:       client,
+		Namespace:   "http-auth-test",
 		MaxLifetime: time.Hour,
 		TokenID:     func(claims *genericHTTPClaims) (string, error) { return claims.ID, nil },
 	})

@@ -13,14 +13,14 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	gonats "github.com/nats-io/nats.go"
-	bus "github.com/thanhbvha/go-common/eventbus"
-	kafkabus "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
-	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
-	"github.com/thanhbvha/go-common/websocket/routing"
-	natsrouting "github.com/thanhbvha/go-common/websocket/routing/nats"
-	redisrouting "github.com/thanhbvha/go-common/websocket/routing/redis"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	kafkabus "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
+	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
+	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
+	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -42,6 +42,9 @@ func (t *loseEnqueueResult) Deliver(ctx context.Context, node string, c routing.
 }
 func TestKafkaMixedDelivery(t *testing.T) {
 	if os.Getenv("WS_KAFKA_INTEGRATION") != "1" {
+		if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+			t.Fatal("WS_KAFKA_INTEGRATION=1 is required")
+		}
 		t.Skip("set WS_KAFKA_INTEGRATION=1 and WS_KAFKA_BROKERS for Kafka integration")
 	}
 	brokers := strings.Split(os.Getenv("WS_KAFKA_BROKERS"), ",")

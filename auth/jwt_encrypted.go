@@ -10,7 +10,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/thanhbvha/go-common/utils/crypt"
+	"github.com/thanhbvha/go-common/v2/utils/crypt"
 )
 
 var (
@@ -28,34 +28,30 @@ type EncryptedClaims struct {
 // EncryptedManager provides JWT generation and validation with AES-256 GCM encrypted payloads.
 // This ensures that sensitive user information cannot be read even if the token is intercepted.
 type EncryptedManager struct {
-	signingKeys       KeyProvider
-	encryptionKeys    KeyProvider
-	revocation        RevocationChecker
-	issuer            string
-	audience          []string
-	leeway            time.Duration
-	maxLifetime       time.Duration
-	clock             Clock
-	maxTokenSize      int
-	maxPayloadSize    int
-	aadPolicy         AADPolicy
-	parser            *jwt.Parser
-	aead              aeadCache
-	allowLegacyClaims bool
-}
-
-// NewEncryptedManager creates a new manager for encrypted JWTs.
-// jwtSecret must be at least 32 characters. aesKey must be exactly 32 bytes (256-bit) for AES-256 GCM.
-//
-// Deprecated: use NewEncryptedManagerWithOptions to configure claim policy,
-// key rotation, revocation, size limits, and AAD requirements.
-func NewEncryptedManager(jwtSecret string, aesKey string) (*EncryptedManager, error) {
-	return NewEncryptedManagerWithOptions(EncryptedManagerOptions{SecretKey: jwtSecret, AESKey: aesKey, AllowLegacyClaims: true})
+	signingKeys    KeyProvider
+	encryptionKeys KeyProvider
+	revocation     RevocationChecker
+	issuer         string
+	audience       []string
+	leeway         time.Duration
+	maxLifetime    time.Duration
+	clock          Clock
+	maxTokenSize   int
+	maxPayloadSize int
+	aadPolicy      AADPolicy
+	parser         *jwt.Parser
+	aead           aeadCache
 }
 
 // NewEncryptedManagerWithOptions creates an encrypted JWT manager with
 // claim-validation policy.
 func NewEncryptedManagerWithOptions(opts EncryptedManagerOptions) (*EncryptedManager, error) {
+	if (opts.SigningKeys != nil && isNilValue(opts.SigningKeys)) || (opts.EncryptionKeys != nil && isNilValue(opts.EncryptionKeys)) {
+		return nil, ErrInvalidKey
+	}
+	if opts.Revocation != nil && isNilValue(opts.Revocation) {
+		return nil, ErrInvalidManager
+	}
 	if opts.MaxTokenSize < 0 || opts.MaxPayloadSize < 0 {
 		return nil, ErrInvalidDuration
 	}
@@ -87,19 +83,18 @@ func NewEncryptedManagerWithOptions(opts EncryptedManagerOptions) (*EncryptedMan
 	}
 
 	return &EncryptedManager{
-		signingKeys:       signingProvider,
-		encryptionKeys:    encryptionProvider,
-		revocation:        opts.Revocation,
-		issuer:            issuer,
-		audience:          audience,
-		leeway:            leeway,
-		maxLifetime:       maxLifetime,
-		clock:             clock,
-		maxTokenSize:      normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
-		maxPayloadSize:    normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
-		aadPolicy:         opts.AADPolicy,
-		parser:            jwt.NewParser(parserOptions(issuer, audience, leeway, clock)...),
-		allowLegacyClaims: opts.AllowLegacyClaims,
+		signingKeys:    signingProvider,
+		encryptionKeys: encryptionProvider,
+		revocation:     opts.Revocation,
+		issuer:         issuer,
+		audience:       audience,
+		leeway:         leeway,
+		maxLifetime:    maxLifetime,
+		clock:          clock,
+		maxTokenSize:   normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
+		maxPayloadSize: normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
+		aadPolicy:      opts.AADPolicy,
+		parser:         jwt.NewParser(parserOptions(issuer, audience, leeway, clock)...),
 	}, nil
 }
 
@@ -110,10 +105,14 @@ func (m *EncryptedManager) GenerateToken(user UserInfo, duration time.Duration, 
 
 // GenerateTokenContext encrypts and signs a token with the active versioned keys.
 func (m *EncryptedManager) GenerateTokenContext(ctx context.Context, user UserInfo, duration time.Duration, aad []byte) (string, error) {
+	return m.generatePayload(ctx, user.ID, user, duration, aad)
+}
+
+func (m *EncryptedManager) generatePayload(ctx context.Context, subject string, payload any, duration time.Duration, aad []byte) (string, error) {
 	if m == nil {
 		return "", ErrInvalidManager
 	}
-	if strings.TrimSpace(user.ID) == "" {
+	if strings.TrimSpace(subject) == "" {
 		return "", ErrInvalidIdentity
 	}
 	if err := validateLifetime(duration, m.maxLifetime); err != nil {
@@ -135,7 +134,7 @@ func (m *EncryptedManager) GenerateTokenContext(ctx context.Context, user UserIn
 		return "", err
 	}
 	// 1. Serialize UserInfo to JSON
-	userBytes, err := json.Marshal(user)
+	userBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal user info: %w", err)
 	}
@@ -163,7 +162,7 @@ func (m *EncryptedManager) GenerateTokenContext(ctx context.Context, user UserIn
 			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    m.issuer,
 			Audience:  jwt.ClaimStrings(m.audience),
-			Subject:   user.ID,
+			Subject:   subject,
 			ID:        tokenID,
 		},
 	}
@@ -205,17 +204,35 @@ func (m *EncryptedManager) ValidateTokenContext(ctx context.Context, tokenString
 // ValidateTokenDetailsContext returns user data and registered claims for
 // authorization, auditing, and revocation-aware middleware.
 func (m *EncryptedManager) ValidateTokenDetailsContext(ctx context.Context, tokenString string, aad []byte) (*TokenDetails, error) {
+	plaintext, claims, err := m.validatePayload(ctx, tokenString, aad)
+	if err != nil {
+		return nil, err
+	}
+	var user UserInfo
+	if err := json.Unmarshal(plaintext, &user); err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON structure", ErrDecryptionFailed)
+	}
+	if err := validateUserClaims(user, claims.RegisteredClaims, m.maxLifetime); err != nil {
+		return nil, err
+	}
+	if err := checkRevocation(ctx, m.revocation, claims.ID); err != nil {
+		return nil, err
+	}
+	return &TokenDetails{UserInfo: user, RegisteredClaims: claims.RegisteredClaims, Encrypted: true, EncryptionKeyID: claims.EncryptionKeyID, FormatVersion: claims.Version}, nil
+}
+
+func (m *EncryptedManager) validatePayload(ctx context.Context, tokenString string, aad []byte) ([]byte, *EncryptedClaims, error) {
 	if m == nil {
-		return nil, ErrInvalidManager
+		return nil, nil, ErrInvalidManager
 	}
 	if len(tokenString) == 0 {
-		return nil, ErrInvalidToken
+		return nil, nil, ErrInvalidToken
 	}
 	if len(tokenString) > m.maxTokenSize {
-		return nil, ErrTokenTooLarge
+		return nil, nil, ErrTokenTooLarge
 	}
 	if err := validateAAD(ctx, m.aadPolicy, aad); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// 1. Parse and validate the JWT signature
 	token, err := m.parser.ParseWithClaims(tokenString, &EncryptedClaims{}, func(t *jwt.Token) (interface{}, error) {
@@ -228,55 +245,37 @@ func (m *EncryptedManager) ValidateTokenDetailsContext(ctx context.Context, toke
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return nil, ErrExpiredToken
+			return nil, nil, ErrExpiredToken
 		}
-		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 
 	claims, ok := token.Claims.(*EncryptedClaims)
 	if !ok || !token.Valid {
-		return nil, ErrInvalidToken
+		return nil, nil, ErrInvalidToken
 	}
-	if claims.Version != 0 && claims.Version != 1 {
-		return nil, ErrInvalidToken
+	if claims.Version != 1 {
+		return nil, nil, ErrInvalidToken
 	}
 
 	// 2. Decode the Base64 payload
 	ciphertext, err := base64.StdEncoding.DecodeString(claims.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid base64 encoding", ErrDecryptionFailed)
+		return nil, nil, fmt.Errorf("%w: invalid base64 encoding", ErrDecryptionFailed)
 	}
 
 	// 3. Decrypt the payload using AES-256 GCM
 	encryptionKey, err := resolveKey(ctx, m.encryptionKeys, claims.EncryptionKeyID, true)
 	if err != nil {
-		return nil, fmt.Errorf("%w: encryption key unavailable", ErrDecryptionFailed)
+		return nil, nil, fmt.Errorf("%w: encryption key unavailable", ErrDecryptionFailed)
 	}
 	plaintext, err := m.aead.decrypt(claims.EncryptionKeyID, encryptionKey, ciphertext, aad)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 	if len(plaintext) > m.maxPayloadSize {
-		return nil, ErrPayloadTooLarge
+		return nil, nil, ErrPayloadTooLarge
 	}
 
-	// 4. Deserialize JSON back to UserInfo
-	var user UserInfo
-	if err := json.Unmarshal(plaintext, &user); err != nil {
-		return nil, fmt.Errorf("%w: invalid json structure", ErrDecryptionFailed)
-	}
-	if err := validateUserClaims(user, claims.RegisteredClaims, m.maxLifetime, m.allowLegacyClaims); err != nil {
-		return nil, err
-	}
-	if err := checkRevocation(ctx, m.revocation, claims.ID); err != nil {
-		return nil, err
-	}
-
-	return &TokenDetails{
-		UserInfo:         user,
-		RegisteredClaims: claims.RegisteredClaims,
-		Encrypted:        true,
-		EncryptionKeyID:  claims.EncryptionKeyID,
-		FormatVersion:    claims.Version,
-	}, nil
+	return plaintext, claims, nil
 }

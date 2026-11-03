@@ -412,3 +412,7 @@ This module had no published consumer contract; obsolete APIs were removed:
 
 There is no silent compatibility shim. Update imports/call sites against the new
 contracts before introducing this module to services.
+
+For database writes that must eventually publish an event, see the
+[outbox and inbox recipe](../OUTBOX.md). A broker publication does not join an ORM
+transaction. Use stable business keys to reconcile unknown commit outcomes.

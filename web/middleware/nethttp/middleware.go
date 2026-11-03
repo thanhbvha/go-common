@@ -7,11 +7,11 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/internal/httpkit"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/telemetry"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/telemetry"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/middleware/internal/recoveryhttp"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -41,12 +41,10 @@ func Telemetry(operationName string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			parentCtx := telemetry.ExtractHTTPHeaders(r.Context(), r.Header)
-			ctx, span := telemetry.StartServerSpan(parentCtx, operationName+" "+r.URL.Path)
+			ctx, span := telemetry.StartServerSpan(parentCtx, operationName)
 
 			attrs := []attribute.KeyValue{
 				attribute.String("http.method", r.Method),
-				attribute.String("http.url", r.URL.String()),
-				attribute.String("http.client_ip", httpkit.ClientIP(r)),
 			}
 			if requestID, ok := ctxkey.GetRequestID(ctx); ok {
 				attrs = append(attrs, attribute.String("http.request_id", requestID))
@@ -62,7 +60,12 @@ func Telemetry(operationName string) func(http.Handler) http.Handler {
 				}
 				span.End()
 			}()
-			next.ServeHTTP(writer, r.WithContext(ctx))
+			request := r.WithContext(ctx)
+			next.ServeHTTP(writer, request)
+			if request.Pattern != "" {
+				span.SetName(operationName + " " + request.Pattern)
+				span.SetAttributes(attribute.String("http.route", request.Pattern))
+			}
 			completed = true
 			statusCode := writer.StatusCode()
 			telemetry.SetAttributes(span, attribute.Int("http.status_code", statusCode))

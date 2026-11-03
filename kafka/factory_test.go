@@ -183,7 +183,6 @@ func TestClientSnapshotsInputBeforeBuildingOptions(t *testing.T) {
 
 func TestFactoryManualCommitConsumerStillConstructs(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ConsumerCommitInterval = 0
 	factory, err := NewNativeClientFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -197,11 +196,8 @@ func TestFactoryManualCommitConsumerStillConstructs(t *testing.T) {
 	assertKafkaOpt(t, client, kgo.AutoCommitMarks, false)
 }
 
-func TestFactoryExplicitManualConsumerOverridesAutoCommitConfig(t *testing.T) {
+func TestFactoryExplicitManualConsumerUsesSynchronousCommits(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.ConsumerCommitInterval <= 0 {
-		t.Fatal("test requires automatic commits in the input config")
-	}
 	factory, err := NewNativeClientFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -218,9 +214,6 @@ func TestFactoryExplicitManualConsumerOverridesAutoCommitConfig(t *testing.T) {
 
 func TestFactoryDirectReaderOmitsConsumerGroupCommitOptions(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.ConsumerCommitInterval <= 0 {
-		t.Fatal("test requires automatic commits in the input config")
-	}
 	factory, err := NewNativeClientFactory(cfg)
 	if err != nil {
 		t.Fatal(err)

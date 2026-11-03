@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/thanhbvha/go-common/config"
+	"github.com/thanhbvha/go-common/v2/config"
 )
 
 type DatabaseConfig struct {

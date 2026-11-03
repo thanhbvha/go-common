@@ -15,6 +15,8 @@ func TestMemoryCache_GetSetDelete(t *testing.T) {
 		t.Fatalf("failed to init cache: %v", err)
 	}
 
+	defer cache.Close()
+
 	// Wait for cache to initialize internally (Ristretto initializes asynchronously)
 	time.Sleep(10 * time.Millisecond)
 
@@ -54,6 +56,7 @@ func TestMemoryCache_GetSetDelete(t *testing.T) {
 func TestMemoryCache_TTL(t *testing.T) {
 	ctx := context.Background()
 	cache, _ := NewMemoryCache(10 * 1024 * 1024)
+	defer cache.Close()
 	time.Sleep(10 * time.Millisecond)
 
 	// Set with 100ms TTL

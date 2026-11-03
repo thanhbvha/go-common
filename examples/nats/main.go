@@ -8,8 +8,9 @@ import (
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/nats"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/nats"
 )
 
 func main() {
@@ -156,7 +157,7 @@ func RunJetStreamExample(client *nats.Client) {
 		Amount int    `json:"amount"`
 	}
 	for i := 1; i <= 5; i++ {
-		ack, err := client.JSPublishJSON(subject, Order{
+		ack, err := client.JSPublishJSON(ctx, subject, Order{
 			ID:     fmt.Sprintf("ORD-%03d", i),
 			Amount: i * 100,
 		})
@@ -168,7 +169,7 @@ func RunJetStreamExample(client *nats.Client) {
 	}
 
 	// ── 4. Pull subscribe  (≈ XREADGROUP with pull / BLOCK) ────────────
-	ps, err := client.PullSubscribe(subject, durable)
+	ps, err := client.PullSubscribe(ctx, subject, durable)
 	if err != nil {
 		l.Error("PullSubscribe failed", "err", err)
 		os.Exit(1)
@@ -176,7 +177,7 @@ func RunJetStreamExample(client *nats.Client) {
 	defer ps.Unsubscribe()
 
 	l.Info("\n📥 Fetching messages", "batch", 3)
-	msgs, err := client.Fetch(ps, 3, nats.WithFetchTimeout(5*time.Second))
+	msgs, err := client.Fetch(ctx, ps, 3, nats.WithFetchTimeout(5*time.Second))
 	if err != nil {
 		l.Error("Fetch failed", "err", err)
 		os.Exit(1)
@@ -216,7 +217,7 @@ func RunJetStreamExample(client *nats.Client) {
 
 	// ── 6. Remaining messages ───────────────────────────────────────────
 	l.Info("\n📥 Fetching remaining (no-wait)")
-	remaining, _ := client.FetchNoWait(ps, 10)
+	remaining, _ := client.FetchNoWait(ctx, ps, 10)
 	for _, msg := range remaining {
 		var ord Order
 		_ = msg.DecodeJSON(&ord)
@@ -259,19 +260,19 @@ func RunConsumerGroupExample(client *nats.Client) {
 		}
 	}
 
-	sub1, err := client.JSQueueSubscribe("notify.>", "notify-group", "notify-durable",
+	sub1, err := client.JSQueueSubscribe(ctx, "notify.>", "notify-group", "notify-durable",
 		makeWorker(1), nats.WithManualAck())
 	if err != nil {
 		l.Error("JSQueueSubscribe worker 1 failed", "err", err)
 		os.Exit(1)
 	}
-	sub2, err := client.JSQueueSubscribe("notify.>", "notify-group", "notify-durable",
+	sub2, err := client.JSQueueSubscribe(ctx, "notify.>", "notify-group", "notify-durable",
 		makeWorker(2), nats.WithManualAck())
 	if err != nil {
 		l.Error("JSQueueSubscribe worker 2 failed", "err", err)
 		os.Exit(1)
 	}
-	sub3, err := client.JSQueueSubscribe("notify.>", "notify-group", "notify-durable",
+	sub3, err := client.JSQueueSubscribe(ctx, "notify.>", "notify-group", "notify-durable",
 		makeWorker(3), nats.WithManualAck())
 	if err != nil {
 		l.Error("JSQueueSubscribe worker 3 failed", "err", err)
@@ -393,9 +394,9 @@ func RunKVStoreExample(client *nats.Client) {
 			break
 		}
 		switch update.Operation() {
-		case gonats.KeyValuePut:
+		case jetstream.KeyValuePut:
 			l.Info("  CHANGED dark-mode", "value", string(update.Value()), "rev", update.Revision())
-		case gonats.KeyValueDelete:
+		case jetstream.KeyValueDelete:
 			l.Info("  DELETED dark-mode", "rev", update.Revision())
 		}
 	}
@@ -434,7 +435,7 @@ func RunJSONHelpersExample(client *nats.Client) {
 	// ── 1. JSPublishJSON + DecodeJSON (JetStream) ───────────────────────
 	_ = client.AddStream(ctx, "EVENTS", []string{"events.>"})
 
-	ack, err := client.JSPublishJSON("events.user", UserEvent{
+	ack, err := client.JSPublishJSON(ctx, "events.user", UserEvent{
 		UserID: "u-001",
 		Action: "login",
 		At:     time.Now(),
@@ -446,10 +447,10 @@ func RunJSONHelpersExample(client *nats.Client) {
 	l.Info("📨 JSPublishJSON", "stream", ack.Stream, "seq", ack.Sequence)
 
 	_ = client.AddConsumer(ctx, "EVENTS", "event-reader")
-	ps, _ := client.PullSubscribe("events.>", "event-reader")
+	ps, _ := client.PullSubscribe(ctx, "events.>", "event-reader")
 	defer ps.Unsubscribe()
 
-	msgs, _ := client.Fetch(ps, 1)
+	msgs, _ := client.Fetch(ctx, ps, 1)
 	if len(msgs) > 0 {
 		var evt UserEvent
 		if err := msgs[0].DecodeJSON(&evt); err != nil {
@@ -476,7 +477,7 @@ func RunJSONHelpersExample(client *nats.Client) {
 	// ── 3. KVPutJSON + KVGetJSON ────────────────────────────────────────
 	_ = client.KVCreate(ctx, "app-config", nats.WithKVHistory(3))
 
-	rev, err := client.KVPutJSON("app-config", "ui", AppConfig{
+	rev, err := client.KVPutJSON(ctx, "app-config", "ui", AppConfig{
 		Theme:    "dark",
 		Language: "en",
 		Debug:    false,
@@ -488,7 +489,7 @@ func RunJSONHelpersExample(client *nats.Client) {
 	l.Info("🗄️  KVPutJSON", "rev", rev)
 
 	var appCfg AppConfig
-	if err := client.KVGetJSON("app-config", "ui", &appCfg); err != nil {
+	if err := client.KVGetJSON(ctx, "app-config", "ui", &appCfg); err != nil {
 		l.Error("KVGetJSON failed", "err", err)
 		os.Exit(1)
 	}

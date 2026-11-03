@@ -6,7 +6,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 var heartbeatScript = goredis.NewScript(`

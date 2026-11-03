@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/logger"
 )
 
 const (

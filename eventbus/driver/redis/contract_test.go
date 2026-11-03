@@ -9,9 +9,9 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
-	buscontract "github.com/thanhbvha/go-common/eventbus/contracttest"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	transportcontract "github.com/thanhbvha/go-common/eventbus/transport/contracttest"
+	buscontract "github.com/thanhbvha/go-common/v2/eventbus/contracttest"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	transportcontract "github.com/thanhbvha/go-common/v2/eventbus/transport/contracttest"
 )
 
 func TestRedisTransportContract(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 // DS-21/22: an unsettled delivery expires at AckWait and returns with broker

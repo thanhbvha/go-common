@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/utils/graceful"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
 )
 
 func TestShutdownExecutesHooksOnceInLIFOOrder(t *testing.T) {

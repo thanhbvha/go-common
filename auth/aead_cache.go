@@ -8,7 +8,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/thanhbvha/go-common/utils/crypt"
+	"github.com/thanhbvha/go-common/v2/utils/crypt"
 )
 
 type cachedAEADKey struct {

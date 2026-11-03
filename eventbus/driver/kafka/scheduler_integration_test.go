@@ -8,20 +8,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestKafkaDelaySchedulerRejectsRelatedPartitionMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	producer, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
+	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer producer.Close()
 	if err := producer.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	backend := newTestTransport(producer, nil).(*kafkaTransport)
 	topo := transport.Topology{Namespace: "p56", JobType: fmt.Sprintf("partition-mismatch-%d", time.Now().UnixNano())}
@@ -49,13 +49,13 @@ func TestKafkaDelaySchedulerRejectsRelatedPartitionMismatch(t *testing.T) {
 func TestKafkaDelaySchedulerBoundedBurstAndOrderingKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	producer, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
+	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer producer.Close()
 	if err := producer.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	backend := newTestTransport(producer, nil).(*kafkaTransport)
 	topo := transport.Topology{

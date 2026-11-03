@@ -13,7 +13,10 @@ func TestRedisLockSessionOwnership(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr(), ContextTimeoutEnabled: true})
 	defer client.Close()
-	factory := NewRedisLock(client)
+	factory, err := NewRedisLock(client)
+	if err != nil {
+		t.Fatal(err)
+	}
 	first, err := factory.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +48,10 @@ func TestRedisLockSessionOwnership(t *testing.T) {
 }
 
 func TestRedisLockSessionValidation(t *testing.T) {
-	for _, lock := range []*RedisLock{nil, {}, NewRedisLock(nil)} {
+	if _, err := NewRedisLock(nil); err == nil {
+		t.Fatal("accepted nil constructor client")
+	}
+	for _, lock := range []*RedisLock{nil, {}} {
 		if _, err := lock.NewSession(); err == nil {
 			t.Fatal("accepted nil lock/client")
 		}

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // ============================================================
@@ -205,42 +206,42 @@ func WithFetchTimeout(d time.Duration) FetchOption {
 // ============================================================
 
 // KVOption is a functional option for KV bucket creation.
-type KVOption func(*gonats.KeyValueConfig)
+type KVOption func(*jetstream.KeyValueConfig)
 
 // WithKVStorage overrides the storage backend for the KV bucket.
 func WithKVStorage(s StorageType) KVOption {
-	return func(cfg *gonats.KeyValueConfig) {
+	return func(cfg *jetstream.KeyValueConfig) {
 		if s == FileStorage {
-			cfg.Storage = gonats.FileStorage
+			cfg.Storage = jetstream.FileStorage
 		} else {
-			cfg.Storage = gonats.MemoryStorage
+			cfg.Storage = jetstream.MemoryStorage
 		}
 	}
 }
 
 // WithKVMaxValueSize sets the maximum size in bytes for a single KV value.
 func WithKVMaxValueSize(n int32) KVOption {
-	return func(cfg *gonats.KeyValueConfig) { cfg.MaxValueSize = n }
+	return func(cfg *jetstream.KeyValueConfig) { cfg.MaxValueSize = n }
 }
 
 // WithKVHistory sets the number of historical revisions to keep per key.
 // Must be between 1 and 64. Default: 1 (only current value).
 func WithKVHistory(n uint8) KVOption {
-	return func(cfg *gonats.KeyValueConfig) { cfg.History = n }
+	return func(cfg *jetstream.KeyValueConfig) { cfg.History = n }
 }
 
 // WithKVTTL sets the maximum age of entries in the KV bucket.
 // Entries older than this TTL are removed automatically.
 func WithKVTTL(d time.Duration) KVOption {
-	return func(cfg *gonats.KeyValueConfig) { cfg.TTL = d }
+	return func(cfg *jetstream.KeyValueConfig) { cfg.TTL = d }
 }
 
 // WithKVReplicas sets the replication factor for the KV bucket.
 func WithKVReplicas(n int) KVOption {
-	return func(cfg *gonats.KeyValueConfig) { cfg.Replicas = n }
+	return func(cfg *jetstream.KeyValueConfig) { cfg.Replicas = n }
 }
 
 // WithKVDescription adds a human-readable description to the KV bucket.
 func WithKVDescription(s string) KVOption {
-	return func(cfg *gonats.KeyValueConfig) { cfg.Description = s }
+	return func(cfg *jetstream.KeyValueConfig) { cfg.Description = s }
 }

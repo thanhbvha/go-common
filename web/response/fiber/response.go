@@ -3,8 +3,8 @@ package fiberresp
 
 import (
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 // getRequestID safely extracts the request ID from Fiber's context
@@ -25,7 +25,8 @@ func Success(c *fiber.Ctx, data interface{}) error {
 
 // Error returns a standard error response
 func Error(c *fiber.Ctx, statusCode int, message string) error {
-	return c.Status(statusCode).JSON(response.NewError(statusCode, message, getRequestID(c)))
+	payload := response.NewError(statusCode, message, getRequestID(c))
+	return c.Status(payload.Code).JSON(payload)
 }
 
 // ValidationError returns a standard validation error response

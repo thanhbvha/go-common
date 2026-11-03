@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/v2/redis"
 )
 
 func main() {

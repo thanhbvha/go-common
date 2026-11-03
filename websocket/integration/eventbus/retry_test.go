@@ -2,10 +2,10 @@ package eventbus_test
 
 import (
 	"context"
-	bus "github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/driver/memory"
-	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
+	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 	"sync/atomic"
 	"testing"
 	"time"

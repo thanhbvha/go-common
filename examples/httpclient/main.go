@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/sony/gobreaker/v2"
-	"github.com/thanhbvha/go-common/httpclient"
+	"github.com/thanhbvha/go-common/v2/httpclient"
 )
 
 func main() {
@@ -51,7 +51,12 @@ func RunRetryExample() {
 	cfg.Retry.MaxRetries = 5
 	cfg.Retry.WaitTime = 500 * time.Millisecond
 
-	client := httpclient.NewClient(cfg)
+	client, err := httpclient.NewClient(cfg)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer client.CloseIdleConnections()
 
 	fmt.Println("Sending Request (Watch the automatic retries)...")
 
@@ -102,18 +107,25 @@ func RunCircuitBreakerExample() {
 		fmt.Printf("\n🚨 [CIRCUIT BREAKER] State changed from %s to %s 🚨\n\n", from.String(), to.String())
 	}
 
-	client := httpclient.NewClient(cfg)
+	client, err := httpclient.NewClient(cfg)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer client.CloseIdleConnections()
 
 	// Fire 6 requests in a loop
 	for i := 1; i <= 6; i++ {
 		fmt.Printf("Sending Request %d...\n", i)
-		_, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
+		resp, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
 			return req.Get("/api/v1/data")
 		})
 
 		if err != nil {
 			// Once the breaker trips (Open), it returns an error IMMEDIATELY without hitting the Mock Server!
 			fmt.Printf("❌ Request %d failed: %v\n", i, err)
+		} else if resp.StatusCode() >= 500 {
+			fmt.Printf("Request %d received HTTP %d\n", i, resp.StatusCode())
 		} else {
 			fmt.Printf("✅ Request %d succeeded\n", i)
 		}

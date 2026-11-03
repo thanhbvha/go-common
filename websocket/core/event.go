@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 // IncomingMessage represents the envelope for incoming payloads from a client.

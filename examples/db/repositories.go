@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/thanhbvha/go-common/db/orm"
+	"github.com/thanhbvha/go-common/v2/db/orm"
 	"gorm.io/gorm"
 )
 

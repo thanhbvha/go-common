@@ -1,11 +1,13 @@
 # web
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 Core utilities for building REST APIs. Includes standardized responses for standard `net/http`, Fiber, Gin, and Echo, friendly validation, and framework middleware.
 
 Standard `net/http` handlers can write the same response envelope without importing a web framework:
 
 ```go
-import httpresp "github.com/thanhbvha/go-common/web/response/nethttp"
+import httpresp "github.com/thanhbvha/go-common/v2/web/response/nethttp"
 
 func getUser(w http.ResponseWriter, r *http.Request) {
     user := User{ID: 1}
@@ -19,8 +21,8 @@ Standard-library middleware composes around an `http.Handler`:
 
 ```go
 import (
-    nethttplog "github.com/thanhbvha/go-common/logger/middleware/nethttp"
-    nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
+    nethttplog "github.com/thanhbvha/go-common/v2/logger/middleware/nethttp"
+    nethttpmw "github.com/thanhbvha/go-common/v2/web/middleware/nethttp"
 )
 
 mux := http.NewServeMux()
@@ -41,11 +43,11 @@ The framework-specific adapters retain their existing APIs. For example, with Fi
 
 ```go
 import (
-    "github.com/thanhbvha/go-common/logger"
-    fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
-    fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
-    fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
-    "github.com/thanhbvha/go-common/web/validator"
+    "github.com/thanhbvha/go-common/v2/logger"
+    fiberlog "github.com/thanhbvha/go-common/v2/logger/middleware/fiber"
+    fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
+    fiberresp "github.com/thanhbvha/go-common/v2/web/response/fiber"
+    "github.com/thanhbvha/go-common/v2/web/validator"
 )
 
 app := fiber.New(fiber.Config{
@@ -64,7 +66,9 @@ app.Post("/users", func(c *fiber.Ctx) error {
     c.BodyParser(&req)
 
     // Validate with friendly Vietnamese errors
-    if errs := validator.Struct(&req); errs != nil {
+    if errs, err := validator.Validate(&req); err != nil {
+        return err
+    } else if errs != nil {
         return fiberresp.ValidationError(c, errs)
     }
 
@@ -76,7 +80,7 @@ app.Post("/users", func(c *fiber.Ctx) error {
 
 The standard `net/http`, Fiber, Gin, and Echo `Recover` middleware adapters use the shared
 framework-independent `recovery` package. A recovered panic is logged with its
-bounded message, type, origin file/line/function, and structured stack. Clients
+type, origin file/line/function, and structured stack; panic messages are omitted. Clients
 receive only a generic `INTERNAL_ERROR` response and the current request ID.
 
 Recovery applies only to the request goroutine. Application-created goroutines
@@ -99,3 +103,20 @@ the equivalent request order for Fiber, Gin, and Echo:
 The logger remains outside recovery so it observes the recovered HTTP 500. A
 user-keyed limiter must run after authentication. Forwarded client IP headers
 must only be used after the application configures a trusted-proxy boundary.
+
+## v2 contracts
+
+`response.FromError` exposes only the explicit `xerrors.CustomError.Message` for
+4xx errors. Wrapped causes, unknown errors, every 5xx and invalid HTTP statuses
+are masked. Error response adapters normalize invalid error statuses to 500.
+
+HTTP telemetry uses route templates where available and a fixed operation name
+otherwise. It does not export URL paths, query strings, client IPs or raw errors.
+For net/http templates, use Go ServeMux request patterns; unmatched routes keep
+the fixed name. Applications control additional telemetry attributes explicitly.
+
+Validation uses `validator.Validate(value)` or an immutable instance from
+`validator.New(rules)`. Both return `(violations, error)`: nil/scalar inputs and
+invalid schema tags return an error instead of panic. Rules are supplied during
+construction and must be concurrency-safe. Field names use JSON tags. Mutable
+global `CustomRule` and the unchecked `Struct` API were removed.

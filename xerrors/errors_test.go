@@ -4,7 +4,7 @@ import (
 	goErrors "errors"
 	"testing"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 func TestNewError(t *testing.T) {

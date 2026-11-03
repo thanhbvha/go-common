@@ -1,9 +1,31 @@
 package logger
 
-import "log/slog"
+import (
+	"io"
+	"log/slog"
+)
+
+// OverflowPolicy applies when the async queue is full.
+type OverflowPolicy uint8
+
+const (
+	// OverflowSync preserves records by writing on the caller.
+	OverflowSync OverflowPolicy = iota
+	// OverflowDrop reports ErrDropped through OnError.
+	OverflowDrop
+)
 
 // Options configures the behavior of a Logger instance.
 type Options struct {
+	// Writer is a borrowed output. The runtime never closes it.
+	Writer io.Writer
+	// Async enables a bounded queue. The default is synchronous.
+	Async bool
+	// Overflow defaults to OverflowSync.
+	Overflow OverflowPolicy
+	// OnError observes writer errors and rejected records; it must not block.
+	OnError func(error)
+
 	// Level sets the minimum log level. Records below this level are discarded.
 	// Default: slog.LevelInfo.
 	Level slog.Level
@@ -23,11 +45,11 @@ type Options struct {
 
 	// BufferSize is the capacity of the async dispatch channel.
 	// A larger buffer reduces back-pressure under burst load.
-	// Default: 100_000.
+	// Default: 1024 when Async is enabled.
 	BufferSize int
 
 	// NumWorkers is the number of goroutines draining the async channel.
-	// Default: runtime.NumCPU() * 2 (minimum 1).
+	// Default: 1 when Async is enabled.
 	NumWorkers int
 }
 
@@ -50,7 +72,7 @@ type FileOptions struct {
 	MaxAgeDays int
 
 	// Compress determines whether rotated files are gzip-compressed.
-	// Default: true.
+	// Default: false.
 	Compress bool
 }
 
@@ -61,7 +83,7 @@ func DefaultOptions() Options {
 		Level:      slog.LevelInfo,
 		StdOut:     true,
 		File:       nil,
-		BufferSize: 100_000,
+		BufferSize: 1024,
 		NumWorkers: 0, // resolved at runtime
 	}
 }

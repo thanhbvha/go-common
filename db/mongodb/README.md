@@ -230,3 +230,8 @@ Stream tests cover filtering/order, callback failure, idle cancellation and driv
 resume after a resumable getMore error. Secure mode verifies TLS/CA
 and authentication, including negative connection attempts. Fixtures are local-only
 and do not establish production throughput, backups, restore or availability guarantees.
+
+See the [outbox and inbox recipe](../OUTBOX.md) for dispatch/replay boundaries.
+The transaction example atomically inserts an outbox record; it supplies no
+universal dispatcher. Do not publish external side effects inside retryable
+transaction callbacks.

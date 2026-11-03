@@ -1,32 +1,21 @@
 package httpclient
 
 import (
+	"context"
+	"errors"
 	"github.com/sony/gobreaker/v2"
 )
 
-// setupCircuitBreaker configures and returns a gobreaker instance.
-func setupCircuitBreaker(cfg CBConfig) *gobreaker.CircuitBreaker[[]byte] {
+func setupCircuitBreaker(cfg CBConfig) *gobreaker.TwoStepCircuitBreaker[any] {
 	if !cfg.Enabled {
 		return nil
 	}
-
-	st := gobreaker.Settings{
-		Name:        cfg.Name,
-		MaxRequests: cfg.MaxRequests,
-		Interval:    cfg.Interval,
-		Timeout:     cfg.Timeout,
+	return gobreaker.NewTwoStepCircuitBreaker[any](gobreaker.Settings{
+		Name: cfg.Name, MaxRequests: cfg.MaxRequests, Interval: cfg.Interval, Timeout: cfg.Timeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			// Do not trip if we haven't reached the minimum request threshold
-			if counts.Requests < cfg.ReadyToTripMinRequests {
-				return false
-			}
-
-			// Calculate failure ratio
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return failureRatio >= cfg.ReadyToTripFailRatio
+			return counts.Requests >= cfg.ReadyToTripMinRequests && counts.Requests > 0 && float64(counts.TotalFailures)/float64(counts.Requests) >= cfg.ReadyToTripFailRatio
 		},
+		IsExcluded:    func(err error) bool { return errors.Is(err, context.Canceled) },
 		OnStateChange: cfg.OnStateChange,
-	}
-
-	return gobreaker.NewCircuitBreaker[[]byte](st)
+	})
 }

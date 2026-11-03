@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm/backend"
-	mysqlbackend "github.com/thanhbvha/go-common/db/orm/backend/mysql"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
+	mysqlbackend "github.com/thanhbvha/go-common/v2/db/orm/backend/mysql"
 )
 
 func TestMySQLStartupHandshakeHonorsOverallDeadline(t *testing.T) {

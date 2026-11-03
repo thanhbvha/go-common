@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	kafkadriver "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
+	natsdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
+	redisdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
 )
 
 func TestMemoryRuntimeEndToEnd(t *testing.T) {

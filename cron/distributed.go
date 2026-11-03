@@ -5,17 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"github.com/thanhbvha/go-common/cache"
 )
 
 // ErrLeaseLost is the job context cause when lease ownership becomes uncertain.
 var ErrLeaseLost = errors.New("cron: execution lease lost")
+
+// Lease is one ownership session. Implementations must reject unsafe TTLs,
+// honor operation contexts, and prevent an expired owner changing a newer lease.
+// An acquired key cannot be reacquired using the same session.
+type Lease interface {
+	Acquire(context.Context, string, time.Duration) (bool, error)
+	Extend(context.Context, string, time.Duration) (bool, error)
+	Release(context.Context, string) error
+}
+
+// LeaseProvider creates independent ownership identities for each execution.
+// See cron/lease/redis for the optional Redis implementation.
+type LeaseProvider interface{ NewSession() (Lease, error) }
 
 // DistributedConfig describes a best-effort distributed job. Redis and all
 // replicas must use the same namespace, name, schedule and timezone.
@@ -39,7 +52,7 @@ type DistributedConfig struct {
 }
 
 // AddDistributedJob registers a renewable lease and retained slot marker job.
-func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.RedisLock) (cron.EntryID, error) {
+func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, leases LeaseProvider) (cron.EntryID, error) {
 	for _, field := range strings.Fields(cfg.Schedule) {
 		if field == "@every" {
 			return 0, errors.New("cron: distributed jobs require calendar schedules; @every is relative to each replica startup")
@@ -69,8 +82,13 @@ func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.Re
 	if cfg.Run == nil {
 		return 0, errors.New("cron: nil callback")
 	}
-	if _, err := redisLock.NewSession(); err != nil {
+	if nilLeaseDependency(leases) {
+		return 0, errors.New("cron: lease provider required")
+	}
+	if lease, err := leases.NewSession(); err != nil {
 		return 0, err
+	} else if nilLeaseDependency(lease) {
+		return 0, errors.New("cron: lease provider returned nil session")
 	}
 	prefix := url.QueryEscape(s.namespace)
 	name := url.QueryEscape(cfg.JobName)
@@ -95,7 +113,10 @@ func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.Re
 					r.Status = "lease_lost"
 				}
 			}()
-			lease, err := redisLock.NewSession()
+			lease, err := leases.NewSession()
+			if err == nil && nilLeaseDependency(lease) {
+				err = errors.New("cron: lease provider returned nil session")
+			}
 			if err != nil {
 				r.Err = err
 				return
@@ -151,7 +172,7 @@ func (s *Scheduler) AddDistributedJob(cfg DistributedConfig, redisLock *cache.Re
 	})
 }
 
-func acquire(ctx context.Context, lock *cache.RedisLock, key string, ttl, timeout time.Duration) (bool, error) {
+func acquire(ctx context.Context, lock Lease, key string, ttl, timeout time.Duration) (bool, error) {
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return lock.Acquire(opCtx, key, ttl)
@@ -211,4 +232,16 @@ func maintainLease(ctx context.Context, acquiredAt time.Time, ttl, timeout time.
 			expiry.Reset(max(time.Until(validUntil), 0))
 		}
 	}
+}
+
+func nilLeaseDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }

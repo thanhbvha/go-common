@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/v2/auth"
 )
 
 func TestGenericTokenValidatorChecksRevocation(t *testing.T) {
@@ -19,6 +19,7 @@ func TestGenericTokenValidatorChecksRevocation(t *testing.T) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        "access-token-1",
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()), NotBefore: jwt.NewNumericDate(time.Now()), Subject: "user-123",
 		},
 	}
 	token, err := mgr.GenerateToken(claims)
@@ -53,6 +54,7 @@ func TestGenericTokenValidatorFailsClosedAndRejectsNilFactoryValue(t *testing.T)
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        "access-token-2",
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()), NotBefore: jwt.NewNumericDate(time.Now()), Subject: "user-123",
 		},
 	}
 	token, err := mgr.GenerateToken(claims)

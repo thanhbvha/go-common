@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 const (
@@ -39,7 +39,6 @@ func Log(ctx context.Context, requestID string, report panicrecovery.Report) {
 	}
 	logger.ErrorWithContext(ctx, "panic recovered",
 		slog.String("panic_type", report.Type),
-		slog.String("panic_message", report.Message),
 		slog.String("file", report.Origin.File),
 		slog.Int("line", report.Origin.Line),
 		slog.String("function", report.Origin.Function),

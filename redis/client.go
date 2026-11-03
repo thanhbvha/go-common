@@ -3,6 +3,9 @@ package redis
 import (
 	"context"
 	"fmt"
+	"net"
+	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +19,11 @@ type Client struct {
 	cfg       Config
 	rc        goredis.UniversalClient
 	connected bool
+	closed    bool
+	gate      chan struct{}
+	health    sync.WaitGroup
+	closeDone chan struct{}
+	closeErr  error
 	mu        sync.RWMutex
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -30,49 +38,84 @@ var (
 // New allocates a Client from cfg without establishing a connection.
 // Call Connect (or MustConnect) before performing any operations.
 func New(cfg Config) *Client {
+	if cfg.Logger != nil {
+		v := reflect.ValueOf(cfg.Logger)
+		switch v.Kind() {
+		case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+			if v.IsNil() {
+				cfg.Logger = nil
+			}
+		}
+	}
+	if cfg.TLSConfig != nil {
+		cfg.TLSConfig = cfg.TLSConfig.Clone()
+	}
+	cfg.ClusterAddrs = append([]string(nil), cfg.ClusterAddrs...)
+	cfg.SentinelAddrs = append([]string(nil), cfg.SentinelAddrs...)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		cfg:    cfg,
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:       cfg,
+		gate:      make(chan struct{}, 1),
+		closeDone: make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
 // Connect establishes the Redis connection, retrying up to Config.MaxConnRetries
-// times with an exponential back-off. It also starts the background
+// times with a cancellation-aware linear back-off. It also starts the background
 // health-check goroutine. Calling Connect on an already-connected Client is a
 // no-op.
 func (c *Client) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.connected {
+	if err := c.cfg.Validate(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c.gate <- struct{}{}:
+		defer func() { <-c.gate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.ctx.Done():
+		return goredis.ErrClosed
+	}
+	c.mu.RLock()
+	closed, initialized := c.closed, c.rc != nil
+	c.mu.RUnlock()
+	if closed {
+		return goredis.ErrClosed
+	}
+	if initialized {
 		return nil
 	}
-
+	startup, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
 	rc, err := c.buildClient()
 	if err != nil {
 		return err
 	}
-
-	if err := c.pingWithRetry(ctx, rc, c.cfg.MaxConnRetries); err != nil {
+	if err = c.pingWithRetry(startup, rc, c.cfg.MaxConnRetries); err != nil {
 		_ = rc.Close()
-		return fmt.Errorf("redis: failed to connect after %d retries: %w", c.cfg.MaxConnRetries, err)
+		return fmt.Errorf("redis: connect: %w", err)
 	}
-
+	c.mu.Lock()
+	if c.closed || startup.Err() != nil {
+		c.mu.Unlock()
+		_ = rc.Close()
+		if err := startup.Err(); err != nil {
+			return err
+		}
+		return goredis.ErrClosed
+	}
 	c.rc = rc
 	c.connected = true
-
-	go c.runHealthCheck()
-
-	if c.cfg.Logger != nil {
-		// Sync: startup log must complete before Connect returns.
-		c.cfg.Logger.Info("redis: connected",
-			"mode", c.modeName(),
-			"pool_size", c.cfg.PoolSize,
-		)
-	}
-
+	c.health.Add(1)
+	c.mu.Unlock()
+	go func() { defer c.health.Done(); c.runHealthCheck() }()
 	return nil
 }
 
@@ -90,26 +133,37 @@ func MustConnect(ctx context.Context, cfg Config) *Client {
 // Subsequent calls return nil without doing any work.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.cancel != nil {
-		c.cancel()
+	if c.closed {
+		done := c.closeDone
+		c.mu.Unlock()
+		<-done
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		return c.closeErr
 	}
-
-	if c.rc != nil {
-		err := c.rc.Close()
-		c.rc = nil
-		c.connected = false
-		if c.cfg.Logger != nil {
-			// Sync: shutdown log must complete before Close returns.
-			c.cfg.Logger.Info("redis: connection closed")
-		}
-		return err
+	c.closed = true
+	c.cancel()
+	rc := c.rc
+	c.rc = nil
+	c.connected = false
+	c.mu.Unlock()
+	// Wait for a canceled startup attempt to close its unpublished pool.
+	c.gate <- struct{}{}
+	<-c.gate
+	var err error
+	if rc != nil {
+		err = rc.Close()
 	}
-	return nil
+	c.health.Wait()
+	c.mu.Lock()
+	c.closeErr = err
+	close(c.closeDone)
+	c.mu.Unlock()
+	return err
 }
 
-// IsConnected reports whether the client has an active connection.
+// IsConnected reports the most recent health observation. It does not gate
+// commands or describe whether the lifecycle has been initialized.
 func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -194,25 +248,31 @@ func Close() error {
 // buildClient constructs the appropriate goredis client based on Config.Mode.
 func (c *Client) buildClient() (goredis.UniversalClient, error) {
 	cfg := c.cfg
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	switch cfg.Mode {
 	case ModeCluster:
 		if len(cfg.ClusterAddrs) == 0 {
 			return nil, fmt.Errorf("redis: ClusterAddrs must not be empty for ModeCluster")
 		}
 		return goredis.NewClusterClient(&goredis.ClusterOptions{
-			Addrs:           cfg.ClusterAddrs,
-			Password:        cfg.Password,
-			PoolSize:        cfg.PoolSize,
-			MinIdleConns:    cfg.MinIdleConns,
-			MaxIdleConns:    cfg.MaxIdleConns,
-			ConnMaxIdleTime: cfg.ConnMaxIdleTime,
-			ConnMaxLifetime: cfg.ConnMaxLifetime,
-			DialTimeout:     cfg.DialTimeout,
-			ReadTimeout:     cfg.ReadTimeout,
-			WriteTimeout:    cfg.WriteTimeout,
-			MaxRetries:      cfg.MaxRetries,
-			MinRetryBackoff: cfg.MinRetryBackoff,
-			MaxRetryBackoff: cfg.MaxRetryBackoff,
+			Addrs:                 cfg.ClusterAddrs,
+			Password:              cfg.Password,
+			Username:              cfg.Username,
+			TLSConfig:             cfg.TLSConfig,
+			ContextTimeoutEnabled: true,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxIdleConns:          cfg.MaxIdleConns,
+			ConnMaxIdleTime:       cfg.ConnMaxIdleTime,
+			ConnMaxLifetime:       cfg.ConnMaxLifetime,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			MaxRetries:            cfg.MaxRetries,
+			MinRetryBackoff:       cfg.MinRetryBackoff,
+			MaxRetryBackoff:       cfg.MaxRetryBackoff,
 		}), nil
 
 	case ModeSentinel:
@@ -220,39 +280,47 @@ func (c *Client) buildClient() (goredis.UniversalClient, error) {
 			return nil, fmt.Errorf("redis: SentinelAddrs must not be empty for ModeSentinel")
 		}
 		return goredis.NewFailoverClient(&goredis.FailoverOptions{
-			MasterName:      cfg.MasterName,
-			SentinelAddrs:   cfg.SentinelAddrs,
-			Password:        cfg.Password,
-			DB:              cfg.DB,
-			PoolSize:        cfg.PoolSize,
-			MinIdleConns:    cfg.MinIdleConns,
-			MaxIdleConns:    cfg.MaxIdleConns,
-			ConnMaxIdleTime: cfg.ConnMaxIdleTime,
-			ConnMaxLifetime: cfg.ConnMaxLifetime,
-			DialTimeout:     cfg.DialTimeout,
-			ReadTimeout:     cfg.ReadTimeout,
-			WriteTimeout:    cfg.WriteTimeout,
-			MaxRetries:      cfg.MaxRetries,
-			MinRetryBackoff: cfg.MinRetryBackoff,
-			MaxRetryBackoff: cfg.MaxRetryBackoff,
+			MasterName:            cfg.MasterName,
+			SentinelUsername:      cfg.SentinelUsername,
+			SentinelPassword:      cfg.SentinelPassword,
+			SentinelAddrs:         cfg.SentinelAddrs,
+			Password:              cfg.Password,
+			Username:              cfg.Username,
+			TLSConfig:             cfg.TLSConfig,
+			ContextTimeoutEnabled: true,
+			DB:                    cfg.DB,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxIdleConns:          cfg.MaxIdleConns,
+			ConnMaxIdleTime:       cfg.ConnMaxIdleTime,
+			ConnMaxLifetime:       cfg.ConnMaxLifetime,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			MaxRetries:            cfg.MaxRetries,
+			MinRetryBackoff:       cfg.MinRetryBackoff,
+			MaxRetryBackoff:       cfg.MaxRetryBackoff,
 		}), nil
 
 	default: // ModeSingle
 		return goredis.NewClient(&goredis.Options{
-			Addr:            fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Password:        cfg.Password,
-			DB:              cfg.DB,
-			PoolSize:        cfg.PoolSize,
-			MinIdleConns:    cfg.MinIdleConns,
-			MaxIdleConns:    cfg.MaxIdleConns,
-			ConnMaxIdleTime: cfg.ConnMaxIdleTime,
-			ConnMaxLifetime: cfg.ConnMaxLifetime,
-			DialTimeout:     cfg.DialTimeout,
-			ReadTimeout:     cfg.ReadTimeout,
-			WriteTimeout:    cfg.WriteTimeout,
-			MaxRetries:      cfg.MaxRetries,
-			MinRetryBackoff: cfg.MinRetryBackoff,
-			MaxRetryBackoff: cfg.MaxRetryBackoff,
+			Addr:                  net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+			Password:              cfg.Password,
+			Username:              cfg.Username,
+			TLSConfig:             cfg.TLSConfig,
+			ContextTimeoutEnabled: true,
+			DB:                    cfg.DB,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxIdleConns:          cfg.MaxIdleConns,
+			ConnMaxIdleTime:       cfg.ConnMaxIdleTime,
+			ConnMaxLifetime:       cfg.ConnMaxLifetime,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			MaxRetries:            cfg.MaxRetries,
+			MinRetryBackoff:       cfg.MinRetryBackoff,
+			MaxRetryBackoff:       cfg.MaxRetryBackoff,
 		}), nil
 	}
 }
@@ -281,7 +349,13 @@ func (c *Client) pingWithRetry(ctx context.Context, rc goredis.UniversalClient, 
 			)
 		}
 		if i < maxRetries-1 {
-			time.Sleep(time.Duration(i+1) * time.Second)
+			timer := time.NewTimer(time.Duration(i+1) * time.Second)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
 		}
 	}
 	return lastErr
@@ -305,12 +379,12 @@ func (c *Client) runHealthCheck() {
 				continue
 			}
 
-			hcCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			hcCtx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 			_, err := rc.Ping(hcCtx).Result()
 			cancel()
 
 			c.mu.Lock()
-			c.connected = err == nil
+			c.connected = err == nil && !c.closed
 			c.mu.Unlock()
 			if err != nil {
 				if c.cfg.Logger != nil {

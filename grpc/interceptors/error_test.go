@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -58,5 +58,31 @@ func TestErrorMapping(t *testing.T) {
 	}
 	if len(status.Convert(toStatus(original)).Details()) != 1 {
 		t.Fatal("status details lost")
+	}
+	for _, tc := range []struct {
+		code    codes.Code
+		message string
+	}{
+		{codes.Internal, "Internal server error"},
+		{codes.Unknown, "Internal server error"},
+		{codes.DataLoss, "Internal server error"},
+		{codes.Unavailable, "Service unavailable"},
+		{codes.Unimplemented, "Operation not implemented"},
+		{codes.DeadlineExceeded, "Request deadline exceeded"},
+		{codes.Canceled, "Request canceled"},
+	} {
+		t.Run("masked_"+tc.code.String(), func(t *testing.T) {
+			private, detailErr := status.New(tc.code, "secret backend cause").WithDetails(&errdetails.DebugInfo{Detail: "secret stack"})
+			if detailErr != nil {
+				t.Fatal(detailErr)
+			}
+			got := status.Convert(toStatus(private.Err()))
+			if got.Code() != tc.code || got.Message() != tc.message {
+				t.Fatalf("got %v %q", got.Code(), got.Message())
+			}
+			if len(got.Details()) != 0 {
+				t.Fatal("private server status details escaped")
+			}
+		})
 	}
 }

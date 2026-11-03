@@ -4,252 +4,130 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+	"strings"
 
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Subscribe joins the consumer group specified in Config.ConsumerGroup and
-// begins consuming records from topics. handler is invoked sequentially for
-// each record; the offset is committed only after handler returns nil.
-// A non-nil error from handler is logged but does not stop the consumer loop;
-// the record is left uncommitted for the next redelivery cycle.
-// Blocks until ctx is cancelled.
+// Subscribe handles records sequentially on an independently owned consumer.
+// The first handler, poll, or commit error stops the subscription. Successful
+// records preceding a handler error are synchronously committed; the failed
+// record and later records remain available after restarting the subscription.
+// Handlers must be idempotent and honor ctx. Retry and DLQ belong in eventbus.
 func (c *Client) Subscribe(ctx context.Context, topics []string, handler RecordHandler) error {
-	kc, err := c.requireConnected()
+	if handler == nil {
+		return errors.New("kafka: nil record handler")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	defer cancel()
+	consumer, err := c.openSubscription(topics)
 	if err != nil {
 		return err
 	}
-
-	kc.AddConsumeTopics(topics...)
-
-	if c.cfg.Logger != nil {
-		c.cfg.Logger.Info("kafka: consumer started",
-			"topics", topics,
-			"group", c.cfg.ConsumerGroup,
-		)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			if c.cfg.Logger != nil {
-				c.cfg.Logger.Info("kafka: consumer stopped", "topics", topics)
+	return consumeSubscription(ctx, consumer, 100, func(ctx context.Context, records []*kgo.Record) (int, error) {
+		for i, record := range records {
+			if err := ctx.Err(); err != nil {
+				return i, err
 			}
-			return nil
-		default:
-		}
-
-		fetches := kc.PollFetches(ctx)
-		if fetches.IsClientClosed() {
-			return nil
-		}
-
-		if errs := fetches.Errors(); len(errs) > 0 {
-			for _, fe := range errs {
-				if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
-					continue
-				}
-				if c.cfg.Logger != nil {
-					c.cfg.Logger.ErrorAsync("kafka: fetch error",
-						"topic", fe.Topic,
-						"partition", fe.Partition,
-						"err", fe.Err.Error(),
-					)
-				}
+			if err := handler(ctx, recordToConsumeRecord(record)); err != nil {
+				return i, fmt.Errorf("kafka: handler topic=%q partition=%d offset=%d: %w", record.Topic, record.Partition, record.Offset, err)
 			}
 		}
-
-		fetches.EachRecord(func(r *kgo.Record) {
-			record := recordToConsumeRecord(r)
-
-			if handlerErr := handler(ctx, record); handlerErr != nil {
-				if c.cfg.Logger != nil {
-					c.cfg.Logger.ErrorAsync("kafka: handler failed — record will not be committed",
-						"topic", r.Topic,
-						"partition", r.Partition,
-						"offset", r.Offset,
-						"err", handlerErr.Error(),
-					)
-				}
-				return
-			}
-
-			// Mark the record so the auto-commit goroutine (or manual commit)
-			// will commit up to this offset.
-			kc.MarkCommitRecords(r)
-		})
-	}
+		return len(records), nil
+	})
 }
 
-// SubscribeBatch is like Subscribe but delivers records in batches for higher
-// throughput scenarios. handler receives a slice of records; the offsets of
-// all records are committed only when handler returns nil for the entire batch.
-// Blocks until ctx is cancelled.
-func (c *Client) SubscribeBatch(ctx context.Context, topics []string, batchSize int, handler func(ctx context.Context, records []ConsumeRecord) error) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
+// SubscribeBatch commits a bounded batch only after handler returns nil.
+// On any error it closes its consumer and returns without automatic retry.
+// A failed batch may have partial application side effects; handlers must be
+// idempotent because all records in that batch remain eligible for redelivery.
+func (c *Client) SubscribeBatch(ctx context.Context, topics []string, batchSize int, handler func(context.Context, []ConsumeRecord) error) error {
+	if handler == nil {
+		return errors.New("kafka: nil batch handler")
 	}
-
 	if batchSize <= 0 {
 		batchSize = 100
 	}
-
-	kc.AddConsumeTopics(topics...)
-
-	if c.cfg.Logger != nil {
-		c.cfg.Logger.Info("kafka: batch consumer started",
-			"topics", topics,
-			"group", c.cfg.ConsumerGroup,
-			"batch_size", batchSize,
-		)
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	defer cancel()
+	consumer, err := c.openSubscription(topics)
+	if err != nil {
+		return err
 	}
+	return consumeSubscription(ctx, consumer, batchSize, func(ctx context.Context, records []*kgo.Record) (int, error) {
+		batch := make([]ConsumeRecord, len(records))
+		for i, record := range records {
+			batch[i] = recordToConsumeRecord(record)
+		}
+		if err := handler(ctx, batch); err != nil {
+			return 0, fmt.Errorf("kafka: batch handler: %w", err)
+		}
+		return len(records), nil
+	})
+}
 
+type subscriptionConsumer interface {
+	PollRecords(context.Context, int) kgo.Fetches
+	CommitRecords(context.Context, ...*kgo.Record) error
+	AllowRebalance()
+	CloseAllowingRebalance()
+}
+
+func (c *Client) openSubscription(topics []string) (*kgo.Client, error) {
+	if strings.TrimSpace(c.cfg.ConsumerGroup) == "" || len(topics) == 0 {
+		return nil, errors.New("kafka: consumer group and topics are required")
+	}
+	for _, topic := range topics {
+		if strings.TrimSpace(topic) == "" {
+			return nil, errors.New("kafka: empty consumer topic")
+		}
+	}
+	if _, err := c.requireConnected(); err != nil {
+		return nil, err
+	}
+	factory, err := NewNativeClientFactory(c.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.NewManualConsumer(kgo.ConsumerGroup(c.cfg.ConsumerGroup), kgo.ConsumeTopics(topics...), kgo.BlockRebalanceOnPoll())
+}
+
+// consumeSubscription owns consumer until return. At most one bounded poll is
+// in flight, and assignment remains fenced until handlers and commits finish.
+func consumeSubscription(ctx context.Context, consumer subscriptionConsumer, batchSize int, handle func(context.Context, []*kgo.Record) (int, error)) error {
+	defer consumer.CloseAllowingRebalance()
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		fetches := kc.PollFetches(ctx)
+		fetches := consumer.PollRecords(ctx, batchSize)
+		if err := fetches.Err(); err != nil {
+			return err
+		}
 		if fetches.IsClientClosed() {
-			return nil
+			return ErrClosed
 		}
-
-		if errs := fetches.Errors(); len(errs) > 0 {
-			for _, fe := range errs {
-				if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
-					continue
-				}
-				if c.cfg.Logger != nil {
-					c.cfg.Logger.ErrorAsync("kafka: fetch error",
-						"topic", fe.Topic,
-						"partition", fe.Partition,
-						"err", fe.Err.Error(),
-					)
-				}
+		records := fetches.Records()
+		if len(records) == 0 {
+			consumer.AllowRebalance()
+			continue
+		}
+		accepted, handleErr := handle(ctx, records)
+		if accepted > 0 {
+			if err := consumer.CommitRecords(ctx, records[:accepted]...); err != nil {
+				return errors.Join(handleErr, fmt.Errorf("kafka: commit processed records: %w", err))
 			}
 		}
-
-		var (
-			batch   []ConsumeRecord
-			rawRecs []*kgo.Record
-		)
-
-		fetches.EachRecord(func(r *kgo.Record) {
-			batch = append(batch, recordToConsumeRecord(r))
-			rawRecs = append(rawRecs, r)
-
-			if len(batch) >= batchSize {
-				if handlerErr := handler(ctx, batch); handlerErr != nil {
-					if c.cfg.Logger != nil {
-						c.cfg.Logger.ErrorAsync("kafka: batch handler failed — records will not be committed",
-							"batch_size", len(batch),
-							"err", handlerErr.Error(),
-						)
-					}
-				} else {
-					kc.MarkCommitRecords(rawRecs...)
-				}
-				batch = batch[:0]
-				rawRecs = rawRecs[:0]
-			}
-		})
-
-		// Flush the remaining partial batch.
-		if len(batch) > 0 {
-			if handlerErr := handler(ctx, batch); handlerErr != nil {
-				if c.cfg.Logger != nil {
-					c.cfg.Logger.ErrorAsync("kafka: batch handler failed on partial batch",
-						"batch_size", len(batch),
-						"err", handlerErr.Error(),
-					)
-				}
-			} else {
-				kc.MarkCommitRecords(rawRecs...)
-			}
+		if handleErr != nil {
+			return handleErr
 		}
+		consumer.AllowRebalance()
 	}
 }
-
-// CommitOffsets manually commits all marked offsets to the broker.
-// Use when ConsumerCommitInterval is 0 (auto-commit disabled).
-func (c *Client) CommitOffsets(ctx context.Context) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
-	}
-	if err := kc.CommitMarkedOffsets(ctx); err != nil {
-		return fmt.Errorf("kafka: CommitOffsets failed: %w", err)
-	}
-	return nil
-}
-
-// SeekToOffset seeks the consumer to a specific offset within a partition.
-// Useful for replaying messages or recovering from processing errors.
-// The seek takes effect on the next PollFetches call.
-func (c *Client) SeekToOffset(topic string, partition int32, offset int64) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
-	}
-	kc.SetOffsets(map[string]map[int32]kgo.EpochOffset{
-		topic: {partition: {Epoch: -1, Offset: offset}},
-	})
-	return nil
-}
-
-// SeekToTime seeks the consumer to the earliest offset whose timestamp is
-// greater than or equal to t within the given partition. It uses the kadm
-// admin client to perform a ListOffsets request before updating the consumer
-// position.
-func (c *Client) SeekToTime(ctx context.Context, topic string, partition int32, t time.Time) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
-	}
-
-	adm := kadm.NewClient(kc)
-	offsets, err := adm.ListOffsetsAfterMilli(ctx, t.UnixMilli(), topic)
-	if err != nil {
-		return fmt.Errorf("kafka: SeekToTime failed for topic %q partition %d: %w", topic, partition, err)
-	}
-
-	offsets.Each(func(o kadm.ListedOffset) {
-		if o.Topic == topic && o.Partition == partition && o.Err == nil {
-			kc.SetOffsets(map[string]map[int32]kgo.EpochOffset{
-				o.Topic: {o.Partition: {Epoch: o.LeaderEpoch, Offset: o.Offset}},
-			})
-		}
-	})
-	return nil
-}
-
-// PauseTopics temporarily pauses fetching from the specified topics.
-// Fetches can be resumed by calling ResumeTopics with the same topic names.
-func (c *Client) PauseTopics(topics ...string) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
-	}
-	kc.PauseFetchTopics(topics...)
-	return nil
-}
-
-// ResumeTopics resumes fetching from topics previously paused via PauseTopics.
-func (c *Client) ResumeTopics(topics ...string) error {
-	kc, err := c.requireConnected()
-	if err != nil {
-		return err
-	}
-	kc.ResumeFetchTopics(topics...)
-	return nil
-}
-
-// ---- internal helpers ----
 
 // recordToConsumeRecord converts a *kgo.Record to a ConsumeRecord.
 func recordToConsumeRecord(r *kgo.Record) ConsumeRecord {

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 type attemptDelivery struct {

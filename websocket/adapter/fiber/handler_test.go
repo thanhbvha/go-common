@@ -4,13 +4,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	fiberframework "github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {
@@ -61,7 +60,7 @@ func TestGetRequestIDPrefersSharedContext(t *testing.T) {
 		got = getRequestID(c)
 		return c.SendStatus(http.StatusNoContent)
 	})
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
+	response, err := app.Test(fiberTestRequest("http://example.com/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +81,7 @@ func TestGetRequestIDIgnoresLegacyFiberLocal(t *testing.T) {
 		got = getRequestID(c)
 		return c.SendStatus(http.StatusNoContent)
 	})
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req := fiberTestRequest("http://example.com/")
 	req.Header.Set("X-Request-ID", "header-id")
 	response, err := app.Test(req)
 	if err != nil {
@@ -106,7 +105,7 @@ func TestServerDefaultsDoNotTrustAllProxiesAndMaskInternalErrors(t *testing.T) {
 	server.App().Get("/error", func(*fiberframework.Ctx) error {
 		return errors.New("database password is secret")
 	})
-	response, err := server.App().Test(httptest.NewRequest(http.MethodGet, "http://example.com/error", nil))
+	response, err := server.App().Test(fiberTestRequest("http://example.com/error"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +120,20 @@ func TestServerDefaultsDoNotTrustAllProxiesAndMaskInternalErrors(t *testing.T) {
 }
 
 func websocketUpgradeRequest(target string) *http.Request {
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := fiberTestRequest(target)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	return req
+}
+
+// Fiber serializes requests using DumpRequest; a client request includes Host
+// under Go 1.26, whereas httptest.NewRequest creates a server request.
+func fiberTestRequest(target string) *http.Request {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		panic(err)
+	}
 	return req
 }

@@ -1,103 +1,49 @@
-# RateLimit Module
+# Rate limiting (v2)
 
-The `ratelimit` module provides an ultra-fast, distributed Rate Limiting solution using Redis and Lua scripting. It is designed to protect your APIs against DDoS, Brute-force attacks, and API abuse, while keeping the limit synchronized across a cluster of microservices.
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
 
-## Features
-
-1. **Atomic Operations**: Uses Redis Lua scripts to evaluate and increment rate limits in a single, atomic operation to prevent race conditions in highly concurrent environments.
-2. **Standard Algorithm**: Implements the Fixed Window rate limiting algorithm.
-3. **Framework-Agnostic Middlewares**: Located in isolated subpackages to avoid pulling unnecessary framework dependencies:
-   - `github.com/thanhbvha/go-common/ratelimit/middleware/nethttp` (`nethttplimit.Middleware()`)
-   - `github.com/thanhbvha/go-common/ratelimit/middleware/fiber` (`fiberlimit.Middleware()`)
-   - `github.com/thanhbvha/go-common/ratelimit/middleware/gin` (`ginlimit.Middleware()`)
-   - `github.com/thanhbvha/go-common/ratelimit/middleware/echo` (`echolimit.Middleware()`)
-4. **Customizable Keys**: You can rate-limit based on Client IP (default), User ID, API Key, or any custom logic.
-5. **Standard Headers**: Automatically injects standard Rate Limit HTTP Headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) into responses.
-
-## Installation
-
-```bash
-go get github.com/thanhbvha/go-common/ratelimit
-```
-
-## Basic Usage (Fiber)
+Atomic Redis fixed-window request quotas, with adapters for net/http, Fiber,
+Gin and Echo. A window expires `Window` after the first request for its key.
+Traffic across a window boundary can reach twice the configured limit; choose
+an algorithm at the application edge if a strict sliding-window bound is needed.
 
 ```go
-package main
-
-import (
-	"time"
-	"github.com/gofiber/fiber/v2"
-	"github.com/redis/go-redis/v9"
-	
-	"github.com/thanhbvha/go-common/ratelimit"
-	"github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
-)
-
-func main() {
-	// 1. Connect to Redis
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-
-	// 2. Initialize the Limiter
-	limiter := ratelimit.NewRedisLimiter(rdb, "api_limit")
-
-	// 3. Setup Limit: Max 10 requests per 1 minute
-	cfg := ratelimit.Config{
-		Limit:  10,
-		Window: 1 * time.Minute,
-	}
-
-	app := fiber.New()
-
-	// 4. Apply Middleware (Uses IP by default)
-	app.Use("/api", fiberlimit.Middleware(limiter, cfg, nil))
-
-	app.Get("/api/data", func(c *fiber.Ctx) error {
-		return c.SendString("Success!")
-	})
-
-	app.Listen(":3000")
+limiter, err := ratelimit.NewRedisLimiter(redisClient, "orders:api")
+if err != nil { return err }
+cfg := ratelimit.MiddlewareConfig{
+    Policy: ratelimit.Config{Limit: 100, Window: 1500*time.Millisecond},
+    FailurePolicy: ratelimit.FailClosed,
+    OnError: func(ctx context.Context, err error) { /* record an outage metric */ },
 }
+limit, err := nethttplimit.Middleware(limiter, cfg, nil)
+if err != nil { return err }
+handler := limit(mux)
 ```
 
-## Standard `net/http`
+`NewRedisLimiter` accepts `redis.UniversalClient` for standalone, Sentinel and
+Cluster. The client remains owned by the application. Namespaces/prefixes must
+be distinct for unrelated quota policies. `Config.Validate` requires a positive
+limit and a positive window expressed in whole milliseconds; there is no
+seconds truncation. The same validation runs when calling `Allow` directly.
 
-```go
-import nethttplimit "github.com/thanhbvha/go-common/ratelimit/middleware/nethttp"
+HTTP middleware construction requires an explicit failure policy:
 
-mux := http.NewServeMux()
-mux.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
-    _, _ = w.Write([]byte("Success!"))
-})
+- `FailClosed`: backend failure or missing quota result returns HTTP 503.
+- `FailOpen`: bypasses failed checks; use when application availability outweighs
+  quota enforcement. `OnError` still observes the failure.
 
-// A nil KeyGenerator uses the direct peer IP from Request.RemoteAddr.
-handler := nethttplimit.Middleware(limiter, cfg, nil)(mux)
-srv := &http.Server{Addr: ":3000", Handler: handler}
+Quota exhaustion returns 429 and `Retry-After`, with `X-RateLimit-Limit`,
+`X-RateLimit-Remaining` and `X-RateLimit-Reset`. Empty generated keys follow the
+selected failure policy. Error observers must be fast and concurrency-safe.
+
+All four adapters expose `Middleware(limiter, MiddlewareConfig, KeyGenerator)`
+and return `(handler, error)`; check errors during bootstrap. The net/http
+resolver uses the direct peer address and ignores forwarding headers. Configure
+trusted proxies before using the framework IP resolvers, or provide a key
+function based on authenticated user/API key. Place identity quotas after auth.
+
+```sh
+go test -race ./ratelimit/...
 ```
 
-The default key generator deliberately ignores forwarding headers. Applications
-behind a trusted reverse proxy should provide a custom `KeyGenerator` based on
-their validated proxy configuration or authenticated user information.
-
-Fiber, Gin, and Echo use their framework client-IP resolver by default. Configure
-each framework's trusted-proxy policy before using that value as a security key,
-or provide a custom `KeyGenerator`. For authenticated APIs, place a user/API-key
-limiter after authentication.
-
-## Advanced Usage: Custom Rate Limit Keys
-
-By default, the middleware limits requests by IP address. In many systems, you want to limit by Authenticated User ID or API Key instead. You can do this by passing a custom Key Generator function.
-
-```go
-// Rate limit by User ID (assuming auth middleware sets it in context)
-keyGen := func(c *fiber.Ctx) string {
-	userID := c.Locals("user_id")
-	if userID != nil {
-		return userID.(string)
-	}
-	// Fallback to IP if not logged in
-	return c.IP()
-}
-
-app.Use("/api", fiberlimit.Middleware(limiter, cfg, keyGen))
-```
+See [runnable examples](../examples/ratelimit/README.md).

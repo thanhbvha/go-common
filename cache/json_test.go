@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/cache"
+	"github.com/thanhbvha/go-common/v2/cache"
 )
 
 type testUser struct {

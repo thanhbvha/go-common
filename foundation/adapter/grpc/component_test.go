@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/foundation"
-	"github.com/thanhbvha/go-common/foundation/adapter/grpc"
-	common "github.com/thanhbvha/go-common/grpc"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation/adapter/grpc"
+	common "github.com/thanhbvha/go-common/v2/grpc"
 	grpcframework "google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )

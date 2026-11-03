@@ -7,9 +7,9 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 // Metadata identifies the WebSocket operation in which a panic occurred.

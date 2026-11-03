@@ -1,6 +1,6 @@
 package eventbus
 
-import "github.com/thanhbvha/go-common/eventbus/transport"
+import "github.com/thanhbvha/go-common/v2/eventbus/transport"
 
 // Topology aliases the transport.Topology.
 type Topology = transport.Topology

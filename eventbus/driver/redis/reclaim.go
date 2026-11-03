@@ -6,7 +6,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func (t *redisTransport) reclaimPage(ctx context.Context, sub transport.Subscription, consumer, cursor string, deliver func(transport.Delivery)) (string, error) {

@@ -1,8 +1,10 @@
 # Database packages
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 The `db` directory provides SQL access through GORM, MongoDB access through the
 MongoDB Go driver, and versioned SQL migrations through Goose. These packages are
-part of the single `github.com/thanhbvha/go-common` module and require Go 1.26.0.
+part of the single `github.com/thanhbvha/go-common/v2` module and require Go 1.26.10.
 They are independent of HTTP frameworks and use explicit client/manager ownership.
 
 ## Choose a package
@@ -66,8 +68,8 @@ import (
     "os"
     "time"
 
-    "github.com/thanhbvha/go-common/db/orm"
-    "github.com/thanhbvha/go-common/db/orm/backend/postgres"
+    "github.com/thanhbvha/go-common/v2/db/orm"
+    "github.com/thanhbvha/go-common/v2/db/orm/backend/postgres"
 )
 
 type Patient struct {
@@ -133,7 +135,7 @@ import (
     "os"
     "time"
 
-    "github.com/thanhbvha/go-common/db/mongodb"
+    "github.com/thanhbvha/go-common/v2/db/mongodb"
 )
 
 type MongoPatient struct {
@@ -180,15 +182,16 @@ package dbexample
 
 import (
     "embed"
+    "context"
 
-    "github.com/thanhbvha/go-common/db/migration"
-    "github.com/thanhbvha/go-common/db/orm"
+    "github.com/thanhbvha/go-common/v2/db/migration"
+    "github.com/thanhbvha/go-common/v2/db/orm"
 )
 
 //go:embed sql/*.sql
 var migrationFS embed.FS
 
-func MigratePostgres(client *orm.Client) error {
+func MigratePostgres(ctx context.Context, client *orm.Client) error {
     pool, err := client.DB().DB()
     if err != nil {
         return err
@@ -202,7 +205,8 @@ func MigratePostgres(client *orm.Client) error {
     if err != nil {
         return err
     }
-    return migrator.Up()
+    _, err = migrator.Up(ctx)
+    return err
 }
 ```
 
@@ -211,11 +215,12 @@ Run migrations as a controlled deployment step before serving traffic, outside
 managed repository transactions. MySQL DDL can implicitly commit. Goose migration
 support does not imply ORM adapter support for every Goose dialect.
 
-The current migration wrapper configures Goose's package-global dialect and base
-filesystem. Avoid concurrent migration managers with different dialects/filesystems
-in one process; use a dedicated migration process or serialize a consistent setup.
-Its methods do not accept contexts, so ORM query/admission timeouts do not bound
-migration execution. Do not log raw migration errors without sanitizing them.
+Each Manager owns an isolated Goose Provider: dialect, filesystem and registry
+never modify process globals. Up/Down/UpTo/DownTo accept contexts and return migration
+results; Status(ctx) returns structured rows. The borrowed pool remains open.
+Run one dedicated deployment migration job per database; the wrapper does not install
+a cross-process locker. A context bounds database operations, while application Go
+migration callbacks must honor it. Do not log raw SQL/driver errors without sanitizing.
 
 ## Operational and security boundaries
 
@@ -256,3 +261,8 @@ application-owned telemetry providers.
 - [SQL demo commands and expected results](../examples/db/README.md)
 - [MongoDB production APIs](mongodb/README.md)
 - [MongoDB configuration and runnable examples](../examples/db_mongodb/README.md)
+
+For atomic DB changes followed by reliable broker publication, follow the
+[SQL/MongoDB outbox and consumer idempotency recipes](OUTBOX.md). The library
+supplies transaction and publication primitives; applications own dispatcher,
+claiming, retention and business reconciliation policies.

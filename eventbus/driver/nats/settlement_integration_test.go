@@ -11,8 +11,8 @@ import (
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func TestNATSHeartbeatPreventsAckWaitRedelivery(t *testing.T) {

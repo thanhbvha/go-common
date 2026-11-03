@@ -1,96 +1,67 @@
+// Package migration provides instance-scoped migrations for a dedicated deployment
+// job. It borrows its SQL pool; the caller retains responsibility for closing it.
 package migration
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"os"
 
 	"github.com/pressly/goose/v3"
 )
 
-// Options defines configuration for migrations.
+// Options selects a migration filesystem and dialect. FS is rooted at Dir;
+// without FS, Dir names a local directory. Empty Dir means the filesystem root.
+// A Manager serializes its own operations. Run one deployment migration job
+// per database; it does not install a cross-process migration locker.
 type Options struct {
-	// DB is the *sql.DB instance.
-	DB *sql.DB
-
-	// Dialect is the database dialect (e.g. "postgres", "mysql", "sqlite3").
+	DB      *sql.DB
 	Dialect string
-
-	// Dir is the path to the directory containing migration files.
-	// Defaults to "." if empty.
-	// If FS is provided, this represents the directory inside the embedded FS.
-	Dir string
-
-	// FS is an optional embedded filesystem containing migration files.
-	// Highly recommended for production to embed SQL files into the binary.
-	FS fs.FS
+	Dir     string
+	FS      fs.FS
 }
 
-// Manager handles database migrations wrapping goose.
-type Manager struct {
-	opts Options
-}
+// Manager keeps dialect, filesystem, and Go migration registry isolated. It does
+// not close the borrowed DB and never modifies goose's process-global settings.
+type Manager struct{ provider *goose.Provider }
 
-// New creates a new migration manager.
 func New(opts Options) (*Manager, error) {
-	if opts.DB == nil {
-		return nil, fmt.Errorf("migration: db instance is required")
+	if opts.DB == nil || opts.Dialect == "" {
+		return nil, fmt.Errorf("migration: database and dialect required")
 	}
-	if opts.Dialect == "" {
-		return nil, fmt.Errorf("migration: dialect is required")
-	}
-
-	if err := goose.SetDialect(opts.Dialect); err != nil {
-		return nil, fmt.Errorf("migration: failed to set dialect %q: %w", opts.Dialect, err)
-	}
-
-	if opts.FS != nil {
-		goose.SetBaseFS(opts.FS)
-	}
-
 	if opts.Dir == "" {
 		opts.Dir = "."
 	}
-
-	return &Manager{opts: opts}, nil
-}
-
-// Up applies all available migrations.
-func (m *Manager) Up() error {
-	if err := goose.Up(m.opts.DB, m.opts.Dir); err != nil {
-		return fmt.Errorf("migration up failed: %w", err)
+	var files fs.FS
+	if opts.FS != nil {
+		var err error
+		files, err = fs.Sub(opts.FS, opts.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("migration filesystem: %w", err)
+		}
+	} else {
+		files = os.DirFS(opts.Dir)
 	}
-	return nil
-}
-
-// Down rolls back a single migration from the current version.
-func (m *Manager) Down() error {
-	if err := goose.Down(m.opts.DB, m.opts.Dir); err != nil {
-		return fmt.Errorf("migration down failed: %w", err)
+	provider, err := goose.NewProvider(goose.Dialect(opts.Dialect), opts.DB, files, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		return nil, fmt.Errorf("migration: initialize: %w", err)
 	}
-	return nil
+	return &Manager{provider: provider}, nil
 }
-
-// Status prints the status of all migrations.
-func (m *Manager) Status() error {
-	if err := goose.Status(m.opts.DB, m.opts.Dir); err != nil {
-		return fmt.Errorf("migration status failed: %w", err)
-	}
-	return nil
+func (m *Manager) Up(ctx context.Context) ([]*goose.MigrationResult, error) {
+	return m.provider.Up(ctx)
 }
-
-// UpTo migrates up to a specific version.
-func (m *Manager) UpTo(version int64) error {
-	if err := goose.UpTo(m.opts.DB, m.opts.Dir, version); err != nil {
-		return fmt.Errorf("migration up to %d failed: %w", version, err)
-	}
-	return nil
+func (m *Manager) Down(ctx context.Context) (*goose.MigrationResult, error) {
+	return m.provider.Down(ctx)
 }
-
-// DownTo migrates down to a specific version.
-func (m *Manager) DownTo(version int64) error {
-	if err := goose.DownTo(m.opts.DB, m.opts.Dir, version); err != nil {
-		return fmt.Errorf("migration down to %d failed: %w", version, err)
-	}
-	return nil
+func (m *Manager) UpTo(ctx context.Context, version int64) ([]*goose.MigrationResult, error) {
+	return m.provider.UpTo(ctx, version)
+}
+func (m *Manager) DownTo(ctx context.Context, version int64) ([]*goose.MigrationResult, error) {
+	return m.provider.DownTo(ctx, version)
+}
+func (m *Manager) Status(ctx context.Context) ([]*goose.MigrationStatus, error) {
+	return m.provider.Status(ctx)
 }

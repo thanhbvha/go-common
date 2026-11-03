@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/thanhbvha/go-common/examples/grpc/proto"
-	"github.com/thanhbvha/go-common/web/validator"
-	"github.com/thanhbvha/go-common/xerrors"
+	pb "github.com/thanhbvha/go-common/v2/examples/grpc/proto"
+	"github.com/thanhbvha/go-common/v2/web/validator"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -29,7 +29,11 @@ func validate(req *pb.EchoRequest) error {
 		Delay   uint32 `validate:"lte=5000"`
 		Count   uint32 `validate:"lte=10"`
 	}{strings.TrimSpace(req.GetMessage()), req.GetDelayMs(), req.GetCount()}
-	if len(validator.Struct(input)) != 0 {
+	violations, err := validator.Validate(input)
+	if err != nil {
+		return err
+	}
+	if len(violations) != 0 {
 		return xerrors.New("INVALID_REQUEST", "message must contain 1..1024 characters, delay_ms <= 5000, count <= 10", 422)
 	}
 	return nil

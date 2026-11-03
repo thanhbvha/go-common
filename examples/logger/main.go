@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 func main() {
@@ -16,13 +15,16 @@ func main() {
 	// ==========================================
 	// 1. INITIALIZATION (Required on Startup)
 	// ==========================================
-	// The logger module provides a high-performance, asynchronous logger.
+	// The logger module is synchronous by default.
 	// You should initialize it once and set it as the global default.
 
 	opts := logger.DefaultOptions()
 	opts.Level = -4 // DEBUG level (slog.LevelDebug is -4)
 	opts.StdOut = true
 	opts.TextFormat = true // Use Text format instead of JSON for local development
+	// To opt into bounded async admission for this entire runtime:
+	// opts.Async = true
+	// opts.BufferSize = 1024
 
 	// Example: Configure file rotation (optional)
 	// opts.File = &logger.FileOptions{
@@ -37,7 +39,7 @@ func main() {
 	// Set it as the process-wide default so you can use logger.Info() anywhere
 	logger.SetDefault(l)
 
-	// ALWAYS call Close() before the app exits to flush all buffered async logs
+	// Close drains accepted async records and closes owned file writers.
 	defer logger.Close()
 
 	// Uncomment the example you want to run:
@@ -58,19 +60,18 @@ func RunSynchronousLoggerExample() {
 }
 
 // =====================================================================
-// 3. ASYNCHRONOUS LOGGING (Recommended for high-throughput)
+// 3. ASYNCHRONOUS LOGGING (Explicit opt-in)
 // =====================================================================
 func RunAsynchronousLoggerExample() {
 	fmt.Println("\n--- Asynchronous Logging ---")
-	// Async logging pushes the log to a buffered channel and returns immediately.
-	// It is highly recommended for API handlers to avoid I/O bottlenecks.
+	// This uses bounded async admission only when opts.Async was enabled before
+	// logger.New. The *Async method names otherwise use the synchronous runtime.
 	logger.InfoAsync("This is an async INFO log", "module", "main", "action", "async_test")
 
 	err := errors.New("simulated db timeout")
 	logger.ErrorAsync("Database query failed", "error", err, "query_id", "Q-1234")
 
-	// Wait a moment before exit to let async logs print (in real apps, the HTTP server blocks)
-	time.Sleep(100 * time.Millisecond)
+	// Runtime shutdown drains accepted records; sleeps are not a flush contract.
 }
 
 // =====================================================================

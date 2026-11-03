@@ -12,12 +12,12 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/ratelimit"
-	echolimit "github.com/thanhbvha/go-common/ratelimit/middleware/echo"
-	fiberlimit "github.com/thanhbvha/go-common/ratelimit/middleware/fiber"
-	ginlimit "github.com/thanhbvha/go-common/ratelimit/middleware/gin"
-	nethttplimit "github.com/thanhbvha/go-common/ratelimit/middleware/nethttp"
-	"github.com/thanhbvha/go-common/utils/graceful"
+	"github.com/thanhbvha/go-common/v2/ratelimit"
+	echolimit "github.com/thanhbvha/go-common/v2/ratelimit/middleware/echo"
+	fiberlimit "github.com/thanhbvha/go-common/v2/ratelimit/middleware/fiber"
+	ginlimit "github.com/thanhbvha/go-common/v2/ratelimit/middleware/gin"
+	nethttplimit "github.com/thanhbvha/go-common/v2/ratelimit/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
 )
 
 const address = ":3000"
@@ -35,8 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	limiter := ratelimit.NewRedisLimiter(rdb, "example_rate_limit_"+*stack)
-	cfg := ratelimit.Config{Limit: 5, Window: 10 * time.Second}
+	limiter, err := ratelimit.NewRedisLimiter(rdb, "example_rate_limit_"+*stack)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	cfg := ratelimit.MiddlewareConfig{Policy: ratelimit.Config{Limit: 5, Window: 10 * time.Second}, FailurePolicy: ratelimit.FailClosed}
 	switch *stack {
 	case "nethttp":
 		runNetHTTP(limiter, cfg)
@@ -52,19 +56,29 @@ func main() {
 	}
 }
 
-func runNetHTTP(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+func runNetHTTP(limiter ratelimit.Limiter, cfg ratelimit.MiddlewareConfig) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/data", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"message":"request allowed","stack":"net/http"}`))
 	})
-	handler := nethttplimit.Middleware(limiter, cfg, nil)(mux)
+	middleware, err := nethttplimit.Middleware(limiter, cfg, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	handler := middleware(mux)
 	runHTTPServer("net/http", &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second})
 }
 
-func runFiber(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+func runFiber(limiter ratelimit.Limiter, cfg ratelimit.MiddlewareConfig) {
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	app.Get("/api/data", fiberlimit.Middleware(limiter, cfg, nil), func(c *fiber.Ctx) error {
+	middleware, err := fiberlimit.Middleware(limiter, cfg, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	app.Get("/api/data", middleware, func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"message": "request allowed", "stack": "fiber"})
 	})
 	shutdown := graceful.NewShutdown(10 * time.Second)
@@ -76,21 +90,31 @@ func runFiber(limiter ratelimit.Limiter, cfg ratelimit.Config) {
 	}
 }
 
-func runGin(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+func runGin(limiter ratelimit.Limiter, cfg ratelimit.MiddlewareConfig) {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.GET("/api/data", ginlimit.Middleware(limiter, cfg, nil), func(c *gin.Context) {
+	middleware, err := ginlimit.Middleware(limiter, cfg, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	router.GET("/api/data", middleware, func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "request allowed", "stack": "gin"})
 	})
 	runHTTPServer("Gin", &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second})
 }
 
-func runEcho(limiter ratelimit.Limiter, cfg ratelimit.Config) {
+func runEcho(limiter ratelimit.Limiter, cfg ratelimit.MiddlewareConfig) {
 	e := echo.New()
 	e.HideBanner = true
+	middleware, err := echolimit.Middleware(limiter, cfg, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
 	e.GET("/api/data", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"message": "request allowed", "stack": "echo"})
-	}, echolimit.Middleware(limiter, cfg, nil))
+	}, middleware)
 	shutdown := graceful.NewShutdown(10 * time.Second)
 	shutdown.Register(func(ctx context.Context) error { return e.Shutdown(ctx) })
 	go func() { _ = e.Start(address) }()

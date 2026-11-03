@@ -1,5 +1,7 @@
 # Utils
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 Production-oriented helpers that complement the Go standard library. The module
 contains focused packages for cryptography, context values, graceful shutdown,
 slice transformations, and strings.

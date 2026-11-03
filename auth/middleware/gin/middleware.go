@@ -3,10 +3,10 @@ package ginauth
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	ginresp "github.com/thanhbvha/go-common/web/response/gin"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"github.com/thanhbvha/go-common/v2/auth/middleware/internal/authhttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	ginresp "github.com/thanhbvha/go-common/v2/web/response/gin"
 )
 
 // Middleware creates a Gin middleware to protect routes using standard JWT.
@@ -26,7 +26,8 @@ func Middleware(manager *auth.Manager) gin.HandlerFunc {
 		}
 		claims, err := manager.ValidateTokenContext(c.Request.Context(), tokenString)
 		if err != nil {
-			ginresp.Error(c, 401, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			ginresp.Error(c, status, message)
 			c.Abort()
 			return
 		}
@@ -59,7 +60,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) gin.Handl
 
 		claims, err := validator.ValidateRequestToken(c.Request.Context(), tokenString)
 		if err != nil {
-			ginresp.Error(c, 401, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			ginresp.Error(c, status, message)
 			c.Abort()
 			return
 		}
@@ -95,7 +97,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *gi
 
 		details, err := manager.ValidateTokenDetailsContext(c.Request.Context(), tokenString, aad)
 		if err != nil {
-			ginresp.Error(c, 401, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			ginresp.Error(c, status, message)
 			c.Abort()
 			return
 		}

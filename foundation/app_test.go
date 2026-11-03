@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/v2/health"
 )
 
 func TestNewValidatesConfigAndOptions(t *testing.T) {

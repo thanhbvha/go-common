@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package echo;
 
-option go_package = "github.com/thanhbvha/go-common/examples/grpc/proto";
+option go_package = "github.com/thanhbvha/go-common/v2/examples/grpc/proto";
 
 service EchoService {
     rpc Echo (EchoRequest) returns (EchoResponse) {}

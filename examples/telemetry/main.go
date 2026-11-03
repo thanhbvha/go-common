@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/v2/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -33,13 +33,16 @@ func main() {
 	cfg.ExportInterval = 10 * time.Second
 
 	// 2. Initialize module
-	tel, err := telemetry.Init(ctx, cfg)
+	tel, err := telemetry.New(ctx, cfg)
 	if err != nil {
 		fmt.Printf("[Error] Failed to initialize telemetry: %v\n", err)
 	} else {
-		// CRITICAL: Always defer tel.Shutdown(ctx). If you forget this, the background
+		// Always shut down providers to flush accepted telemetry.
 		// spans might be lost in memory and never sent to the OpenTelemetry Collector upon exit.
 		defer tel.Shutdown(ctx)
+		if err := tel.InstallGlobal(); err != nil {
+			panic(err)
+		}
 		fmt.Println("✅ Telemetry initialized successfully!")
 	}
 

@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
+	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
 )
 
 func main() {

@@ -16,11 +16,11 @@ import (
 	"net/http"
 
 	"github.com/gofiber/fiber/v2"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/telemetry"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
-	"github.com/thanhbvha/go-common/xerrors"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/telemetry"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/middleware/internal/recoveryhttp"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -49,7 +49,7 @@ func Telemetry(operationName string) fiber.Handler {
 			headers.Add(string(key), string(value))
 		})
 		parentCtx := telemetry.ExtractHTTPHeaders(c.UserContext(), headers)
-		ctx, span := telemetry.StartServerSpan(parentCtx, operationName+" "+c.Path())
+		ctx, span := telemetry.StartServerSpan(parentCtx, operationName)
 		completed := false
 		defer func() {
 			if !completed {
@@ -62,8 +62,6 @@ func Telemetry(operationName string) fiber.Handler {
 		// Add basic HTTP attributes
 		attrs := []attribute.KeyValue{
 			attribute.String("http.method", c.Method()),
-			attribute.String("http.url", c.OriginalURL()),
-			attribute.String("http.client_ip", c.IP()),
 		}
 
 		if reqID, ok := ctxkey.GetRequestID(ctx); ok {
@@ -82,6 +80,10 @@ func Telemetry(operationName string) fiber.Handler {
 		// Continue processing the request
 		err = c.Next()
 		completed = true
+		if route := c.Route().Path; route != "" {
+			span.SetName(operationName + " " + route)
+			span.SetAttributes(attribute.String("http.route", route))
+		}
 
 		// Record correct status code (handle Fiber errors that haven't been processed by the global error handler yet)
 		statusCode := c.Response().StatusCode()
@@ -97,7 +99,7 @@ func Telemetry(operationName string) fiber.Handler {
 		telemetry.SetAttributes(span, attribute.Int("http.status_code", statusCode))
 
 		if err != nil {
-			telemetry.RecordError(span, err)
+			telemetry.RecordError(span, errors.New("HTTP request failed"))
 			return err
 		}
 

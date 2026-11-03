@@ -24,7 +24,10 @@ func TestRedisLimiter_Allow(t *testing.T) {
 	defer rdb.Close()
 
 	// Setup Limiter
-	limiter := NewRedisLimiter(rdb, "test_rate")
+	limiter, err := NewRedisLimiter(rdb, "test_rate")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
 		Limit:  3,
 		Window: 1 * time.Second,
@@ -67,5 +70,45 @@ func TestRedisLimiter_Allow(t *testing.T) {
 	res, _ = limiter.Allow(ctx, key, cfg)
 	if !res.Allowed || res.Remaining != 2 {
 		t.Errorf("Expected Allowed=true after window reset, got %+v", res)
+	}
+}
+
+func TestLimiterRejectsInvalidPolicyAndUsesMilliseconds(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+	limiter, err := NewRedisLimiter(client, "ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []Config{{Limit: 0, Window: time.Second}, {Limit: 1, Window: 0}, {Limit: -1, Window: time.Second}, {Limit: 1, Window: -time.Second}, {Limit: 1, Window: time.Microsecond}} {
+		if _, err := limiter.Allow(context.Background(), "key", cfg); err == nil {
+			t.Fatalf("accepted %+v", cfg)
+		}
+	}
+	result, err := limiter.Allow(context.Background(), "key", Config{Limit: 1, Window: 1500 * time.Millisecond})
+	if err != nil || result.ResetAfter != 1500*time.Millisecond {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	mr.FastForward(1100 * time.Millisecond)
+	result, err = limiter.Allow(context.Background(), "key", Config{Limit: 1, Window: 1500 * time.Millisecond})
+	if err != nil || result.Allowed {
+		t.Fatalf("window shortened: %+v %v", result, err)
+	}
+}
+
+func TestLimiterReportsQuotaKeyWithoutExpiry(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+	limiter, err := NewRedisLimiter(client, "bad-expiry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mr.Set("bad-expiry:key", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limiter.Allow(context.Background(), "key", Config{Limit: 1, Window: time.Second}); err == nil {
+		t.Fatal("persistent quota key accepted as ordinary exhaustion")
 	}
 }

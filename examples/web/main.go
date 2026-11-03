@@ -13,23 +13,23 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/logger"
-	echolog "github.com/thanhbvha/go-common/logger/middleware/echo"
-	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
-	ginlog "github.com/thanhbvha/go-common/logger/middleware/gin"
-	nethttplog "github.com/thanhbvha/go-common/logger/middleware/nethttp"
-	"github.com/thanhbvha/go-common/telemetry"
-	"github.com/thanhbvha/go-common/utils/graceful"
-	"github.com/thanhbvha/go-common/utils/str"
-	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
-	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
-	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
-	nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
-	echoresp "github.com/thanhbvha/go-common/web/response/echo"
-	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
-	ginresp "github.com/thanhbvha/go-common/web/response/gin"
-	nethttpresp "github.com/thanhbvha/go-common/web/response/nethttp"
-	"github.com/thanhbvha/go-common/web/validator"
+	"github.com/thanhbvha/go-common/v2/logger"
+	echolog "github.com/thanhbvha/go-common/v2/logger/middleware/echo"
+	fiberlog "github.com/thanhbvha/go-common/v2/logger/middleware/fiber"
+	ginlog "github.com/thanhbvha/go-common/v2/logger/middleware/gin"
+	nethttplog "github.com/thanhbvha/go-common/v2/logger/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/telemetry"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
+	"github.com/thanhbvha/go-common/v2/utils/str"
+	echomw "github.com/thanhbvha/go-common/v2/web/middleware/echo"
+	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
+	ginmw "github.com/thanhbvha/go-common/v2/web/middleware/gin"
+	nethttpmw "github.com/thanhbvha/go-common/v2/web/middleware/nethttp"
+	echoresp "github.com/thanhbvha/go-common/v2/web/response/echo"
+	fiberresp "github.com/thanhbvha/go-common/v2/web/response/fiber"
+	ginresp "github.com/thanhbvha/go-common/v2/web/response/gin"
+	nethttpresp "github.com/thanhbvha/go-common/v2/web/response/nethttp"
+	"github.com/thanhbvha/go-common/v2/web/validator"
 )
 
 const address = ":3000"
@@ -47,11 +47,12 @@ func main() {
 	logger.SetDefault(l)
 	defer logger.Close()
 
-	tel, err := telemetry.Init(context.Background(), telemetry.Config{ServiceName: "demo-web-api", EnableTracing: false})
+	tel, err := telemetry.New(context.Background(), telemetry.Config{ServiceName: "demo-web-api", EnableTracing: false})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "telemetry initialization failed: %v\n", err)
 		os.Exit(1)
 	}
+	tel.InstallGlobal()
 	shutdown := graceful.NewShutdown(10 * time.Second)
 	shutdown.Register(func(ctx context.Context) error { return tel.Shutdown(ctx) })
 
@@ -88,7 +89,9 @@ func runNetHTTP(shutdown *graceful.Shutdown) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			return nethttpresp.Error(w, r, http.StatusBadRequest, "Invalid input data")
 		}
-		if validationErrors := validator.Struct(&req); validationErrors != nil {
+		if validationErrors, err := validator.Validate(&req); err != nil {
+			return err
+		} else if validationErrors != nil {
 			return nethttpresp.ValidationError(w, r, validationErrors)
 		}
 		created, err := createdUser(req, "net/http")
@@ -111,7 +114,9 @@ func runFiber(shutdown *graceful.Shutdown) {
 		if err := c.BodyParser(&req); err != nil {
 			return fiberresp.Error(c, fiber.StatusBadRequest, "Invalid input data")
 		}
-		if validationErrors := validator.Struct(&req); validationErrors != nil {
+		if validationErrors, err := validator.Validate(&req); err != nil {
+			return err
+		} else if validationErrors != nil {
 			return fiberresp.ValidationError(c, validationErrors)
 		}
 		created, err := createdUser(req, "fiber")
@@ -134,7 +139,10 @@ func runGin(shutdown *graceful.Shutdown) {
 			ginresp.Error(c, http.StatusBadRequest, "Invalid input data")
 			return
 		}
-		if validationErrors := validator.Struct(&req); validationErrors != nil {
+		if validationErrors, err := validator.Validate(&req); err != nil {
+			ginresp.Error(c, http.StatusInternalServerError, "Validation failed")
+			return
+		} else if validationErrors != nil {
 			ginresp.ValidationError(c, validationErrors)
 			return
 		}
@@ -160,7 +168,9 @@ func runEcho(shutdown *graceful.Shutdown) {
 		if err := c.Bind(&req); err != nil {
 			return echoresp.Error(c, http.StatusBadRequest, "Invalid input data")
 		}
-		if validationErrors := validator.Struct(&req); validationErrors != nil {
+		if validationErrors, err := validator.Validate(&req); err != nil {
+			return err
+		} else if validationErrors != nil {
 			return echoresp.ValidationError(c, validationErrors)
 		}
 		created, err := createdUser(req, "echo")

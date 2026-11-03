@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/driver/memory"
+	"github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
 )
 
 func TestEngine_PubSub(t *testing.T) {

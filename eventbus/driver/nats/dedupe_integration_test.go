@@ -11,7 +11,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func TestDedupeIsTopologyScopedAndHonorsPerReservationTTL(t *testing.T) {

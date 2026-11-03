@@ -12,12 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/health"
-	echohealth "github.com/thanhbvha/go-common/health/handler/echo"
-	fiberhealth "github.com/thanhbvha/go-common/health/handler/fiber"
-	ginhealth "github.com/thanhbvha/go-common/health/handler/gin"
-	nethttphealth "github.com/thanhbvha/go-common/health/handler/nethttp"
-	"github.com/thanhbvha/go-common/utils/graceful"
+	"github.com/thanhbvha/go-common/v2/health"
+	echohealth "github.com/thanhbvha/go-common/v2/health/handler/echo"
+	fiberhealth "github.com/thanhbvha/go-common/v2/health/handler/fiber"
+	ginhealth "github.com/thanhbvha/go-common/v2/health/handler/gin"
+	nethttphealth "github.com/thanhbvha/go-common/v2/health/handler/nethttp"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
 )
 
 const address = ":3000"

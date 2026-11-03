@@ -88,20 +88,12 @@ func TestEncryptedManagerKeyRotation(t *testing.T) {
 	}
 }
 
-func TestStaticKeyProviderLegacyKey(t *testing.T) {
-	keys := map[string][]byte{
-		"v1": []byte("signing-key-v1-that-is-at-least-32-bytes"),
-		"v2": []byte("signing-key-v2-that-is-at-least-32-bytes"),
-	}
-	provider, err := NewStaticKeyProviderWithLegacy("v2", "v1", keys)
+func TestStaticKeyProviderRejectsMissingKeyID(t *testing.T) {
+	provider, err := NewStaticKeyProvider("v1", map[string][]byte{"v1": []byte("signing-key-v1-that-is-at-least-32-bytes")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := provider.Key(t.Context(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(legacy) != string(keys["v1"]) {
-		t.Fatal("legacy token did not resolve to the configured legacy key")
+	if _, err := provider.Key(t.Context(), ""); err == nil {
+		t.Fatal("missing kid accepted")
 	}
 }

@@ -15,10 +15,10 @@ import (
 	"errors"
 	"github.com/cespare/xxhash/v2"
 	"github.com/goccy/go-json"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 const (

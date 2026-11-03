@@ -19,20 +19,20 @@ import (
 
 	gonats "github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
-	bus "github.com/thanhbvha/go-common/eventbus"
-	kafkabus "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	natsbus "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	redisbus "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
-	adapter "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
-	"github.com/thanhbvha/go-common/websocket/core"
-	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
-	"github.com/thanhbvha/go-common/websocket/limiter"
-	"github.com/thanhbvha/go-common/websocket/routing"
-	natsrouting "github.com/thanhbvha/go-common/websocket/routing/nats"
-	redisrouting "github.com/thanhbvha/go-common/websocket/routing/redis"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	kafkabus "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
+	natsbus "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
+	redisbus "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
+	adapter "github.com/thanhbvha/go-common/v2/websocket/adapter/nethttp"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
+	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
+	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
+	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
 )
 
 type options struct {
@@ -294,6 +294,9 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 	cfg.Observer = &core.AtomicObserver{}
 	if settings != nil {
 		settings.ApplyManagerLimits(&cfg)
+	}
+	if err := cfg.ValidateProduction(); err != nil {
+		return err
 	}
 	manager := core.NewManagerWithConfig(cfg)
 	defer func() {

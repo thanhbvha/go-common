@@ -31,6 +31,9 @@ func freeAddress(t *testing.T) string {
 func TestClusterExampleEndToEnd(t *testing.T) {
 	binary, err := exec.LookPath("redis-server")
 	if err != nil {
+		if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+			t.Fatal("redis-server is required", err)
+		}
 		t.Skip("redis-server not installed")
 	}
 	t.Setenv("WS_EXAMPLE_CLIENT_TOKEN", "integration-token")
@@ -41,6 +44,9 @@ func TestClusterExampleEndToEnd(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.eventbus == "kafka" && os.Getenv("WS_KAFKA_INTEGRATION") != "1" {
+				if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+					t.Fatal("WS_KAFKA_INTEGRATION=1 is required")
+				}
 				t.Skip("set WS_KAFKA_INTEGRATION=1 and WS_KAFKA_BROKERS to test Kafka")
 			}
 			if tc.eventbus == "kafka" && os.Getenv("WS_KAFKA_BROKERS") == "" {

@@ -12,12 +12,12 @@ import (
 
 	"github.com/goccy/go-json"
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/redis"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/redis"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 // Manager manages subscriptions and publication of messages across multiple instances in a cluster.

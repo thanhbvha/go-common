@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thanhbvha/go-common/foundation"
-	foundationhttp "github.com/thanhbvha/go-common/foundation/adapter/nethttp"
-	"github.com/thanhbvha/go-common/health"
-	healthhttp "github.com/thanhbvha/go-common/health/handler/nethttp"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	foundationhttp "github.com/thanhbvha/go-common/v2/foundation/adapter/nethttp"
+	"github.com/thanhbvha/go-common/v2/health"
+	healthhttp "github.com/thanhbvha/go-common/v2/health/handler/nethttp"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/telemetry"
 )
 
 func runFull(ctx context.Context) error {
@@ -38,8 +38,11 @@ func runFull(ctx context.Context) error {
 		cfg.EnableTracing = cfg.Endpoint != ""
 		cfg.EnableMetrics = cfg.Endpoint != ""
 		var initErr error
-		observability, initErr = telemetry.Init(ctx, cfg)
-		return initErr
+		observability, initErr = telemetry.New(ctx, cfg)
+		if initErr != nil {
+			return initErr
+		}
+		return observability.InstallGlobal()
 	}, func(ctx context.Context) error {
 		if observability == nil {
 			return nil

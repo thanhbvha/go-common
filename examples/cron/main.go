@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/cache"
-	"github.com/thanhbvha/go-common/cron"
+	"github.com/thanhbvha/go-common/v2/cron"
+	cronredis "github.com/thanhbvha/go-common/v2/cron/lease/redis"
 )
 
 func main() {
@@ -89,7 +89,7 @@ func RunDistributedCronExample(redisAddr, namespace string) {
 				return nil
 			}
 		},
-	}, cache.NewRedisLock(rdb))
+	}, cronredis.New(rdb))
 	if err != nil {
 		log.Fatal(err)
 	}

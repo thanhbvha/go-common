@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/thanhbvha/go-common/config"
+	"github.com/thanhbvha/go-common/v2/config"
 )
 
 type ServerConfig struct {
@@ -64,7 +64,7 @@ func RunYamlConfigExample() {
 	fmt.Println("Loaded Configuration:")
 	fmt.Printf("- App Name: %s\n", cfg.Name)
 	fmt.Printf("- Server Port: %d (Overridden by ENV APP_SERVER_PORT)\n", cfg.Server.Port)
-	fmt.Printf("- Database DSN: %s\n", cfg.Database.DSN)
+	fmt.Printf("- Database DSN configured: %t\n", cfg.Database.DSN != "")
 }
 
 // =====================================================================

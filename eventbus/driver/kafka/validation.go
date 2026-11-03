@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 var kafkaTopicName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)

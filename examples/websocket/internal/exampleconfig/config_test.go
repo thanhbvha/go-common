@@ -1,7 +1,7 @@
 package exampleconfig
 
 import (
-	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"os"
 	"path/filepath"
 	"testing"

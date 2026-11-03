@@ -15,6 +15,9 @@ import (
 )
 
 var (
+	// ErrAuthBackendUnavailable identifies a failed authentication dependency,
+	// distinct from invalid credentials. HTTP adapters map it to generic 503.
+	ErrAuthBackendUnavailable   = errors.New("auth: authentication backend unavailable")
 	ErrInvalidToken             = errors.New("auth: invalid token")
 	ErrExpiredToken             = errors.New("auth: token is expired")
 	ErrTokenRevoked             = errors.New("auth: token is revoked")
@@ -30,30 +33,26 @@ var (
 
 // Manager is the core component for standard JWT operations.
 type Manager struct {
-	signingKeys       KeyProvider
-	revocation        RevocationChecker
-	issuer            string
-	audience          []string
-	leeway            time.Duration
-	maxLifetime       time.Duration
-	clock             Clock
-	maxTokenSize      int
-	maxPayloadSize    int
-	parser            *jwt.Parser
-	allowLegacyClaims bool
-}
-
-// NewManager creates a new JWT Manager.
-// secretKey must be at least 32 characters for adequate HMAC-SHA256 security.
-//
-// Deprecated: use NewManagerWithOptions. This compatibility constructor
-// accepts legacy claims and cannot configure issuer, audience, or revocation.
-func NewManager(secretKey string) (*Manager, error) {
-	return NewManagerWithOptions(ManagerOptions{SecretKey: secretKey, AllowLegacyClaims: true})
+	signingKeys    KeyProvider
+	revocation     RevocationChecker
+	issuer         string
+	audience       []string
+	leeway         time.Duration
+	maxLifetime    time.Duration
+	clock          Clock
+	maxTokenSize   int
+	maxPayloadSize int
+	parser         *jwt.Parser
 }
 
 // NewManagerWithOptions creates a JWT manager with claim-validation policy.
 func NewManagerWithOptions(opts ManagerOptions) (*Manager, error) {
+	if opts.SigningKeys != nil && isNilValue(opts.SigningKeys) {
+		return nil, ErrInvalidKey
+	}
+	if opts.Revocation != nil && isNilValue(opts.Revocation) {
+		return nil, ErrInvalidManager
+	}
 	if opts.MaxTokenSize < 0 || opts.MaxPayloadSize < 0 {
 		return nil, ErrInvalidDuration
 	}
@@ -73,17 +72,16 @@ func NewManagerWithOptions(opts ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		signingKeys:       provider,
-		revocation:        opts.Revocation,
-		issuer:            issuer,
-		audience:          audience,
-		leeway:            leeway,
-		maxLifetime:       maxLifetime,
-		clock:             clock,
-		maxTokenSize:      normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
-		maxPayloadSize:    normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
-		parser:            jwt.NewParser(parserOptions(issuer, audience, leeway, clock)...),
-		allowLegacyClaims: opts.AllowLegacyClaims,
+		signingKeys:    provider,
+		revocation:     opts.Revocation,
+		issuer:         issuer,
+		audience:       audience,
+		leeway:         leeway,
+		maxLifetime:    maxLifetime,
+		clock:          clock,
+		maxTokenSize:   normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
+		maxPayloadSize: normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
+		parser:         jwt.NewParser(parserOptions(issuer, audience, leeway, clock)...),
 	}, nil
 }
 
@@ -176,7 +174,10 @@ func (m *Manager) ValidateTokenContext(ctx context.Context, tokenString string) 
 	if !ok || !token.Valid {
 		return nil, ErrInvalidToken
 	}
-	if err := validateUserClaims(claims.UserInfo, claims.RegisteredClaims, m.maxLifetime, m.allowLegacyClaims); err != nil {
+	if err := validatePayloadSize(claims.UserInfo, m.maxPayloadSize); err != nil {
+		return nil, err
+	}
+	if err := validateUserClaims(claims.UserInfo, claims.RegisteredClaims, m.maxLifetime); err != nil {
 		return nil, err
 	}
 	if err := checkRevocation(ctx, m.revocation, claims.ID); err != nil {
@@ -184,22 +185,4 @@ func (m *Manager) ValidateTokenContext(ctx context.Context, tokenString string) 
 	}
 
 	return claims, nil
-}
-
-// ExtractUserInfo is a convenient wrapper around ValidateToken to return just the UserInfo.
-//
-// Deprecated: use ValidateTokenContext to retain registered claims needed for
-// authorization, auditing, and revocation.
-func (m *Manager) ExtractUserInfo(tokenString string) (*UserInfo, error) {
-	return m.ExtractUserInfoContext(context.Background(), tokenString)
-}
-
-// ExtractUserInfoContext validates a token, including optional revocation,
-// using the caller's context.
-func (m *Manager) ExtractUserInfoContext(ctx context.Context, tokenString string) (*UserInfo, error) {
-	claims, err := m.ValidateTokenContext(ctx, tokenString)
-	if err != nil {
-		return nil, err
-	}
-	return &claims.UserInfo, nil
 }

@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/thanhbvha/go-common/db/orm/backend/postgres"
-	"github.com/thanhbvha/go-common/db/orm/backend/sqlite"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/postgres"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/sqlite"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"gorm.io/gorm"

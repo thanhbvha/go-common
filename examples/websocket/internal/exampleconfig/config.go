@@ -4,12 +4,10 @@ import (
 	"errors"
 	"math"
 	"os"
-	"reflect"
 	"time"
 
-	"github.com/spf13/viper"
-	commonconfig "github.com/thanhbvha/go-common/config"
-	"github.com/thanhbvha/go-common/websocket/core"
+	commonconfig "github.com/thanhbvha/go-common/v2/config"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
 )
 
 const DefaultPath = "examples/websocket/config.yaml"
@@ -122,18 +120,6 @@ func Load(path string) (Config, error) {
 	opts.EnvPrefix = "WS_EXAMPLE"
 	if err := commonconfig.Load(opts, &cfg); err != nil {
 		return Config{}, err
-	}
-	// Bind every field so environment-only keys work even when absent from YAML.
-	env := viper.New()
-	env.SetEnvPrefix("WS_EXAMPLE")
-	fields := reflect.TypeOf(cfg)
-	for index := 0; index < fields.NumField(); index++ {
-		if err := env.BindEnv(fields.Field(index).Tag.Get("mapstructure")); err != nil {
-			return Config{}, err
-		}
-	}
-	if err := env.Unmarshal(&cfg); err != nil {
-		return Config{}, errors.New("invalid example environment configuration")
 	}
 	if cfg.ExecutorPartitions <= 0 || cfg.ExecutorQueueSize <= 0 || cfg.HandlerConcurrency <= 0 || cfg.SendQueueSize <= 0 || cfg.InboundQueueSize <= 0 || cfg.MaxConnections <= 0 || cfg.MaxConnectionsPerUser <= 0 || cfg.MaxConnectionsPerAccount <= 0 || cfg.MaxConnectionsPerTenant <= 0 {
 		return Config{}, errors.New("manager queue, concurrency and connection limits must be positive")

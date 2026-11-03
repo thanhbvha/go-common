@@ -11,7 +11,7 @@ func TestEncryptedManager(t *testing.T) {
 	// AES-256 key must be exactly 32 bytes
 	aesKey := "12345678901234567890123456789012"
 
-	manager, err := NewEncryptedManager(jwtSecret, aesKey)
+	manager, err := NewEncryptedManagerWithOptions(EncryptedManagerOptions{SecretKey: jwtSecret, AESKey: aesKey})
 	if err != nil {
 		t.Fatalf("Failed to create EncryptedManager: %v", err)
 	}
@@ -48,13 +48,13 @@ func TestEncryptedManager(t *testing.T) {
 	}
 
 	// 3. Test Invalid AES Key Size Initialization
-	_, err = NewEncryptedManager(jwtSecret, "short-key")
+	_, err = NewEncryptedManagerWithOptions(EncryptedManagerOptions{SecretKey: jwtSecret, AESKey: "short-key"})
 	if err == nil {
 		t.Error("Expected error when initializing with invalid AES key size")
 	}
 
 	// 4. Test short JWT secret rejection
-	_, err = NewEncryptedManager("tooshort", aesKey)
+	_, err = NewEncryptedManagerWithOptions(EncryptedManagerOptions{SecretKey: "tooshort", AESKey: aesKey})
 	if err == nil {
 		t.Error("Expected error when initializing with short jwtSecret")
 	}
@@ -65,7 +65,7 @@ func TestEncryptedManager_WithAAD(t *testing.T) {
 	aesKey := "12345678901234567890123456789012"
 	aad := []byte("tenant-id-123")
 
-	manager, err := NewEncryptedManager(jwtSecret, aesKey)
+	manager, err := NewEncryptedManagerWithOptions(EncryptedManagerOptions{SecretKey: jwtSecret, AESKey: aesKey})
 	if err != nil {
 		t.Fatalf("Failed to create EncryptedManager: %v", err)
 	}

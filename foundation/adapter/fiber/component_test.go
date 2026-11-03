@@ -10,8 +10,8 @@ import (
 	"time"
 
 	fiberframework "github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/foundation"
-	"github.com/thanhbvha/go-common/foundation/adapter/fiber"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation/adapter/fiber"
 )
 
 func TestComponentServesAndStops(t *testing.T) {

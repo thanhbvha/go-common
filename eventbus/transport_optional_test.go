@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/thanhbvha/go-common/eventbus/driver/memory"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 var _ transport.Transport = (*benchmarkTransport)(nil)

@@ -5,8 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 // getGinRequestID safely extracts the request ID from Gin's context
@@ -29,7 +29,8 @@ func Success(c *gin.Context, data interface{}) {
 
 // Error returns a standard error response for Gin
 func Error(c *gin.Context, statusCode int, message string) {
-	c.JSON(statusCode, response.NewError(statusCode, message, getGinRequestID(c)))
+	payload := response.NewError(statusCode, message, getGinRequestID(c))
+	c.JSON(payload.Code, payload)
 }
 
 // ValidationError returns a standard validation error response for Gin

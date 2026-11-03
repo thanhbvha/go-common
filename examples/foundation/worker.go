@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/thanhbvha/go-common/foundation"
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	"github.com/thanhbvha/go-common/v2/logger"
 )
 
 func runWorker(ctx context.Context) error {

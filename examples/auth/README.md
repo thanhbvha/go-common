@@ -11,8 +11,8 @@ binary exposes four demos:
 | `rotation` | Signing and encryption rotation with `kid`/`ekid` | Two signing and two AES keys |
 
 Every HTTP demo listens on `http://localhost:3000`. The code intentionally uses
-the new options-based constructors; deprecated compatibility constructors are
-not used.
+the options-based v2 constructors; legacy constructors and no-kid tokens are
+not supported.
 
 ## Prerequisites
 
@@ -22,8 +22,8 @@ bytes. AES-256 keys must contain exactly 32 bytes.
 Bash:
 
 ```bash
-export AUTH_JWT_SECRET='replace-with-a-random-secret-at-least-32-bytes'
-export AUTH_AES_KEY='01234567890123456789012345678901'
+export AUTH_JWT_SECRET="$(openssl rand -base64 48)"
+export AUTH_AES_KEY="$(openssl rand -base64 24)"
 ```
 
 PowerShell:
@@ -104,6 +104,7 @@ token:
 ```bash
 LOGIN=$(curl -fsS -X POST http://localhost:3000/login)
 ACCESS_TOKEN=$(printf '%s' "$LOGIN" | jq -r .access_token)
+SESSION_ID=$(printf '%s' "$LOGIN" | jq -r .session_id)
 REFRESH_TOKEN=$(printf '%s' "$LOGIN" | jq -r .refresh_token)
 
 curl -fsS http://localhost:3000/api/profile \
@@ -115,7 +116,7 @@ Rotate the refresh token and issue a new access token:
 ```bash
 curl -fsS -X POST http://localhost:3000/refresh \
   -H 'Content-Type: application/json' \
-  -d "{\"user_id\":\"generic-user\",\"refresh_token\":\"$REFRESH_TOKEN\"}"
+  -d "{\"session_id\":\"$SESSION_ID\",\"refresh_token\":\"$REFRESH_TOKEN\"}"
 ```
 
 Revoke the current access token and its associated refresh token:
@@ -125,11 +126,13 @@ curl -i -X POST http://localhost:3000/logout \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-After logout, the same access token receives `401 Unauthorized`. The example
-uses one refresh token per user and demonstrates rotation, but its verify/write
-sequence is intentionally simple. Production refresh endpoints should consume
-and rotate tokens atomically, authenticate device/session identity, rate-limit
-attempts, and detect replay.
+After logout, the same access token receives `401 Unauthorized`. Each sign-in
+creates an independent session. Refresh rotation atomically consumes the old
+token; replay revokes that session and its access tokens. Concurrent refresh
+requests must be serialized. Redis failures fail closed and login/refresh have
+an explicit Redis-backed quota. A lost committed rotation response requires a
+new sign-in. Replace the fixed demo identity and role with verified credentials
+and an authoritative role lookup before using these endpoints in an application.
 
 ## Signing And Encryption Key Rotation
 
@@ -137,10 +140,10 @@ Provide two signing keys of at least 32 bytes and two AES keys of exactly 32
 bytes:
 
 ```bash
-export AUTH_SIGNING_KEY_V1='signing-key-v1-that-is-at-least-32-bytes'
-export AUTH_SIGNING_KEY_V2='signing-key-v2-that-is-at-least-32-bytes'
-export AUTH_ENCRYPTION_KEY_V1='01234567890123456789012345678901'
-export AUTH_ENCRYPTION_KEY_V2='12345678901234567890123456789012'
+export AUTH_SIGNING_KEY_V1="$(openssl rand -base64 48)"
+export AUTH_SIGNING_KEY_V2="$(openssl rand -base64 48)"
+export AUTH_ENCRYPTION_KEY_V1="$(openssl rand -base64 24)"
+export AUTH_ENCRYPTION_KEY_V2="$(openssl rand -base64 24)"
 
 go run ./examples/auth -demo=rotation
 ```

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm/backend/postgres"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/postgres"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"gorm.io/gorm"

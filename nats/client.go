@@ -2,7 +2,10 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -10,176 +13,245 @@ import (
 	gonats "github.com/nats-io/nats.go"
 )
 
-// Client wraps a *nats.Conn and a JetStreamContext with lifecycle management,
-// a periodic health-check goroutine, and an optional structured logger.
-// All exported methods are safe for concurrent use.
+// ErrClosed identifies a terminal client lifecycle. Construct a new Client to reconnect.
+var ErrClosed = errors.New("nats: client is closed")
+
+// Client owns one native connection. Native reconnects retain that connection;
+// Close/Drain are terminal and never allow a second connection lifecycle.
 type Client struct {
 	cfg       Config
+	lifecycle sync.Mutex
+	mu        sync.RWMutex
 	nc        *gonats.Conn
 	js        gonats.JetStreamContext
-	connected bool
-	mu        sync.RWMutex
+	closed    bool
 	ctx       context.Context
 	cancel    context.CancelFunc
+	done      chan struct{}
+	doneOnce  sync.Once
+	drainErr  error
 }
 
-// package-level default client, guarded by globalMu.
 var (
 	globalClient *Client
 	globalMu     sync.RWMutex
 )
 
-// New allocates a Client from cfg without establishing a connection.
-// Call Connect (or MustConnect) before performing any operations.
 func New(cfg Config) *Client {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Client{
-		cfg:    cfg,
-		ctx:    ctx,
-		cancel: cancel,
+	cfg.URLs = slices.Clone(cfg.URLs)
+	if len(cfg.URLs) == 0 {
+		cfg.URLs = []string{"nats://localhost:4222"}
 	}
+	if cfg.ConnectTimeout <= 0 {
+		cfg.ConnectTimeout = 5 * time.Second
+	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Client{cfg: cfg, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 }
-
-// MustConnect is a convenience wrapper that calls Connect and panics on error.
-// Useful for application startup where a NATS connection is required.
 func MustConnect(ctx context.Context, cfg Config) *Client {
-	cl := New(cfg)
-	if err := cl.Connect(ctx); err != nil {
+	c := New(cfg)
+	if err := c.Connect(ctx); err != nil {
 		panic(fmt.Sprintf("nats: MustConnect failed: %v", err))
 	}
-	return cl
+	return c
 }
 
-// Connect establishes the NATS connection and initialises a JetStreamContext,
-// retrying up to Config.MaxConnRetries times with linear back-off.
-// It also starts the background health-check goroutine.
-// Calling Connect on an already-connected Client is a no-op.
+// Connect bounds every startup dial, handshake, and retry by ctx. The native
+// client's own reconnect policy takes over after a successful startup.
 func (c *Client) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.connected {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	c.mu.RLock()
+	closed, initialized := c.closed, c.nc != nil
+	c.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if initialized {
 		return nil
 	}
-
+	startup, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if err := startup.Err(); err != nil {
+		return err
+	}
 	opts, err := c.buildOptions()
 	if err != nil {
 		return err
 	}
-
+	dialer := &startupDialer{ctx: startup, timeout: c.cfg.ConnectTimeout}
+	defer dialer.finish()
+	opts = append(opts, gonats.SetCustomDialer(dialer), gonats.DrainTimeout(c.cfg.DrainTimeout))
 	var nc *gonats.Conn
-	maxRetries := c.cfg.MaxConnRetries
-	if maxRetries <= 0 {
-		maxRetries = 1
-	}
-
-	var lastErr error
-	for i := 0; i < maxRetries; i++ {
-		// Join multiple URLs for cluster support
-		serverURL := strings.Join(c.cfg.URLs, ",")
-		nc, lastErr = gonats.Connect(serverURL, opts...)
-		if lastErr == nil {
+	attempts := max(c.cfg.MaxConnRetries, 1)
+	for i := 0; i < attempts; i++ {
+		if err := startup.Err(); err != nil {
+			return err
+		}
+		nc, err = gonats.Connect(strings.Join(c.cfg.URLs, ","), opts...)
+		if err == nil {
 			break
 		}
 		if c.cfg.Logger != nil {
-			// Async: retry warnings must not block the retry sleep.
-			c.cfg.Logger.WarnAsync("nats: connection attempt failed",
-				"attempt", i+1,
-				"max", maxRetries,
-				"err", lastErr.Error(),
-			)
+			c.cfg.Logger.WarnAsync("nats: connection attempt failed", "attempt", i+1, "error", err)
 		}
-		if i < maxRetries-1 {
-			time.Sleep(time.Duration(i+1) * time.Second)
+		if i < attempts-1 {
+			timer := time.NewTimer(time.Duration(i+1) * time.Second)
+			select {
+			case <-startup.Done():
+				timer.Stop()
+				return startup.Err()
+			case <-timer.C:
+			}
 		}
 	}
-	if lastErr != nil {
-		return fmt.Errorf("nats: failed to connect after %d retries: %w", maxRetries, lastErr)
-	}
-
-	js, err := nc.JetStream()
 	if err != nil {
-		_ = nc.Drain()
-		return fmt.Errorf("nats: failed to create JetStream context: %w", err)
-	}
-
-	c.nc = nc
-	c.js = js
-	c.connected = true
-
-	go c.runHealthCheck()
-
-	if c.cfg.Logger != nil {
-		// Sync: startup log must complete before Connect returns.
-		c.cfg.Logger.Info("nats: connected",
-			"url", nc.ConnectedUrl(),
-			"server_id", nc.ConnectedServerId(),
-		)
-	}
-
-	return nil
-}
-
-// Close drains and closes the NATS connection, stopping the health-check goroutine.
-// Subsequent calls return nil without doing any work.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.cancel != nil {
-		c.cancel()
-	}
-
-	if c.nc != nil {
-		// Drain flushes pending messages before closing.
-		err := c.nc.Drain()
-		c.nc = nil
-		c.js = nil
-		c.connected = false
-		if c.cfg.Logger != nil {
-			// Sync: shutdown log must complete before Close returns.
-			c.cfg.Logger.Info("nats: connection closed")
+		if startup.Err() != nil {
+			return startup.Err()
 		}
+		return fmt.Errorf("nats: connect after %d attempts: %w", attempts, err)
+	}
+	if err := startup.Err(); err != nil {
+		nc.Close()
 		return err
 	}
+	js, err := nc.JetStream()
+	if err != nil {
+		nc.Close()
+		return err
+	}
+	dialer.finish()
+	c.mu.Lock()
+	c.nc, c.js = nc, js
+	c.mu.Unlock()
 	return nil
 }
 
-// IsConnected reports whether the client has an active connection.
+// startupDialer interrupts a canceled initial handshake as well as TCP dialing.
+// finish detaches startup cancellation before native background reconnects begin.
+type startupDialer struct {
+	mu      sync.Mutex
+	ctx     context.Context
+	timeout time.Duration
+	stops   []func() bool
+}
+
+func (d *startupDialer) Dial(network, address string) (net.Conn, error) {
+	d.mu.Lock()
+	ctx := d.ctx
+	d.mu.Unlock()
+	conn, err := (&net.Dialer{Timeout: d.timeout}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	if d.ctx == ctx && ctx.Done() != nil {
+		d.stops = append(d.stops, context.AfterFunc(ctx, func() { _ = conn.Close() }))
+	}
+	d.mu.Unlock()
+	return conn, nil
+}
+func (d *startupDialer) finish() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, stop := range d.stops {
+		stop()
+	}
+	d.stops = nil
+	d.ctx = context.Background()
+}
+
+// Drain rejects new wrapper operations and waits for all native subscriptions
+// and publishers to drain. Deadline expiry force-closes the socket. Every caller
+// can bound its own wait; Close and Drain are terminal and idempotent.
+func (c *Client) Drain(ctx context.Context) error {
+	c.cancel()
+	c.lifecycle.Lock()
+	c.mu.Lock()
+	first := !c.closed
+	c.closed = true
+	nc := c.nc
+	c.mu.Unlock()
+	if first {
+		if nc == nil {
+			c.doneOnce.Do(func() { close(c.done) })
+		} else {
+			err := nc.Drain()
+			if errors.Is(err, gonats.ErrConnectionClosed) {
+				err = nil
+			}
+			c.mu.Lock()
+			c.drainErr = err
+			c.mu.Unlock()
+			if err != nil {
+				nc.Close()
+			}
+		}
+	}
+	c.lifecycle.Unlock()
+	select {
+	case <-c.done:
+		c.mu.RLock()
+		err := c.drainErr
+		c.mu.RUnlock()
+		return err
+	default:
+	}
+	select {
+	case <-c.done:
+		c.mu.RLock()
+		err := c.drainErr
+		c.mu.RUnlock()
+		return err
+	case <-ctx.Done():
+		if nc != nil {
+			nc.Close()
+		}
+		return ctx.Err()
+	}
+}
+func (c *Client) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.DrainTimeout)
+	defer cancel()
+	return c.Drain(ctx)
+}
 func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.connected
+	return !c.closed && c.nc != nil && c.nc.IsConnected()
 }
 
-// Ping checks the connection status without a round-trip to the server.
-func (c *Client) Ping(_ context.Context) error {
-	c.mu.RLock()
-	nc := c.nc
-	connected := c.connected
-	c.mu.RUnlock()
-
-	if !connected || nc == nil {
-		return gonats.ErrConnectionClosed
+// Ping performs a server round trip with the caller's deadline.
+func (c *Client) Ping(ctx context.Context) error {
+	nc, _, err := c.requireConnected()
+	if err != nil {
+		return err
 	}
-	if !nc.IsConnected() {
-		return gonats.ErrConnectionClosed
-	}
-	return nil
+	check, cancel := context.WithTimeout(ctx, c.cfg.ConnectTimeout)
+	defer cancel()
+	return nc.FlushWithContext(check)
 }
-
-// Native returns the underlying *nats.Conn for advanced operations
-// not covered by this wrapper. Use with care.
 func (c *Client) Native() *gonats.Conn {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.closed {
+		return nil
+	}
 	return c.nc
 }
 
-// JetStream returns the underlying JetStreamContext for advanced operations.
+// JetStream retains the legacy context API for native integrations such as eventbus.
 func (c *Client) JetStream() gonats.JetStreamContext {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.closed {
+		return nil
+	}
 	return c.js
 }
 
@@ -223,36 +295,20 @@ func Close() error {
 	return c.Close()
 }
 
-// ---- internal helpers ----
-
-// buildOptions converts Config into []nats.Option.
 func (c *Client) buildOptions() ([]gonats.Option, error) {
 	cfg := c.cfg
-
-	// Build URL list for server selection
-	servers := cfg.URLs
-	if len(servers) == 0 {
-		servers = []string{"nats://localhost:4222"}
-	}
-	_ = servers // used as first arg to gonats.Connect in Connect()
 
 	opts := []gonats.Option{
 		gonats.Timeout(cfg.ConnectTimeout),
 		gonats.ReconnectWait(cfg.ReconnectWait),
 		gonats.MaxReconnects(cfg.MaxReconnects),
 		gonats.DisconnectErrHandler(func(nc *gonats.Conn, err error) {
-			c.mu.Lock()
-			c.connected = false
-			c.mu.Unlock()
 			if cfg.Logger != nil && err != nil {
 				// Async: disconnect callback runs in NATS internal goroutine.
 				cfg.Logger.WarnAsync("nats: disconnected", "err", err.Error())
 			}
 		}),
 		gonats.ReconnectHandler(func(nc *gonats.Conn) {
-			c.mu.Lock()
-			c.connected = true
-			c.mu.Unlock()
 			if cfg.Logger != nil {
 				// Async: reconnect callback runs in NATS internal goroutine.
 				cfg.Logger.InfoAsync("nats: reconnected", "url", nc.ConnectedUrl())
@@ -260,8 +316,14 @@ func (c *Client) buildOptions() ([]gonats.Option, error) {
 		}),
 		gonats.ClosedHandler(func(nc *gonats.Conn) {
 			c.mu.Lock()
-			c.connected = false
+			active := c.nc == nc
+			if active {
+				c.closed = true
+			}
 			c.mu.Unlock()
+			if active {
+				c.doneOnce.Do(func() { close(c.done) })
+			}
 			if cfg.Logger != nil {
 				// Async: closed callback runs in NATS internal goroutine.
 				cfg.Logger.InfoAsync("nats: connection closed permanently")
@@ -284,49 +346,27 @@ func (c *Client) buildOptions() ([]gonats.Option, error) {
 	return opts, nil
 }
 
-// runHealthCheck checks the connection status every 30 seconds and updates
-// c.connected accordingly.
-func (c *Client) runHealthCheck() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			c.mu.RLock()
-			nc := c.nc
-			c.mu.RUnlock()
-
-			if nc == nil {
-				continue
-			}
-
-			ok := nc.IsConnected()
-			c.mu.Lock()
-			c.connected = ok
-			c.mu.Unlock()
-
-			if !ok && c.cfg.Logger != nil {
-				// Async: health-check runs in background goroutine; must not block.
-				c.cfg.Logger.ErrorAsync("nats: health check failed — connection lost")
-			}
-		}
-	}
-}
-
-// requireConnected returns the NATS connection and JetStream context,
-// or an error when the client is not connected.
 func (c *Client) requireConnected() (*gonats.Conn, gonats.JetStreamContext, error) {
 	c.mu.RLock()
-	nc := c.nc
-	js := c.js
-	ok := c.connected
-	c.mu.RUnlock()
-
-	if !ok || nc == nil {
+	defer c.mu.RUnlock()
+	if c.closed {
+		return nil, nil, ErrClosed
+	}
+	if c.nc == nil {
 		return nil, nil, gonats.ErrConnectionClosed
 	}
-	return nc, js, nil
+	return c.nc, c.js, nil
+}
+
+// A scoped legacy context propagates ctx into every admin request and iterator.
+func (c *Client) requireContext(ctx context.Context) (*gonats.Conn, gonats.JetStreamContext, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	nc, _, err := c.requireConnected()
+	if err != nil {
+		return nil, nil, err
+	}
+	js, err := nc.JetStream(gonats.Context(ctx))
+	return nc, js, err
 }

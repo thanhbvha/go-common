@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/logger"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
 )

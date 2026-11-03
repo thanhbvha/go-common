@@ -1,79 +1,60 @@
 # config
 
-A lightweight and robust configuration loader built on top of [Viper](https://github.com/spf13/viper). It simplifies loading configuration from files (YAML, JSON, `.env`) and automatically binds them to environment variables.
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
 
-### Key Features
-- **Automatic Env Binding:** Automatically overrides file configs with environment variables.
-- **Nested Key Mapping:** Maps nested struct fields (e.g., `Database.Host`) to uppercase underscore environment variables (`DATABASE_HOST`).
-- **Flexible File Loading:** Can read from any Viper-supported format or cleanly ignore missing `.env` files in production environments.
-
-### Quick Start
-
-#### 1. Define your Configuration Struct
-
-Use `mapstructure` tags (used by Viper) to define how your config is unmarshaled.
+Instance-scoped configuration loading from files and environment variables using
+Viper. Define exported fields with `mapstructure` tags. Start from
+`DefaultOptions()` to enable environment binding; the literal zero Options value
+leaves it disabled. A target must be a non-nil pointer to a struct.
 
 ```go
+import "github.com/thanhbvha/go-common/v2/config"
+
 type AppConfig struct {
-    Server struct {
-        Port int    `mapstructure:"port"`
-        Host string `mapstructure:"host"`
-    } `mapstructure:"server"`
-    
-    Database struct {
-        URL string `mapstructure:"url"`
-    } `mapstructure:"database"`
+    Server struct { Port int `mapstructure:"port"` } `mapstructure:"server"`
 }
-```
-
-#### 2. Load from a `.env` file (Convenience Method)
-
-`LoadEnv` is a helper function specifically designed to load a `.env` file if it exists, and safely ignore it if it doesn't (useful for 12-factor apps running in production).
-
-```go
-import "github.com/thanhbvha/go-common/config"
-
-var cfg AppConfig
-// Looks for ".env" in the current directory. 
-// If not found, it gracefully falls back to reading pure Environment Variables.
-err := config.LoadEnv(".env", &cfg)
-if err != nil {
-    panic(err)
-}
-
-fmt.Printf("Server running on: %s:%d", cfg.Server.Host, cfg.Server.Port)
-```
-
-With this setup, you can configure your app via a `.env` file:
-```env
-SERVER_PORT=8080
-DATABASE_URL=postgres://user:pass@localhost:5432/db
-```
-
-Or directly via standard environment variables:
-```bash
-export SERVER_PORT=8080
-export DATABASE_URL=postgres://user:pass@localhost:5432/db
-```
-
-#### 3. Advanced Loading Options
-
-If you need a prefix for your environment variables or want to load from a standard `config.yaml`, use the `Load` method with custom `Options`.
-
-```go
 opts := config.DefaultOptions()
-opts.Path = "config.yaml"
-opts.EnvPrefix = "MYAPP" // Looks for MYAPP_SERVER_PORT
-opts.IgnoreFileNotFound = false // Fail if config.yaml is missing
-
+opts.Path = "config.yaml" // Empty means environment only.
+opts.EnvPrefix = "APP"   // APP_SERVER_PORT maps to server.port.
+opts.IgnoreFileNotFound = true
+opts.Validate = func(value any) error {
+    if value.(*AppConfig).Server.Port <= 0 { return errors.New("port required") }
+    return nil
+}
 var cfg AppConfig
-err := config.Load(opts, &cfg)
+if err := config.Load(opts, &cfg); err != nil { return err }
 ```
 
-### Key Types
+Explicit empty environment values also override defaults/file values.
+Environment variables override file values, including fields missing from the
+file. Nested structs and pointer structs are bound recursively; `,squash` and
+`-` tags are respected. Recursive type definitions are rejected. `LoadEnv(path,
+&cfg)` accepts `.env` files and ignores only missing files; parse/permission errors
+remain errors. Flat dotenv keys such as `SERVER_PORT` map to nested fields.
+Decoding and validation use an independent deep copy of initialized target
+defaults, so missing fields preserve defaults and failed decoding never mutates
+caller-owned pointers, maps or slices. Excessively nested/cyclic defaults are
+rejected. Unknown environment variables are ignored; malformed known values fail.
 
-| Symbol | Description |
-|---|---|
-| `Options` | Configuration settings for the loader (`Path`, `EnvPrefix`, `AutomaticEnv`, `IgnoreFileNotFound`) |
-| `Load(opts, target)` | Core loading function. Takes custom options and unmarshals into the `target` struct pointer. |
-| `LoadEnv(path, target)` | Convenience function tailored for loading `.env` files safely. |
+## Reloading
+
+```go
+watcher, err := config.Watch(ctx, opts,
+    func() any { return &AppConfig{} },
+    func(value any) { current.Store(value.(*AppConfig)) }, // atomic.Pointer[AppConfig]
+    func(err error) { slog.Error("configuration reload rejected", "error", err) },
+)
+if err != nil { return err }
+defer watcher.Close()
+```
+
+Watch requires a file path and publishes the initial validated snapshot before
+returning. Directory notifications handle writes, atomic replacement and symlink
+updates such as Kubernetes ConfigMaps. Reloads are debounced and serialized;
+invalid snapshots retain the last published configuration. Callback panics become
+errors. `onError` is optional; pass a handler to observe rejected reloads.
+
+Treat published snapshots as immutable. Callbacks must return promptly and must
+not call Close themselves. Canceling the context stops notifications; Close is
+idempotent and waits for an already-running callback. Register Close with the
+application lifecycle before shutting down dependencies used by callbacks.

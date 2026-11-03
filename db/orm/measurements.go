@@ -62,7 +62,7 @@ func newMeasurements(provider metric.MeterProvider, pool *sql.DB) (*measurements
 	if provider == nil {
 		provider = otel.GetMeterProvider()
 	}
-	meter := provider.Meter("github.com/thanhbvha/go-common/db/orm")
+	meter := provider.Meter("github.com/thanhbvha/go-common/v2/db/orm")
 	m := &measurements{}
 	m.client = attribute.String("orm.client.id", rand.Text())
 	var err error

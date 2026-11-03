@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/thanhbvha/go-common/cache"
-	myredis "github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/v2/cache"
+	myredis "github.com/thanhbvha/go-common/v2/redis"
 )
 
 func main() {
@@ -67,7 +67,10 @@ func RunRedisCacheExample() {
 	defer redisClient.Close()
 
 	// Initialize Redis Cache, using the Native Client from the redis module
-	remoteCache := cache.NewRedisCache(redisClient.Native())
+	remoteCache, err := cache.NewRedisCache(redisClient.Native(), "example")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	remoteCache.Set(ctx, "remote_key", "Distributed Data", 10*time.Minute)
 
@@ -80,7 +83,7 @@ func RunRedisCacheExample() {
 }
 
 // =====================================================================
-// 3. DISTRIBUTED LOCK (Redlock Algorithm for Mutex across nodes)
+// 3. DISTRIBUTED LOCK (single-Redis ownership session)
 // =====================================================================
 func RunDistributedLockExample() {
 	fmt.Println("\n--- 3. Testing Distributed Lock ---")
@@ -96,14 +99,18 @@ func RunDistributedLockExample() {
 	defer redisClient.Close()
 
 	// Initialize 2 workers competing for the same lock
-	worker1 := cache.NewRedisLock(redisClient.Native())
-	worker2 := cache.NewRedisLock(redisClient.Native())
+	worker1, err := cache.NewRedisLock(redisClient.Native())
+	if err != nil {
+		log.Printf("create ownership session: %v", err)
+		return
+	}
+	worker2, err := cache.NewRedisLock(redisClient.Native())
+	if err != nil {
+		log.Printf("create ownership session: %v", err)
+		return
+	}
 
-	lockKey := "cron_job_daily_report"
-
-	// Ensure old lock is cleared for this demo
-	remoteCache := cache.NewRedisCache(redisClient.Native())
-	remoteCache.Delete(ctx, lockKey)
+	lockKey := fmt.Sprintf("example:lease:%d", time.Now().UnixNano())
 
 	// Worker 1 attempts to acquire the lock for 5 seconds
 	acquired1, err := worker1.Acquire(ctx, lockKey, 5*time.Second)

@@ -156,7 +156,7 @@ func HTTPStatusCode(err error) int {
 		return 200 // OK
 	}
 	var customErr *CustomError
-	if errors.As(err, &customErr) {
+	if errors.As(err, &customErr) && customErr != nil && customErr.HTTPStatus >= 400 && customErr.HTTPStatus <= 599 {
 		return customErr.HTTPStatus
 	}
 	return 500

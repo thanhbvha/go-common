@@ -8,7 +8,7 @@ import (
 
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/thanhbvha/go-common/db/orm"
+	"github.com/thanhbvha/go-common/v2/db/orm"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

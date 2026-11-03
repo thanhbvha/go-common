@@ -4,7 +4,7 @@ package nats
 import (
 	"context"
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 	"time"
 )
 

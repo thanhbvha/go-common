@@ -3,10 +3,10 @@ package echoauth
 
 import (
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	echoresp "github.com/thanhbvha/go-common/web/response/echo"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"github.com/thanhbvha/go-common/v2/auth/middleware/internal/authhttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	echoresp "github.com/thanhbvha/go-common/v2/web/response/echo"
 )
 
 // Middleware creates an Echo middleware to protect routes using standard JWT.
@@ -23,7 +23,8 @@ func Middleware(manager *auth.Manager) echo.MiddlewareFunc {
 			}
 			claims, err := manager.ValidateTokenContext(c.Request().Context(), tokenString)
 			if err != nil {
-				return echoresp.Error(c, 401, "Invalid or expired token")
+				status, message := authhttp.Failure(err)
+				return echoresp.Error(c, status, message)
 			}
 
 			// Store UserInfo in Echo's context
@@ -52,7 +53,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) echo.Midd
 
 			claims, err := validator.ValidateRequestToken(c.Request().Context(), tokenString)
 			if err != nil {
-				return echoresp.Error(c, 401, "Invalid or expired token")
+				status, message := authhttp.Failure(err)
+				return echoresp.Error(c, status, message)
 			}
 
 			c.Set(ctxkey.LocalUserInfo, claims)
@@ -84,7 +86,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c ech
 
 			details, err := manager.ValidateTokenDetailsContext(c.Request().Context(), tokenString, aad)
 			if err != nil {
-				return echoresp.Error(c, 401, "Invalid or expired token")
+				status, message := authhttp.Failure(err)
+				return echoresp.Error(c, status, message)
 			}
 
 			userInfo := &details.UserInfo

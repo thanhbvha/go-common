@@ -1,5 +1,7 @@
 # GraphQL
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 A bounded HTTP query/mutation wrapper around gqlgen. The core implements
 `http.Handler`; Fiber, Gin and Echo adapters preserve the same core guards.
 GraphQL authorization, backend capacity and deployment policy still belong to
@@ -143,8 +145,10 @@ protected := nethttpauth.Middleware(manager)(
 mux.Handle("/query", protected)
 ```
 
-The repository rate-limit middleware fails open on backend errors; choose an
-appropriate deployment policy for protected workloads. Configure explicit
+Rate-limit middleware requires an explicit backend-failure policy. Protected
+GraphQL endpoints should normally use `ratelimit.FailClosed`, which returns 503
+when the quota backend is unavailable; use `FailOpen` only for an intentional,
+documented availability tradeoff. Configure explicit
 CORS allowlists and CSRF protection if credentials are cookie-based. Do not
 trust request-supplied user/tenant IDs or untrusted forwarding headers.
 

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/internal/httpkit"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 // HandlerFunc is a net/http handler that can return an application error.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func targetedEventTopology(namespace, name string) transport.Topology {
@@ -119,5 +119,54 @@ func TestEventLayoutMarkerFailsClosedOutsideEnsureTopology(t *testing.T) {
 	}
 	if err := backend.EnsureTopology(ctx, topo); err == nil || !strings.Contains(err.Error(), "marker mismatch") {
 		t.Fatalf("EnsureTopology overwrote mismatched marker: %v", err)
+	}
+}
+
+func TestFreshEventProvisioningAndRestartAreIdempotent(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { client.Close() })
+	ctx := context.Background()
+	topo := targetedEventTopology("fresh-fixture", "retention")
+	topo.Options["eventbus.delay_disabled"] = true
+	topo.Options["redis.retention_interval"] = time.Hour
+	first := New(client).(*redisTransport)
+	t.Cleanup(func() { first.Close(context.Background()) })
+	sub := transport.Subscription{Topology: topo, Group: "offline"}
+	if err := first.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.EnsureSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Publish(ctx, topo, transport.Message{Payload: []byte("retain unread")}); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := client.HGet(ctx, first.metadataKey(topo), "retention_epoch").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(client).(*redisTransport)
+	t.Cleanup(func() { restarted.Close(context.Background()) })
+	for range 2 {
+		if err := restarted.EnsureTopology(ctx, topo); err != nil {
+			t.Fatal(err)
+		}
+		if err := restarted.EnsureSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := client.HGet(ctx, restarted.metadataKey(topo), "event_layout").Result(); err != nil || got != redisTargetedLayoutV1 {
+		t.Fatal("layout marker missing", got, err)
+	}
+	if got, err := client.HGet(ctx, restarted.metadataKey(topo), "retention_epoch").Result(); err != nil || got != epoch {
+		t.Fatal("reprovision changed manifest epoch", got, err)
+	}
+	report, err := restarted.RetentionReport(ctx, topo)
+	if err != nil || report.ActiveGroups != 1 || report.MissingGroups != 0 || report.UnmanagedGroups != 0 || report.ReadyEntries != 1 {
+		t.Fatalf("reprovision lost retention state: %+v, %v", report, err)
 	}
 }

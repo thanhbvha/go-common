@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 	"errors"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 	"testing"
 	"time"
 )

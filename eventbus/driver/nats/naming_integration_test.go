@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func TestEncodedTopologyNamesPreventNATSCrossDelivery(t *testing.T) {

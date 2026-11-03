@@ -5,7 +5,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/thanhbvha/go-common/examples/grpc/internal/demo"
+	"github.com/thanhbvha/go-common/v2/examples/grpc/internal/demo"
 )
 
 func main() {

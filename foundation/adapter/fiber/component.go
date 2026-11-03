@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	fiberframework "github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation"
 )
 
 type settings struct{ allowUnsafeTimeouts bool }

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	driver "github.com/go-sql-driver/mysql"
-	mysqlbackend "github.com/thanhbvha/go-common/db/orm/backend/mysql"
+	mysqlbackend "github.com/thanhbvha/go-common/v2/db/orm/backend/mysql"
 	"gorm.io/gorm/schema"
 )
 

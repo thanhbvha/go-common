@@ -8,8 +8,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	echoframework "github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {

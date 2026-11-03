@@ -7,9 +7,9 @@ import (
 	"io"
 	"time"
 
-	pb "github.com/thanhbvha/go-common/examples/grpc/proto"
-	common "github.com/thanhbvha/go-common/grpc"
-	"github.com/thanhbvha/go-common/logger"
+	pb "github.com/thanhbvha/go-common/v2/examples/grpc/proto"
+	common "github.com/thanhbvha/go-common/v2/grpc"
+	"github.com/thanhbvha/go-common/v2/logger"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

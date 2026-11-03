@@ -11,10 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
-	echoadapter "github.com/thanhbvha/go-common/graphql/adapter/echo"
-	fiberadapter "github.com/thanhbvha/go-common/graphql/adapter/fiber"
-	ginadapter "github.com/thanhbvha/go-common/graphql/adapter/gin"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	echoadapter "github.com/thanhbvha/go-common/v2/graphql/adapter/echo"
+	fiberadapter "github.com/thanhbvha/go-common/v2/graphql/adapter/fiber"
+	ginadapter "github.com/thanhbvha/go-common/v2/graphql/adapter/gin"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 	"go.opentelemetry.io/otel/trace"
 )
 

@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/thanhbvha/go-common/internal/httpkit"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 // Middleware creates a custom request logging middleware for Gin

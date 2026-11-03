@@ -5,12 +5,12 @@ import (
 	"time"
 
 	fiberframework "github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/foundation"
-	foundationfiber "github.com/thanhbvha/go-common/foundation/adapter/fiber"
-	"github.com/thanhbvha/go-common/health"
-	fiberhealth "github.com/thanhbvha/go-common/health/handler/fiber"
-	fiberlog "github.com/thanhbvha/go-common/logger/middleware/fiber"
-	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	foundationfiber "github.com/thanhbvha/go-common/v2/foundation/adapter/fiber"
+	"github.com/thanhbvha/go-common/v2/health"
+	fiberhealth "github.com/thanhbvha/go-common/v2/health/handler/fiber"
+	fiberlog "github.com/thanhbvha/go-common/v2/logger/middleware/fiber"
+	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
 )
 
 const fiberBodyLimit = 1 << 20 // 1 MiB

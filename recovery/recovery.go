@@ -200,7 +200,7 @@ func isInternalFrame(function string) bool {
 	if strings.HasPrefix(function, "runtime.") {
 		return true
 	}
-	const packagePrefix = "github.com/thanhbvha/go-common/recovery."
+	const packagePrefix = "github.com/thanhbvha/go-common/v2/recovery."
 	if !strings.HasPrefix(function, packagePrefix) {
 		return false
 	}

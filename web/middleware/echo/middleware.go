@@ -6,10 +6,10 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/telemetry"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/middleware/internal/recoveryhttp"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/telemetry"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/middleware/internal/recoveryhttp"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -38,7 +38,7 @@ func Telemetry(operationName string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			parentCtx := telemetry.ExtractHTTPHeaders(c.Request().Context(), c.Request().Header)
-			ctx, span := telemetry.StartServerSpan(parentCtx, operationName+" "+c.Request().URL.Path)
+			ctx, span := telemetry.StartServerSpan(parentCtx, operationName)
 			completed := false
 			defer func() {
 				if !completed {
@@ -50,8 +50,6 @@ func Telemetry(operationName string) echo.MiddlewareFunc {
 
 			attrs := []attribute.KeyValue{
 				attribute.String("http.method", c.Request().Method),
-				attribute.String("http.url", c.Request().URL.String()),
-				attribute.String("http.client_ip", c.RealIP()),
 			}
 
 			if reqID, ok := ctxkey.GetRequestID(ctx); ok {
@@ -68,12 +66,16 @@ func Telemetry(operationName string) echo.MiddlewareFunc {
 
 			err := next(c)
 			completed = true
+			if route := c.Path(); route != "" {
+				span.SetName(operationName + " " + route)
+				span.SetAttributes(attribute.String("http.route", route))
+			}
 
 			statusCode := c.Response().Status
 			telemetry.SetAttributes(span, attribute.Int("http.status_code", statusCode))
 
 			if err != nil {
-				telemetry.RecordError(span, err)
+				telemetry.RecordError(span, errors.New("HTTP request failed"))
 			} else if statusCode >= 500 {
 				telemetry.RecordError(span, errors.New(http.StatusText(statusCode)))
 			}

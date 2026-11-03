@@ -1,6 +1,12 @@
 package authhttp
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"strings"
+	"testing"
+)
 
 func TestBearerToken(t *testing.T) {
 	tests := []struct {
@@ -23,5 +29,18 @@ func TestBearerToken(t *testing.T) {
 				t.Fatalf("BearerToken(%q) = %q, want %q", tt.header, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFailureDistinguishesAvailability(t *testing.T) {
+	for _, err := range []error{auth.ErrInvalidToken, auth.ErrExpiredToken, auth.ErrTokenRevoked, errors.New("unclassified failure")} {
+		if status, _ := Failure(err); status != 401 {
+			t.Fatalf("credential status=%d", status)
+		}
+	}
+	cause := errors.New("private backend detail")
+	status, message := Failure(fmt.Errorf("%w: %w", auth.ErrAuthBackendUnavailable, cause))
+	if status != 503 || strings.Contains(message, "private") {
+		t.Fatalf("status=%d message=%q", status, message)
 	}
 }

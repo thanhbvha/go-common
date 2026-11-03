@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	driver "github.com/go-sql-driver/mysql"
-	"github.com/thanhbvha/go-common/db/orm/backend"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
 )
 
 func TestPrepareOwnsSafeDriverSettings(t *testing.T) {

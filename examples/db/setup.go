@@ -11,11 +11,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm"
-	"github.com/thanhbvha/go-common/db/orm/backend"
-	"github.com/thanhbvha/go-common/db/orm/backend/mysql"
-	"github.com/thanhbvha/go-common/db/orm/backend/postgres"
-	"github.com/thanhbvha/go-common/db/orm/backend/sqlite"
+	"github.com/thanhbvha/go-common/v2/db/orm"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/mysql"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/postgres"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )

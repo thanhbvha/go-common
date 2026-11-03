@@ -80,8 +80,7 @@ type ConsumeRecord struct {
 
 // RecordHandler is the callback invoked for each ConsumeRecord.
 // The offset is committed only when the handler returns nil.
-// Returning a non-nil error causes the framework to retry or route to DLQ
-// depending on the queue configuration.
+// Returning a non-nil error stops the subscription. Use eventbus for retry or DLQ.
 type RecordHandler func(ctx context.Context, record ConsumeRecord) error
 
 // TopicPartition identifies a specific partition within a topic.

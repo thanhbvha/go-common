@@ -1,51 +1,53 @@
-// Package fiberlimit provides rate limiting middleware for Fiber.
+// Package fiberlimit adapts checked rate limiting to fiber.
 package fiberlimit
 
 import (
+	"errors"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/ratelimit"
-	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
+	"github.com/thanhbvha/go-common/v2/ratelimit"
+	fiberresp "github.com/thanhbvha/go-common/v2/web/response/fiber"
 )
 
-// KeyGenerator is a function that extracts a unique key (e.g., IP, User ID) from the request.
 type KeyGenerator func(*fiber.Ctx) string
 
-// DefaultKeyGenerator uses the Client IP as the rate limit key.
-func DefaultKeyGenerator(c *fiber.Ctx) string {
-	return c.IP()
-}
-
-// Middleware creates a Rate Limit middleware for Fiber.
-func Middleware(limiter ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGenerator) fiber.Handler {
+// DefaultKeyGenerator uses the framework resolver; configure trusted proxies before serving.
+func DefaultKeyGenerator(c *fiber.Ctx) string { return c.IP() }
+func Middleware(limiter ratelimit.Limiter, cfg ratelimit.MiddlewareConfig, keyGen KeyGenerator) (fiber.Handler, error) {
+	if err := ratelimit.ValidateMiddleware(limiter, cfg); err != nil {
+		return nil, err
+	}
 	if keyGen == nil {
 		keyGen = DefaultKeyGenerator
 	}
-
 	return func(c *fiber.Ctx) error {
 		key := keyGen(c)
+		var result *ratelimit.Result
+		var err error
 		if key == "" {
-			return c.Next() // Bypass if no key could be generated
+			err = errors.New("ratelimit: empty request key")
+		} else {
+			result, err = limiter.Allow(c.UserContext(), key, cfg.Policy)
 		}
-
-		res, err := limiter.Allow(c.UserContext(), key, cfg)
-		if err != nil || res == nil {
-			// If Redis is down, we usually allow the request to pass to prevent systemic failure.
-			// Or we could block it depending on strictness. Here we log and bypass.
-			return c.Next()
+		if err != nil || result == nil {
+			if err == nil {
+				err = errors.New("ratelimit: backend returned no result")
+			}
+			if cfg.BackendFailure(c.UserContext(), err) {
+				return c.Next()
+			}
+			return fiberresp.Error(c, http.StatusServiceUnavailable, "Rate limit service unavailable")
 		}
-
-		// Set standard RateLimit headers
-		c.Set("X-RateLimit-Limit", strconv.Itoa(cfg.Limit))
-		c.Set("X-RateLimit-Remaining", strconv.Itoa(res.Remaining))
-		c.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
-
-		if !res.Allowed {
-			return fiberresp.Error(c, fiber.StatusTooManyRequests, "Too many requests, please try again later.")
+		c.Set("X-RateLimit-Limit", strconv.Itoa(cfg.Policy.Limit))
+		c.Set("X-RateLimit-Remaining", strconv.Itoa(max(0, result.Remaining)))
+		c.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(result.ResetAfter).Unix(), 10))
+		if !result.Allowed {
+			c.Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(result.ResetAfter)))
+			return fiberresp.Error(c, http.StatusTooManyRequests, "Too many requests")
 		}
-
 		return c.Next()
-	}
+	}, nil
 }

@@ -1,7 +1,7 @@
-// Package kafka provides a production-ready Apache Kafka client wrapper
+// Package kafka provides an Apache Kafka client wrapper
 // built on top of github.com/twmb/franz-go. It supports TLS encryption,
 // SASL authentication (PLAIN, SCRAM-SHA-256/512, OAuthBearer), idempotent
-// producers, consumer groups with automatic offset management, and topic
+// producers, consumer groups with explicit synchronous offset commits, and topic
 // administration.
 //
 // The API mirrors the sibling nats package: a Config struct drives all options,
@@ -206,11 +206,6 @@ type Config struct {
 	// Default: 500ms.
 	ConsumerFetchMaxWait time.Duration
 
-	// ConsumerCommitInterval is the interval between automatic offset commits.
-	// Set to 0 to disable auto-commit and manage offsets manually.
-	// Default: 1s.
-	ConsumerCommitInterval time.Duration
-
 	// --- Connection timeouts ---
 
 	// DialTimeout is the maximum time allowed to establish a TCP connection to
@@ -269,7 +264,6 @@ func DefaultConfig() Config {
 		ConsumerHeartbeat:       3 * time.Second,
 		ConsumerAutoOffsetReset: "earliest",
 		ConsumerFetchMaxWait:    500 * time.Millisecond,
-		ConsumerCommitInterval:  1 * time.Second,
 
 		DialTimeout:    5 * time.Second,
 		WriteTimeout:   10 * time.Second,

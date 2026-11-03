@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/v2/auth"
 )
 
 func TestEncryptedAADBindsSession(t *testing.T) {
@@ -32,7 +32,7 @@ func TestIssueGenericAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, issued, err := issueGenericAccessToken(context.Background(), manager, "user-1", "admin")
+	token, issued, err := issueGenericAccessToken(context.Background(), manager, "user-1", "admin", "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}

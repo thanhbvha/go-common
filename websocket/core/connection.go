@@ -12,11 +12,11 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/limiter"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 const (
@@ -84,6 +84,7 @@ type Connection struct {
 	consecutiveDrops  atomic.Int32
 	started           atomic.Bool
 	identity          Identity
+	roomOperationMu   sync.Mutex // serializes room I/O for this connection, never shard state
 	roomsMu           sync.Mutex
 	rooms             map[string]struct{}
 	quotaKeys         []quotaKey

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/registry"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 const (

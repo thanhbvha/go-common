@@ -1,5 +1,7 @@
 # WebSocket
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 Production-oriented WebSocket infrastructure for Go services. The module provides a framework-independent core, bounded event execution, user and room fan-out, structured identity and authorization, connection quotas, graceful shutdown, observability, and optional Redis Pub/Sub or NATS routing for multi-node deployments.
 
 Supported HTTP adapters:
@@ -129,7 +131,7 @@ This bounds goroutine growth even when application handlers ignore cancellation.
 ## Installation
 
 ```bash
-go get github.com/thanhbvha/go-common
+go get github.com/thanhbvha/go-common/v2
 ```
 
 ## Quick Start: Explicit Manager
@@ -149,8 +151,8 @@ import (
     "syscall"
     "time"
 
-    wshttp "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
-    "github.com/thanhbvha/go-common/websocket/core"
+    wshttp "github.com/thanhbvha/go-common/v2/websocket/adapter/nethttp"
+    "github.com/thanhbvha/go-common/v2/websocket/core"
 )
 
 type authorizer struct{}
@@ -202,6 +204,9 @@ func main() {
     config.MessagesPerSecond = 20
     config.MessageBurst = 50
 
+    if err := config.ValidateProduction(); err != nil {
+        panic(err)
+    }
     manager := core.NewManagerWithConfig(config)
 
     handler := wshttp.NewHandler(wshttp.Config{
@@ -508,9 +513,9 @@ import (
     "context"
     "time"
 
-    commonredis "github.com/thanhbvha/go-common/redis"
-    "github.com/thanhbvha/go-common/websocket/core"
-    redispubsub "github.com/thanhbvha/go-common/websocket/pubsub/redis"
+    commonredis "github.com/thanhbvha/go-common/v2/redis"
+    "github.com/thanhbvha/go-common/v2/websocket/core"
+    redispubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/redis"
 )
 
 redisConfig := commonredis.DefaultConfig()
@@ -538,9 +543,9 @@ Use `PubSubBorrowed` if another component owns `bus`.
 
 ```go
 import (
-    commonnats "github.com/thanhbvha/go-common/nats"
-    "github.com/thanhbvha/go-common/websocket/core"
-    natspubsub "github.com/thanhbvha/go-common/websocket/pubsub/nats"
+    commonnats "github.com/thanhbvha/go-common/v2/nats"
+    "github.com/thanhbvha/go-common/v2/websocket/core"
+    natspubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/nats"
 )
 
 natsConfig := commonnats.DefaultConfig()
@@ -856,3 +861,29 @@ silently changing the requested shard. Legacy pub/sub remains supported.
 The [refactor measurements](BENCHMARKS.md) record a same-machine baseline,
 corrected fan-out benchmarks and a real-broker enqueue smoke run. Manager stats
 include `eventQueueLatency` buckets covering inbound and executor wait.
+
+## Production authorization and tenant boundaries
+
+Call `ManagerConfig.ValidateProduction()` before `NewManagerWithConfig` in a
+production bootstrap. It rejects missing or typed-nil authorization policies.
+The trusted/local constructors retain permissive defaults; this validation does
+not authenticate HTTP requests or prove that an application policy is correct.
+Supply `AuthenticateIdentity` in the adapter and derive user, tenant, account,
+session, and expiry from verified credentials or trusted server middleware.
+Client query parameters and identity headers are not proof of identity. The
+quick-start header extraction requires an authenticated gateway that strips
+client-supplied headers; the runnable examples use a shared token and configurable
+identities for demonstrations, and are not an identity provider.
+
+Legacy `Shard.SendToUser`, `SendToRoom`, and pub/sub use caller-supplied string
+IDs without tenant scoping. Use globally unique application IDs or one isolated
+manager for a tenant on that path. For shared tenant-local IDs and cross-node
+fan-out, use `routing.Router` with explicit tenant IDs and an authorization
+policy validating room/event access. A room prefix is a naming convention;
+application authorization must verify membership and ownership.
+
+Room join/leave calls serialize only operations of the same connection. Registry
+network I/O runs outside shard and room-state locks, so an unavailable registry
+does not stall unrelated connections or local fan-out. Late join completion on a
+closed/unregistered connection is rejected and generation-fenced cleanup removes
+the remote membership; registry lease expiry is the fallback if cleanup fails.

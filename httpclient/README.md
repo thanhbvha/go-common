@@ -1,78 +1,60 @@
-# HTTPClient Module
+# HTTP client (v2)
 
-The `httpclient` module provides an enterprise-grade, resilient wrapper around the popular `go-resty/resty` HTTP client. It is designed specifically for Microservices architectures, protecting your services from cascading failures when calling unreliable third-party APIs.
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
 
-## Features
-
-1. **Auto-Retry with Backoff**: Automatically retries failed requests (network errors or 5xx status codes) with Exponential Backoff.
-2. **Circuit Breaker**: Integrates `sony/gobreaker`. If an external service is down and continuously returning errors, the Circuit Breaker will "trip" (Open State), failing fast for subsequent requests to prevent resource exhaustion (goroutine leaks, high memory usage) while the external service recovers.
-3. **OpenTelemetry Tracing**: Automatically injects W3C Trace Context into outbound HTTP headers (`traceparent`), allowing you to trace requests seamlessly across microservice boundaries.
-4. **Fluent API**: Retains the elegant, chainable API of `go-resty`.
-
-## Installation
-
-```bash
-go get github.com/thanhbvha/go-common/httpclient
-```
-
-## Basic Usage
+A checked Resty client with bounded retry, circuit breaking, response limits and
+OpenTelemetry transport instrumentation. Clients reuse their connection pool.
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"github.com/go-resty/resty/v2"
-	"github.com/thanhbvha/go-common/httpclient"
-)
-
-func main() {
-	// 1. Initialize Default Config
-	// This enables Retry (3 attempts) and Circuit Breaker by default.
-	cfg := httpclient.DefaultConfig("https://api.github.com")
-	
-	// 2. Create the resilient client
-	client := httpclient.NewClient(cfg)
-
-	// 3. Execute request safely
-	resp, err := client.Execute(context.Background(), func(req *resty.Request) (*resty.Response, error) {
-		return req.
-			SetHeader("Accept", "application/json").
-			Get("/users/octocat")
-	})
-
-	if err != nil {
-		// If the external service is down, the Circuit Breaker might return an OpenState error
-		// instead of blocking your thread waiting for a timeout.
-		fmt.Printf("Request failed: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Status: %d\n", resp.StatusCode())
-}
+cfg := httpclient.DefaultConfig("https://orders.example.com")
+cfg.Timeout = 5 * time.Second
+client, err := httpclient.NewClient(cfg)
+if err != nil { return err }
+defer client.CloseIdleConnections()
+resp, err := client.Execute(ctx, func(request *resty.Request) (*resty.Response, error) {
+    return request.SetHeader("Accept", "application/json").Get("/orders")
+})
+if err != nil { return err }
+// Inspect resp.StatusCode(): HTTP 4xx/5xx remain responses with nil error.
 ```
 
-## Configuration Options
+`Timeout` bounds the whole Execute operation, including retries, waits and body
+reads; shorter caller deadlines win. Zero uses 10 seconds. Buffered responses
+are capped by `MaxResponseBodyBytes` (default 4 MiB). Streaming RawBody consumers
+must close the body; their request context remains live until EOF/Close/deadline.
 
-You can deeply customize the retry and circuit breaker logic:
+Retries default to GET, HEAD and OPTIONS on transport errors or HTTP 5xx.
+`MaxRetries` counts retries after the initial attempt. Waits use bounded Resty
+backoff and honor context cancellation. Parsing/body-limit errors are not retried.
+Reader, multipart and form bodies are not retried. Open raw streaming responses
+are returned without retry so no discarded stream is leaked. Buffered byte/string/JSON
+bodies can be replayed; applications must not mutate them during execution.
 
-```go
-cfg := httpclient.Config{
-	BaseURL: "https://flaky-api.com",
-	Timeout: 5 * time.Second,
-	Retry: httpclient.RetryConfig{
-		Enabled:     true,
-		MaxRetries:  5,
-		WaitTime:    1 * time.Second,
-		MaxWaitTime: 10 * time.Second,
-	},
-	CircuitBreaker: httpclient.CBConfig{
-		Enabled:                true,
-		Name:                   "flaky-api-cb",
-		Timeout:                30 * time.Second, // Stay Open for 30s before testing Half-Open
-		ReadyToTripMinRequests: 10,               // Need at least 10 requests to evaluate
-		ReadyToTripFailRatio:   0.5,              // Trip if 50% of requests fail
-	},
-}
+For an operation whose server explicitly supports idempotency, use
+`httpclient.WithIdempotentRetry(ctx)` and a stable application idempotency key.
+This opts unsafe methods into retry, while preserving the body replay guard.
+Without this opt-in, POST/PATCH/PUT/DELETE are attempted once.
+
+Circuit breakers observe the final logical operation, count transport failures
+and 5xx, and exclude caller cancellation. An open breaker returns gobreaker
+errors before sending a request. Enabling it never changes HTTP status handling
+into a new application error contract.
+
+Inject `Transport`, `TracerProvider` and `Propagator` for custom TLS/proxies,
+per-application telemetry and tests. Transport spans finish on network failure,
+EOF, body close or request cancellation; parsed Resty error models are never
+asserted as Go errors. Spans omit URL path/query and raw error text. Default Resty retry logging is
+silent to prevent raw URL disclosure; applications own diagnostic logging and
+can explicitly configure a trusted logger through Native.
+
+`Native()` exposes trusted Resty configuration. Configure it before concurrent
+use. Replacing transports/retry hooks/limits can bypass these guarantees.
+When configured, BaseURL must be an HTTP(S) origin with an optional path prefix; credentials,
+query strings (including an empty `?`), fragments, and opaque URLs are rejected.
+For example, `https://example.com/api/v1/` plus `/orders` targets
+`https://example.com/api/v1/orders`. Constructor validation also rejects malformed
+URLs, negative timeouts/limits, invalid retry bounds and invalid breaker thresholds.
+
+```sh
+go test -race ./httpclient/...
 ```

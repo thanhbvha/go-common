@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/gofiber/websocket/v2"
-	"github.com/thanhbvha/go-common/websocket/core"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
 )
 
 // ConnAdapter wraps a fiber websocket.Conn to satisfy the generic core.Conn interface.

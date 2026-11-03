@@ -10,7 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/websocket/v2"
-	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
+	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
 )
 
 // MiddlewareManager handles standard HTTP middlewares for securing and throttling WebSocket endpoints.

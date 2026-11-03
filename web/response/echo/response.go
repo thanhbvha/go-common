@@ -5,8 +5,8 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 // getEchoRequestID safely extracts the request ID from Echo's context
@@ -29,7 +29,8 @@ func Success(c echo.Context, data interface{}) error {
 
 // Error returns a standard error response for Echo
 func Error(c echo.Context, statusCode int, message string) error {
-	return c.JSON(statusCode, response.NewError(statusCode, message, getEchoRequestID(c)))
+	payload := response.NewError(statusCode, message, getEchoRequestID(c))
+	return c.JSON(payload.Code, payload)
 }
 
 // ValidationError returns a standard validation error response for Echo

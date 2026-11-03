@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -19,7 +18,7 @@ import (
 func TestKafkaDLQAdminAndStatsIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +26,7 @@ func TestKafkaDLQAdminAndStatsIntegration(t *testing.T) {
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	topo := transport.Topology{Namespace: "p57", JobType: fmt.Sprintf("admin_%d", time.Now().UnixNano())}
 	if err := backend.EnsureTopology(ctx, topo); err != nil {
@@ -229,7 +228,7 @@ func (a *leaseLossKafkaAdmin) ListEndOffsets(ctx context.Context, topics ...stri
 
 func kafkaDLQOwnershipFixture(t *testing.T, ctx context.Context, name string) (*kafkaTransport, *kafkaTransport, transport.Topology) {
 	t.Helper()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +236,7 @@ func kafkaDLQOwnershipFixture(t *testing.T, ctx context.Context, name string) (*
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	secondCreated, err := NewWithConfig(cfg)
 	if err != nil {
@@ -277,7 +276,7 @@ func appendKafkaDLQRecords(t *testing.T, ctx context.Context, backend *kafkaTran
 func TestKafkaEventStatsUseDurableSubscriberRegistryAfterGroupDeletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +284,7 @@ func TestKafkaEventStatsUseDurableSubscriberRegistryAfterGroupDeletion(t *testin
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	topo := transport.Topology{
 		Namespace: "p57", JobType: fmt.Sprintf("event_stats_%d", time.Now().UnixNano()), Kind: transport.EventTopology,

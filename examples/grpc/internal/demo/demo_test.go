@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/examples/grpc/internal/devcert"
-	pb "github.com/thanhbvha/go-common/examples/grpc/proto"
+	"github.com/thanhbvha/go-common/v2/examples/grpc/internal/devcert"
+	pb "github.com/thanhbvha/go-common/v2/examples/grpc/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"

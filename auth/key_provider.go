@@ -29,23 +29,11 @@ type KeyProvider interface {
 // StaticKeyProvider is an in-memory, immutable keyring.
 type StaticKeyProvider struct {
 	activeID string
-	legacyID string
 	keys     map[string][]byte
 }
 
-// NewStaticKeyProvider creates an immutable keyring. When there is exactly one
-// key, validation of legacy tokens without kid falls back to that key.
+// NewStaticKeyProvider creates an immutable keyring. Tokens must carry kid.
 func NewStaticKeyProvider(activeID string, keys map[string][]byte) (*StaticKeyProvider, error) {
-	legacyID := ""
-	if len(keys) == 1 {
-		legacyID = activeID
-	}
-	return NewStaticKeyProviderWithLegacy(activeID, legacyID, keys)
-}
-
-// NewStaticKeyProviderWithLegacy configures the key used for tokens created
-// before kid was introduced. Pass an empty legacyID to reject such tokens.
-func NewStaticKeyProviderWithLegacy(activeID, legacyID string, keys map[string][]byte) (*StaticKeyProvider, error) {
 	if strings.TrimSpace(activeID) == "" {
 		return nil, ErrInvalidKeyID
 	}
@@ -62,12 +50,7 @@ func NewStaticKeyProviderWithLegacy(activeID, legacyID string, keys map[string][
 	if _, ok := copied[activeID]; !ok {
 		return nil, fmt.Errorf("%w: active key %q", ErrKeyNotFound, activeID)
 	}
-	if legacyID != "" {
-		if _, ok := copied[legacyID]; !ok {
-			return nil, fmt.Errorf("%w: legacy key %q", ErrKeyNotFound, legacyID)
-		}
-	}
-	return &StaticKeyProvider{activeID: activeID, legacyID: legacyID, keys: copied}, nil
+	return &StaticKeyProvider{activeID: activeID, keys: copied}, nil
 }
 
 func (p *StaticKeyProvider) CurrentKey(context.Context) (KeyMaterial, error) {
@@ -79,8 +62,8 @@ func (p *StaticKeyProvider) CurrentKey(context.Context) (KeyMaterial, error) {
 }
 
 func (p *StaticKeyProvider) Key(_ context.Context, keyID string) ([]byte, error) {
-	if keyID == "" {
-		keyID = p.legacyID
+	if strings.TrimSpace(keyID) == "" {
+		return nil, ErrInvalidKeyID
 	}
 	key, ok := p.keys[keyID]
 	if !ok {
@@ -94,7 +77,7 @@ func singleKeyProvider(value string) (KeyProvider, error) {
 }
 
 func currentKey(ctx context.Context, provider KeyProvider, exactSize bool) (KeyMaterial, error) {
-	if provider == nil {
+	if isNilValue(provider) {
 		return KeyMaterial{}, ErrInvalidKey
 	}
 	key, err := provider.CurrentKey(ctx)
@@ -108,7 +91,10 @@ func currentKey(ctx context.Context, provider KeyProvider, exactSize bool) (KeyM
 }
 
 func resolveKey(ctx context.Context, provider KeyProvider, keyID string, exactSize bool) ([]byte, error) {
-	if provider == nil {
+	if strings.TrimSpace(keyID) == "" {
+		return nil, ErrInvalidKeyID
+	}
+	if isNilValue(provider) {
 		return nil, ErrInvalidKey
 	}
 	key, err := provider.Key(ctx, keyID)

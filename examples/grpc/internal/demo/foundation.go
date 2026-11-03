@@ -5,10 +5,10 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/thanhbvha/go-common/foundation"
-	grpcadapter "github.com/thanhbvha/go-common/foundation/adapter/grpc"
-	common "github.com/thanhbvha/go-common/grpc"
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	grpcadapter "github.com/thanhbvha/go-common/v2/foundation/adapter/grpc"
+	common "github.com/thanhbvha/go-common/v2/grpc"
+	"github.com/thanhbvha/go-common/v2/logger"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 

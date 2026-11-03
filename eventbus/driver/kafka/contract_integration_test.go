@@ -11,10 +11,9 @@ import (
 	"testing"
 	"time"
 
-	buscontract "github.com/thanhbvha/go-common/eventbus/contracttest"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	transportcontract "github.com/thanhbvha/go-common/eventbus/transport/contracttest"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	buscontract "github.com/thanhbvha/go-common/v2/eventbus/contracttest"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	transportcontract "github.com/thanhbvha/go-common/v2/eventbus/transport/contracttest"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -23,7 +22,7 @@ import (
 var errKafkaContractResponseLoss = errors.New("synthetic response loss after durable Kafka produce")
 
 func TestKafkaTransportContract(t *testing.T) {
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	probe, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +32,7 @@ func TestKafkaTransportContract(t *testing.T) {
 	cancel()
 	_ = probe.Close(context.Background())
 	if err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
 	namespace := fmt.Sprintf("kafka_contract_%d", time.Now().UnixNano())
@@ -185,7 +184,7 @@ func kafkaAmbiguityState(t *testing.T, backend *kafkaTransport, topo transport.T
 }
 
 func TestKafkaBusContract(t *testing.T) {
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	probe, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +194,7 @@ func TestKafkaBusContract(t *testing.T) {
 	cancel()
 	_ = probe.Close(context.Background())
 	if err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
 	namespace := fmt.Sprintf("kafka_bus_contract_%d", time.Now().UnixNano())

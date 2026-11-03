@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	common "github.com/thanhbvha/go-common/grpc"
-	"github.com/thanhbvha/go-common/xerrors"
+	common "github.com/thanhbvha/go-common/v2/grpc"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	native "google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -404,5 +404,14 @@ func TestShutdownInstancesAreIsolated(t *testing.T) {
 	}
 	if _, err := otherClient.Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
 		t.Fatalf("one server shut down another instance: %v", err)
+	}
+}
+
+func TestNewServerRequiresExplicitReadiness(t *testing.T) {
+	srv := common.NewServer(common.ServerConfig{EnableHealth: true})
+	defer srv.Stop()
+	result, err := srv.Health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+	if err != nil || result.Status != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("initial health=%v err=%v", result, err)
 	}
 }

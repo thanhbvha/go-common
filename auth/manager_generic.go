@@ -2,10 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
@@ -17,14 +13,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	refreshTokenPrefix     = "auth:rt:"
-	blacklistPrefix        = "auth:bl:"
-	refreshTokenHashPrefix = "sha256:"
-)
-
 // GenericManager defines the interface for managing generic JWT tokens,
-// refresh tokens, and token revocation via a Redis backend.
+// and token revocation via a Redis backend.
 type GenericManager[T jwt.Claims] interface {
 	// GenerateToken creates a signed JWT from the provided claims.
 	GenerateToken(claims T) (string, error)
@@ -32,16 +22,6 @@ type GenericManager[T jwt.Claims] interface {
 	// VerifyToken parses and validates a signed JWT string.
 	// The provided emptyClaims instance will be populated if valid.
 	VerifyToken(tokenString string, emptyClaims T) error
-
-	// GenerateRefreshToken creates a secure random refresh token and stores only
-	// its digest in Redis with the given expiration.
-	GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error)
-
-	// VerifyRefreshToken checks if the refresh token is valid in Redis.
-	VerifyRefreshToken(ctx context.Context, userID, token string) (bool, error)
-
-	// RevokeRefreshToken deletes a refresh token from Redis.
-	RevokeRefreshToken(ctx context.Context, userID string) error
 
 	// RevokeToken adds a JWT token ID (jti) to the Redis blacklist until it expires.
 	RevokeToken(ctx context.Context, tokenID string, expiration time.Duration) error
@@ -59,61 +39,54 @@ type ContextGenericManager[T jwt.Claims] interface {
 }
 
 type genericManager[T jwt.Claims] struct {
-	signingKeys       KeyProvider
-	redisClient       redis.UniversalClient
-	revocation        RevocationChecker
-	tokenID           TokenIDExtractor[T]
-	issuer            string
-	audience          []string
-	leeway            time.Duration
-	maxLifetime       time.Duration
-	clock             Clock
-	maxTokenSize      int
-	maxPayloadSize    int
-	allowLegacyClaims bool
-	parser            *jwt.Parser
-}
-
-// GenericOptions holds configuration for creating a GenericManager.
-//
-// Deprecated: use GenericManagerOptions and NewGenericManagerWithOptions.
-type GenericOptions struct {
-	SecretKey string
-	Redis     redis.UniversalClient // Optional: Required only for refresh tokens & revocation
+	signingKeys    KeyProvider
+	redisClient    redis.UniversalClient
+	namespace      string
+	revocation     RevocationChecker
+	tokenID        TokenIDExtractor[T]
+	issuer         string
+	audience       []string
+	leeway         time.Duration
+	maxLifetime    time.Duration
+	clock          Clock
+	maxTokenSize   int
+	maxPayloadSize int
+	parser         *jwt.Parser
 }
 
 // GenericManagerOptions configures generic JWT issuance, validation, key
 // rotation, size limits, and optional revocation.
 type GenericManagerOptions[T jwt.Claims] struct {
-	SecretKey         string
-	SigningKeys       KeyProvider
-	Redis             redis.UniversalClient
-	Revocation        RevocationChecker
-	TokenID           TokenIDExtractor[T]
-	Issuer            string
-	Audience          []string
-	Leeway            time.Duration
-	MaxLifetime       time.Duration
-	Clock             Clock
-	MaxTokenSize      int
-	MaxPayloadSize    int
-	AllowLegacyClaims bool
-}
-
-// NewGenericManager creates a new GenericManager instance.
-//
-// Deprecated: use NewGenericManagerWithOptions. This compatibility constructor
-// accepts legacy claims without exp, iat, nbf, or sub and has no key rotation.
-func NewGenericManager[T jwt.Claims](opts GenericOptions) (GenericManager[T], error) {
-	return NewGenericManagerWithOptions(GenericManagerOptions[T]{
-		SecretKey:         opts.SecretKey,
-		Redis:             opts.Redis,
-		AllowLegacyClaims: true,
-	})
+	SecretKey   string
+	SigningKeys KeyProvider
+	Redis       redis.UniversalClient
+	// Namespace isolates per-token revocation keys; required when Redis is set.
+	Namespace      string
+	Revocation     RevocationChecker
+	TokenID        TokenIDExtractor[T]
+	Issuer         string
+	Audience       []string
+	Leeway         time.Duration
+	MaxLifetime    time.Duration
+	Clock          Clock
+	MaxTokenSize   int
+	MaxPayloadSize int
 }
 
 // NewGenericManagerWithOptions creates a policy-driven generic JWT manager.
 func NewGenericManagerWithOptions[T jwt.Claims](opts GenericManagerOptions[T]) (ContextGenericManager[T], error) {
+	if opts.SigningKeys != nil && isNilValue(opts.SigningKeys) {
+		return nil, ErrInvalidKey
+	}
+	if opts.Revocation != nil && isNilValue(opts.Revocation) {
+		return nil, ErrInvalidManager
+	}
+	if opts.Redis != nil && isNilValue(opts.Redis) {
+		return nil, ErrRedisNotConfigured
+	}
+	if opts.Redis != nil && (strings.TrimSpace(opts.Namespace) == "" || strings.ContainsAny(opts.Namespace, "{}")) {
+		return nil, errors.New("auth: Redis revocation namespace is required and must not contain braces")
+	}
 	if opts.MaxTokenSize < 0 || opts.MaxPayloadSize < 0 {
 		return nil, ErrInvalidDuration
 	}
@@ -139,19 +112,19 @@ func NewGenericManagerWithOptions[T jwt.Claims](opts GenericManagerOptions[T]) (
 		return nil, err
 	}
 	return &genericManager[T]{
-		signingKeys:       provider,
-		redisClient:       opts.Redis,
-		revocation:        opts.Revocation,
-		tokenID:           opts.TokenID,
-		issuer:            issuer,
-		audience:          audience,
-		leeway:            leeway,
-		maxLifetime:       maxLifetime,
-		clock:             clock,
-		maxTokenSize:      normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
-		maxPayloadSize:    normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
-		allowLegacyClaims: opts.AllowLegacyClaims,
-		parser:            jwt.NewParser(genericParserOptions(issuer, audience, leeway, clock, !opts.AllowLegacyClaims)...),
+		signingKeys:    provider,
+		redisClient:    opts.Redis,
+		namespace:      opts.Namespace,
+		revocation:     opts.Revocation,
+		tokenID:        opts.TokenID,
+		issuer:         issuer,
+		audience:       audience,
+		leeway:         leeway,
+		maxLifetime:    maxLifetime,
+		clock:          clock,
+		maxTokenSize:   normalizeSizeLimit(opts.MaxTokenSize, DefaultMaxTokenSize),
+		maxPayloadSize: normalizeSizeLimit(opts.MaxPayloadSize, DefaultMaxPayloadSize),
+		parser:         jwt.NewParser(genericParserOptions(issuer, audience, leeway, clock)...),
 	}, nil
 }
 
@@ -173,7 +146,7 @@ func (m *genericManager[T]) GenerateTokenContext(ctx context.Context, claims T) 
 	if len(payload) > m.maxPayloadSize {
 		return "", ErrPayloadTooLarge
 	}
-	if err := validateGenericClaims(claims, m.maxLifetime, m.allowLegacyClaims, m.issuer, m.audience, m.clock(), m.leeway); err != nil {
+	if err := validateGenericClaims(claims, m.maxLifetime, m.issuer, m.audience, m.clock(), m.leeway); err != nil {
 		return "", err
 	}
 	if m.tokenID != nil {
@@ -230,7 +203,10 @@ func (m *genericManager[T]) VerifyTokenContext(ctx context.Context, tokenString 
 	if !token.Valid {
 		return ErrInvalidToken
 	}
-	if err := validateGenericClaims(claims, m.maxLifetime, m.allowLegacyClaims, m.issuer, m.audience, m.clock(), m.leeway); err != nil {
+	if err := validatePayloadSize(claims, m.maxPayloadSize); err != nil {
+		return err
+	}
+	if err := validateGenericClaims(claims, m.maxLifetime, m.issuer, m.audience, m.clock(), m.leeway); err != nil {
 		return err
 	}
 	if m.tokenID != nil {
@@ -255,68 +231,6 @@ func (m *genericManager[T]) verifyRequestToken(ctx context.Context, tokenString 
 	return m.tokenID != nil, err
 }
 
-func (m *genericManager[T]) GenerateRefreshToken(ctx context.Context, userID string, duration time.Duration) (string, error) {
-	if m.redisClient == nil {
-		return "", ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(userID) == "" {
-		return "", ErrInvalidIdentity
-	}
-	if duration <= 0 {
-		return "", ErrInvalidDuration
-	}
-
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	rt := hex.EncodeToString(b)
-
-	key := refreshTokenPrefix + userID
-	if err := m.redisClient.Set(ctx, key, hashRefreshToken(rt), duration).Err(); err != nil {
-		return "", fmt.Errorf("failed to store refresh token: %w", err)
-	}
-
-	return rt, nil
-}
-
-func (m *genericManager[T]) VerifyRefreshToken(ctx context.Context, userID, token string) (bool, error) {
-	if m.redisClient == nil {
-		return false, ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(userID) == "" || token == "" {
-		return false, nil
-	}
-
-	key := refreshTokenPrefix + userID
-	storedToken, err := m.redisClient.Get(ctx, key).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return false, nil // not found
-		}
-		return false, err
-	}
-
-	want := hashRefreshToken(token)
-	if strings.HasPrefix(storedToken, refreshTokenHashPrefix) {
-		return constantTimeEqual(storedToken, want), nil
-	}
-
-	// Accept refresh tokens created before hashed-at-rest storage was introduced.
-	return constantTimeEqual(storedToken, token), nil
-}
-
-func (m *genericManager[T]) RevokeRefreshToken(ctx context.Context, userID string) error {
-	if m.redisClient == nil {
-		return ErrRedisNotConfigured
-	}
-	if strings.TrimSpace(userID) == "" {
-		return ErrInvalidIdentity
-	}
-	key := refreshTokenPrefix + userID
-	return m.redisClient.Del(ctx, key).Err()
-}
-
 func (m *genericManager[T]) RevokeToken(ctx context.Context, tokenID string, expiration time.Duration) error {
 	if m.redisClient == nil {
 		return ErrRedisNotConfigured
@@ -327,7 +241,7 @@ func (m *genericManager[T]) RevokeToken(ctx context.Context, tokenID string, exp
 	if expiration <= 0 {
 		return ErrInvalidDuration
 	}
-	key := blacklistPrefix + tokenID
+	key := m.namespace + ":revoked:" + digestRefresh(tokenID)
 	return m.redisClient.Set(ctx, key, "revoked", expiration).Err()
 }
 
@@ -339,21 +253,12 @@ func (m *genericManager[T]) IsRevoked(ctx context.Context, tokenID string) (bool
 		return false, ErrInvalidIdentity
 	}
 
-	key := blacklistPrefix + tokenID
+	key := m.namespace + ":revoked:" + digestRefresh(tokenID)
 	count, err := m.redisClient.Exists(ctx, key).Result()
 	if err != nil {
-		return false, fmt.Errorf("failed to check token revocation: %w", err)
+		return false, classifyRevocationError(err)
 	}
 	return count > 0, nil
-}
-
-func hashRefreshToken(token string) string {
-	digest := sha256.Sum256([]byte(token))
-	return refreshTokenHashPrefix + hex.EncodeToString(digest[:])
-}
-
-func constantTimeEqual(left, right string) bool {
-	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
 func isNilValue[T any](value T) bool {
@@ -369,14 +274,12 @@ func isNilValue[T any](value T) bool {
 	}
 }
 
-func genericParserOptions(issuer string, audience []string, leeway time.Duration, clock Clock, strict bool) []jwt.ParserOption {
+func genericParserOptions(issuer string, audience []string, leeway time.Duration, clock Clock) []jwt.ParserOption {
 	options := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
 		jwt.WithTimeFunc(clock),
 	}
-	if strict {
-		options = append(options, jwt.WithExpirationRequired(), jwt.WithIssuedAt())
-	}
+	options = append(options, jwt.WithExpirationRequired(), jwt.WithIssuedAt())
 	if issuer != "" {
 		options = append(options, jwt.WithIssuer(issuer))
 	}
@@ -389,7 +292,7 @@ func genericParserOptions(issuer string, audience []string, leeway time.Duration
 	return options
 }
 
-func validateGenericClaims[T jwt.Claims](claims T, maxLifetime time.Duration, allowLegacy bool, expectedIssuer string, expectedAudience []string, now time.Time, leeway time.Duration) error {
+func validateGenericClaims[T jwt.Claims](claims T, maxLifetime time.Duration, expectedIssuer string, expectedAudience []string, now time.Time, leeway time.Duration) error {
 	expiresAt, err := claims.GetExpirationTime()
 	if err != nil {
 		return fmt.Errorf("%w: invalid expiration", ErrInvalidToken)
@@ -406,7 +309,7 @@ func validateGenericClaims[T jwt.Claims](claims T, maxLifetime time.Duration, al
 	if err != nil {
 		return fmt.Errorf("%w: invalid subject", ErrInvalidToken)
 	}
-	if !allowLegacy && (expiresAt == nil || issuedAt == nil || notBefore == nil || strings.TrimSpace(subject) == "") {
+	if expiresAt == nil || issuedAt == nil || notBefore == nil || strings.TrimSpace(subject) == "" {
 		return ErrInvalidToken
 	}
 	issuer, err := claims.GetIssuer()
@@ -437,10 +340,18 @@ func validateGenericClaims[T jwt.Claims](claims T, maxLifetime time.Duration, al
 	if expiresAt != nil && notBefore != nil && expiresAt.Before(notBefore.Time) {
 		return ErrInvalidToken
 	}
-	if !allowLegacy {
-		if !expiresAt.After(now.Add(-leeway)) || issuedAt.After(now.Add(leeway)) || notBefore.After(now.Add(leeway)) {
-			return ErrInvalidToken
-		}
+	if !expiresAt.After(now.Add(-leeway)) || issuedAt.After(now.Add(leeway)) || notBefore.After(now.Add(leeway)) {
+		return ErrInvalidToken
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return ErrInvalidToken
+	}
+	var wire struct {
+		ID string `json:"jti"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil || strings.TrimSpace(wire.ID) == "" {
+		return ErrInvalidToken
 	}
 	return nil
 }

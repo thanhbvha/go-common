@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/v2/health"
 )
 
 func statusCode(r health.HealthResponse) int {

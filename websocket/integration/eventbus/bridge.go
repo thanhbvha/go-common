@@ -8,9 +8,9 @@ import (
 	"errors"
 	"fmt"
 
-	bus "github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 type Notification struct {

@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/thanhbvha/go-common/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation"
 )
 
 type settings struct{ allowUnsafeTimeouts bool }

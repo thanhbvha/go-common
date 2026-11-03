@@ -12,8 +12,8 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	"github.com/thanhbvha/go-common/eventbus/transport/contracttest"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport/contracttest"
 )
 
 func TestRedisSingleNodeContractIntegration(t *testing.T) {
@@ -26,7 +26,7 @@ func TestRedisSingleNodeContractIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := rc.Ping(ctx).Err(); err != nil {
-		t.Skipf("single-node Redis unavailable at %s: %v", addr, err)
+		redisIntegrationUnavailable(t, "single-node Redis", err)
 	}
 	runLiveRedisContract(t, rc, "single")
 }
@@ -45,7 +45,7 @@ func TestRedisClusterContractIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rc.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis Cluster unavailable at %v: %v", addrs, err)
+		redisIntegrationUnavailable(t, "Redis Cluster", err)
 	}
 	info, err := rc.ClusterInfo(ctx).Result()
 	if err != nil || !strings.Contains(info, "cluster_state:ok") {

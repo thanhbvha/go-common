@@ -1,4 +1,4 @@
-// Package cache provides a multi-level caching system and distributed lock implementation.
+// Package cache provides independent local and remote caches and distributed lock implementation.
 //
 // It defines a unified Cache interface that can be implemented by both local memory
 // engines (like Ristretto) and remote distributed engines (like Redis). It also
@@ -20,6 +20,7 @@ import (
 var (
 	// ErrNotFound is returned when a requested key does not exist in the cache.
 	ErrNotFound = errors.New("cache: key not found")
+	ErrClosed   = errors.New("cache: closed")
 )
 
 // Cache defines the standard behavior for a caching engine (either local or remote).
@@ -34,7 +35,7 @@ type Cache interface {
 	// Delete removes a key from the cache.
 	Delete(ctx context.Context, key string) error
 
-	// Clear completely flushes the cache.
+	// Clear removes this cache namespace. Concurrent writes may survive the operation.
 	Clear(ctx context.Context) error
 
 	// Close releases resources held by the cache engine (e.g. background goroutines).
@@ -44,7 +45,8 @@ type Cache interface {
 
 // DistributedLock defines the behavior for a cluster-wide mutual exclusion lock.
 type DistributedLock interface {
-	// Acquire attempts to acquire the lock with a given TTL.
+	// Acquire attempts to acquire the lock with TTL >= 1ms.
+	// Each ownership session may acquire a key successfully at most once.
 	// Returns true if successfully acquired, false otherwise.
 	Acquire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 

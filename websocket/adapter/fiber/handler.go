@@ -7,13 +7,13 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/websocket/adapter/internal/wshttp"
-	"github.com/thanhbvha/go-common/websocket/core"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/adapter/internal/wshttp"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 // Config holds the configuration options for the Fiber WebSocket adapter.

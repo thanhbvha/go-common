@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm/backend"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -69,7 +69,7 @@ func newTelemetry(provider trace.TracerProvider) *telemetry {
 	if provider == nil {
 		provider = otel.GetTracerProvider()
 	}
-	return &telemetry{tracer: provider.Tracer("github.com/thanhbvha/go-common/db/orm")}
+	return &telemetry{tracer: provider.Tracer("github.com/thanhbvha/go-common/v2/db/orm")}
 }
 func (*telemetry) Name() string { return "orm_metadata_telemetry" }
 func (p *telemetry) Initialize(db *gorm.DB) error {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/goccy/go-json"
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 var errStopKVSnapshot = errors.New("nats: stop KV snapshot")

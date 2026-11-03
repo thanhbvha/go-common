@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	driver "github.com/glebarez/sqlite"
-	"github.com/thanhbvha/go-common/db/orm/backend"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
 	"gorm.io/gorm"
 )
 

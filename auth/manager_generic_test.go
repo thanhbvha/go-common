@@ -3,14 +3,13 @@ package auth_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/v2/auth"
 )
 
 type TestClaims struct {
@@ -29,9 +28,10 @@ func setupGenericManager(t *testing.T) (auth.GenericManager[*TestClaims], *minir
 		Addr: s.Addr(),
 	})
 
-	mgr, err := auth.NewGenericManager[*TestClaims](auth.GenericOptions{
+	mgr, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*TestClaims]{
 		SecretKey: "super-secret-jwt-key-must-be-long",
 		Redis:     client,
+		Namespace: "test",
 	})
 	if err != nil {
 		t.Fatalf("failed to create generic manager: %v", err)
@@ -49,6 +49,7 @@ func TestGenericManager_GenerateAndVerifyToken(t *testing.T) {
 		Role:   "admin",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()), NotBefore: jwt.NewNumericDate(time.Now()), Subject: "user_123", ID: "jwt-1",
 		},
 	}
 
@@ -75,58 +76,11 @@ func TestGenericManager_GenerateAndVerifyToken(t *testing.T) {
 	}
 }
 
-func TestGenericManager_RefreshToken(t *testing.T) {
-	mgr, mr := setupGenericManager(t)
-	defer mr.Close()
-
-	ctx := context.Background()
-	userID := "user_456"
-
-	rt, err := mgr.GenerateRefreshToken(ctx, userID, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(rt) != 64 {
-		t.Errorf("expected refresh token to be 64 hex characters, got length %d", len(rt))
-	}
-	stored, err := mr.Get("auth:rt:" + userID)
-	if err != nil {
-		t.Fatalf("failed to inspect stored refresh token: %v", err)
-	}
-	if stored == rt || !strings.HasPrefix(stored, "sha256:") {
-		t.Fatalf("refresh token must be hashed at rest, got %q", stored)
-	}
-
-	isValid, err := mgr.VerifyRefreshToken(ctx, userID, rt)
-	if err != nil {
-		t.Fatalf("expected no error verifying refresh token, got %v", err)
-	}
-	if !isValid {
-		t.Fatal("expected refresh token to be valid")
-	}
-
-	err = mgr.RevokeRefreshToken(ctx, userID)
-	if err != nil {
-		t.Fatalf("expected no error revoking refresh token, got %v", err)
-	}
-
-	isValid, _ = mgr.VerifyRefreshToken(ctx, userID, rt)
-	if isValid {
-		t.Fatal("expected refresh token to be invalid after revocation")
-	}
-}
-
 func TestGenericManager_RejectsUnsafeInputsAndAlgorithms(t *testing.T) {
 	mgr, mr := setupGenericManager(t)
 	defer mr.Close()
 
 	ctx := context.Background()
-	if _, err := mgr.GenerateRefreshToken(ctx, "", time.Hour); !errors.Is(err, auth.ErrInvalidIdentity) {
-		t.Fatalf("empty user ID error = %v", err)
-	}
-	if _, err := mgr.GenerateRefreshToken(ctx, "user", 0); !errors.Is(err, auth.ErrInvalidDuration) {
-		t.Fatalf("zero refresh TTL error = %v", err)
-	}
 	if err := mgr.RevokeToken(ctx, "jti", 0); !errors.Is(err, auth.ErrInvalidDuration) {
 		t.Fatalf("zero revocation TTL error = %v", err)
 	}
@@ -144,7 +98,7 @@ func TestGenericManager_RejectsUnsafeInputsAndAlgorithms(t *testing.T) {
 }
 
 func TestGenericManager_RevocationRequiresRedis(t *testing.T) {
-	mgr, err := auth.NewGenericManager[*TestClaims](auth.GenericOptions{SecretKey: "super-secret-jwt-key-must-be-long"})
+	mgr, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*TestClaims]{SecretKey: "super-secret-jwt-key-must-be-long"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +162,7 @@ func TestGenericManagerWithOptionsPolicyRotationAndRevocation(t *testing.T) {
 		return auth.GenericManagerOptions[*TestClaims]{
 			SigningKeys: provider,
 			Redis:       client,
+			Namespace:   "test",
 			Issuer:      "identity-service",
 			Audience:    []string{"api"},
 			MaxLifetime: time.Hour,
@@ -275,3 +230,23 @@ func TestGenericManagerWithOptionsRejectsIncompleteRevocationConfig(t *testing.T
 type stubChecker struct{}
 
 func (stubChecker) IsRevoked(context.Context, string) (bool, error) { return false, nil }
+
+func TestRedisRevocationNamespacesAreIsolated(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+	makeManager := func(namespace string) auth.ContextGenericManager[*TestClaims] {
+		manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*TestClaims]{SecretKey: "super-secret-jwt-key-must-be-long", Redis: client, Namespace: namespace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return manager
+	}
+	a, b := makeManager("project-a"), makeManager("project-b")
+	if err := a.RevokeToken(context.Background(), "same-id", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := b.IsRevoked(context.Background(), "same-id"); err != nil || revoked {
+		t.Fatalf("namespace crossed: %v %v", revoked, err)
+	}
+}

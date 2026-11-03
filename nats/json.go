@@ -12,18 +12,18 @@ import (
 
 // JSPublishJSON marshals v to JSON then calls JSPublish.
 // Equivalent to XAdd with a JSON-encoded payload.
-func (c *Client) JSPublishJSON(subject string, v any) (*PubAck, error) {
+func (c *Client) JSPublishJSON(ctx context.Context, subject string, v any) (*PubAck, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("nats: JSPublishJSON marshal: %w", err)
 	}
-	return c.JSPublish(context.Background(), subject, data)
+	return c.JSPublish(ctx, subject, data)
 }
 
 // DecodeJSON decodes the message payload into v.
 // Call after Fetch to decode a JetStream message:
 //
-//	msgs, _ := client.Fetch(ps, 10)
+//	msgs, _ := client.Fetch(ctx, ps, 10)
 //	var evt MyEvent
 //	msgs[0].DecodeJSON(&evt)
 func (m *Msg) DecodeJSON(v any) error {
@@ -49,17 +49,17 @@ func (c *Client) PublishJSON(subject string, v any) error {
 
 // KVPutJSON marshals v to JSON and calls KVPut.
 // Returns the new revision number.
-func (c *Client) KVPutJSON(bucket, key string, v any) (uint64, error) {
+func (c *Client) KVPutJSON(ctx context.Context, bucket, key string, v any) (uint64, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return 0, fmt.Errorf("nats: KVPutJSON marshal: %w", err)
 	}
-	return c.KVPut(context.Background(), bucket, key, data)
+	return c.KVPut(ctx, bucket, key, data)
 }
 
 // KVGetJSON calls KVGet and unmarshals the value into v.
-func (c *Client) KVGetJSON(bucket, key string, v any) error {
-	entry, err := c.KVGet(context.Background(), bucket, key)
+func (c *Client) KVGetJSON(ctx context.Context, bucket, key string, v any) error {
+	entry, err := c.KVGet(ctx, bucket, key)
 	if err != nil {
 		return err
 	}

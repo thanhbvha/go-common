@@ -1,5 +1,7 @@
 # Foundation
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 `foundation` supervises application startup, long-running components, readiness,
 and graceful shutdown. Dependencies are wired explicitly; the core does not load
 configuration or initialize databases, brokers, or telemetry.
@@ -17,9 +19,9 @@ import (
     "net/http"
     "time"
 
-    "github.com/thanhbvha/go-common/foundation"
-    foundationhttp "github.com/thanhbvha/go-common/foundation/adapter/nethttp"
-    healthhttp "github.com/thanhbvha/go-common/health/handler/nethttp"
+    "github.com/thanhbvha/go-common/v2/foundation"
+    foundationhttp "github.com/thanhbvha/go-common/v2/foundation/adapter/nethttp"
+    healthhttp "github.com/thanhbvha/go-common/v2/health/handler/nethttp"
 )
 
 func run(ctx context.Context) error {
@@ -199,9 +201,18 @@ It reports ready only in `StateRunning`; dependency checks may still report down
 Readiness is down during initialization, draining, and terminal states.
 
 ```go
-app.Health().AddReadinessCheck("postgres", health.GORMChecker(db))
-app.Health().AddReadinessCheck("redis", health.RedisChecker(redisClient))
+import (
+    redischecker "github.com/thanhbvha/go-common/v2/health/checker/redis"
+    sqlchecker "github.com/thanhbvha/go-common/v2/health/checker/sql"
+)
+
+app.Health().AddReadinessCheck("postgres", sqlchecker.New(sqlPool))
+app.Health().AddReadinessCheck("redis", redischecker.New(redisClient))
 ```
+
+`sqlPool` implements `PingContext(context.Context) error` (for GORM, obtain the
+underlying `*sql.DB` first). Integration checkers remain outside the Foundation
+and health cores so applications import only the adapters they use.
 
 Reserve `foundation.lifecycle` for the app. Health error details are disabled by
 default; expose details only on protected diagnostic endpoints.
@@ -237,7 +248,7 @@ After termination, callers receive the same retained result as `Run`: nil for
 
 ### gRPC wrapper shutdown
 
-For `github.com/thanhbvha/go-common/grpc.Server`, use the adapter's
+For `github.com/thanhbvha/go-common/v2/grpc.Server`, use the adapter's
 `ComponentWithShutdown(name, address, srv.Server, srv.Shutdown)`. It binds the
 listener in Start, serves in Run and invokes the supplied callback in Stop. This
 preserves wrapper health transitions, configured drain deadlines and forced-stop

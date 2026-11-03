@@ -48,3 +48,17 @@ func TestManagerRevocationPolicy(t *testing.T) {
 		t.Fatal("expected fail-closed revocation error")
 	}
 }
+
+func TestRevocationBackendErrorClassification(t *testing.T) {
+	cause := errors.New("redis unavailable")
+	checker := &stubRevocationChecker{err: cause}
+	if err := checkRevocation(context.Background(), checker, "jti"); !errors.Is(err, ErrAuthBackendUnavailable) || !errors.Is(err, cause) {
+		t.Fatalf("classification lost: %v", err)
+	}
+	for _, credentialError := range []error{ErrInvalidToken, ErrExpiredToken, ErrTokenRevoked, ErrInvalidRefreshToken} {
+		checker.err = credentialError
+		if err := checkRevocation(context.Background(), checker, "jti"); errors.Is(err, ErrAuthBackendUnavailable) || !errors.Is(err, credentialError) {
+			t.Fatalf("credential error reclassified: %v", err)
+		}
+	}
+}

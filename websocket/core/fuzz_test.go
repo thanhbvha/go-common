@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/thanhbvha/go-common/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
 )
 
 func FuzzIncomingEnvelope(f *testing.F) {

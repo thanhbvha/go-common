@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -129,6 +129,8 @@ func TestTelemetryCreatesServerSpan(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	req := requestWithID("req-span")
+	req.URL.Path = "/users/private-id"
+	req.URL.RawQuery = "token=private-token"
 	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	recorder := httptest.NewRecorder()
 
@@ -139,6 +141,14 @@ func TestTelemetryCreatesServerSpan(t *testing.T) {
 		t.Fatalf("ended spans = %d", len(spans))
 	}
 	span := spans[0]
+	if strings.Contains(span.Name(), "private") {
+		t.Fatalf("unsafe span name %q", span.Name())
+	}
+	for _, attr := range span.Attributes() {
+		if strings.Contains(attr.Value.Emit(), "private") {
+			t.Fatalf("unsafe attribute %v", attr)
+		}
+	}
 	if span.SpanKind() != trace.SpanKindServer || !downstream.IsValid() {
 		t.Fatalf("span kind = %v, downstream valid = %v", span.SpanKind(), downstream.IsValid())
 	}

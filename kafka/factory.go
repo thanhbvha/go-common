@@ -78,7 +78,7 @@ func (f *NativeClientFactory) NewProducer(opts ...kgo.Opt) (*kgo.Client, error) 
 }
 
 // NewConsumer creates a consumer inheriting connection, security, session,
-// heartbeat, offset-reset, fetch, and commit configuration. Role-specific
+// heartbeat, offset-reset, fetch configuration with automatic commits disabled. Role-specific
 // options are appended last so callers can supply the topology group/topics
 // and a narrower fetch bound.
 func (f *NativeClientFactory) NewConsumer(opts ...kgo.Opt) (*kgo.Client, error) {
@@ -202,11 +202,7 @@ func nativeProducerOptions(cfg Config) ([]kgo.Opt, error) {
 }
 
 func nativeConsumerOptions(cfg Config) []kgo.Opt {
-	opts := nativeConsumerBaseOptions(cfg)
-	if cfg.ConsumerCommitInterval > 0 {
-		return append(opts, kgo.AutoCommitInterval(cfg.ConsumerCommitInterval), kgo.AutoCommitMarks())
-	}
-	return append(opts, kgo.DisableAutoCommit())
+	return nativeManualConsumerOptions(cfg)
 }
 
 func nativeManualConsumerOptions(cfg Config) []kgo.Opt {

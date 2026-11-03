@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
 )
 
 func TestEventHandlerContinuesAfterPanic(t *testing.T) {

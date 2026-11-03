@@ -11,12 +11,12 @@ import (
 
 	"github.com/goccy/go-json"
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/nats"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/nats"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 // Manager manages subscriptions and publication of messages across multiple instances in a cluster using NATS.

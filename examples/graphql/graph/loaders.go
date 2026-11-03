@@ -2,10 +2,10 @@ package graph
 
 import (
 	"context"
-	"github.com/thanhbvha/go-common/examples/graphql/graph/model"
-	"github.com/thanhbvha/go-common/examples/graphql/service"
-	common "github.com/thanhbvha/go-common/graphql"
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/examples/graphql/graph/model"
+	"github.com/thanhbvha/go-common/v2/examples/graphql/service"
+	common "github.com/thanhbvha/go-common/v2/graphql"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 type loadersKey struct{}

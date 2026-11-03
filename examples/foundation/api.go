@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thanhbvha/go-common/foundation"
-	foundationhttp "github.com/thanhbvha/go-common/foundation/adapter/nethttp"
-	healthhttp "github.com/thanhbvha/go-common/health/handler/nethttp"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	foundationhttp "github.com/thanhbvha/go-common/v2/foundation/adapter/nethttp"
+	healthhttp "github.com/thanhbvha/go-common/v2/health/handler/nethttp"
 )
 
 func runAPI(ctx context.Context) error {

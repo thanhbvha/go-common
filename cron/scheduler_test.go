@@ -17,18 +17,26 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/robfig/cron/v3"
-	"github.com/thanhbvha/go-common/cache"
+	"github.com/thanhbvha/go-common/v2/cache"
 )
+
+type testLeaseProvider struct{ lock *cache.RedisLock }
+
+func (p *testLeaseProvider) NewSession() (Lease, error) { return p.lock.NewSession() }
 
 func quietOptions() []Option {
 	return []Option{WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))}
 }
-func redisFixture(t *testing.T) (*miniredis.Miniredis, *cache.RedisLock) {
+func redisFixture(t *testing.T) (*miniredis.Miniredis, *testLeaseProvider) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr(), ContextTimeoutEnabled: true, MaxRetries: -1})
 	t.Cleanup(func() { _ = client.Close() })
-	return mr, cache.NewRedisLock(client)
+	lock, err := cache.NewRedisLock(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mr, &testLeaseProvider{lock}
 }
 func wait(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
@@ -47,7 +55,7 @@ func invocation(s *Scheduler, at time.Time) <-chan struct{} {
 func config(run func(context.Context) error) DistributedConfig {
 	return DistributedConfig{JobName: "report", Schedule: "* * * * * *", LockTTL: time.Second, Run: run}
 }
-func register(t *testing.T, s *Scheduler, cfg DistributedConfig, lock *cache.RedisLock) {
+func register(t *testing.T, s *Scheduler, cfg DistributedConfig, lock LeaseProvider) {
 	t.Helper()
 	if _, err := s.AddDistributedJob(cfg, lock); err != nil {
 		t.Fatal(err)
@@ -181,7 +189,7 @@ func TestValidation(t *testing.T) {
 	if _, err := s.AddDistributedJob(valid, nil); err == nil {
 		t.Fatal("accepted nil lock")
 	}
-	if _, err := s.AddDistributedJob(valid, &cache.RedisLock{}); err == nil {
+	if _, err := s.AddDistributedJob(valid, &testLeaseProvider{&cache.RedisLock{}}); err == nil {
 		t.Fatal("accepted nil client")
 	}
 	register(t, s, valid, lock)

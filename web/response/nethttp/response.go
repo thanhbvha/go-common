@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 func requestID(r *http.Request) string {
@@ -28,7 +28,8 @@ func Success(w http.ResponseWriter, r *http.Request, data any) error {
 
 // Error writes a standard error response with the supplied HTTP status.
 func Error(w http.ResponseWriter, r *http.Request, statusCode int, message string) error {
-	return writeJSON(w, statusCode, response.NewError(statusCode, message, requestID(r)))
+	payload := response.NewError(statusCode, message, requestID(r))
+	return writeJSON(w, payload.Code, payload)
 }
 
 // ValidationError writes a standard HTTP 400 validation response.

@@ -1,103 +1,147 @@
-// Package telemetry provides production-ready OpenTelemetry integration.
-//
-// It simplifies the configuration and initialization of OTLP (OpenTelemetry Protocol)
-// exporters for both distributed tracing and metrics gathering. It provides helper
-// functions to start spans, record metrics, and attach attributes.
-//
-// Basic usage:
-//
-//	tel, err := telemetry.Init(ctx, telemetry.Config{
-//		ServiceName:   "my-service",
-//		EnableTracing: true,
-//		EnableMetrics: true,
-//		Endpoint:      "localhost:4317",
-//	})
-//	defer tel.Shutdown(ctx)
-//
-//	ctx, span := telemetry.StartSpan(ctx, "HandleRequest")
-//	defer span.End()
+// Package telemetry builds explicitly owned OpenTelemetry providers. Global
+// installation is an opt-in bootstrap operation after successful construction.
 package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
-	"time"
-
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	apimetric "go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	apitrace "go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc/credentials"
+	"maps"
+	"sync"
+	"time"
 )
 
-// Telemetry holds the shutdown functions.
 type Telemetry struct {
+	tracer        apitrace.TracerProvider
+	meter         apimetric.MeterProvider
+	propagator    propagation.TextMapPropagator
 	shutdownFuncs []func(context.Context) error
+	mu            sync.Mutex
+	stopping      bool
+	done          chan struct{}
+	shutdownErr   error
 }
+type traceFactory func(context.Context, *resource.Resource, Config) (*trace.TracerProvider, error)
+type meterFactory func(context.Context, *resource.Resource, Config) (*metric.MeterProvider, error)
 
-// Init initializes OpenTelemetry based on the provided configuration.
-func Init(ctx context.Context, cfg Config) (*Telemetry, error) {
-	t := &Telemetry{}
-
-	// Create resource
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(cfg.ServiceName),
-			semconv.ServiceVersionKey.String(cfg.ServiceVersion),
-			semconv.DeploymentEnvironmentKey.String(cfg.Environment),
-		),
-	)
+func New(ctx context.Context, cfg Config) (*Telemetry, error) {
+	return newTelemetry(ctx, cfg, initTracerProvider, initMeterProvider)
+}
+func newTelemetry(ctx context.Context, cfg Config, tf traceFactory, mf meterFactory) (*Telemetry, error) {
+	cfg.Headers = maps.Clone(cfg.Headers)
+	if cfg.TLSConfig != nil {
+		cfg.TLSConfig = cfg.TLSConfig.Clone()
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	res, err := resource.New(ctx, resource.WithAttributes(semconv.ServiceNameKey.String(cfg.ServiceName), semconv.ServiceVersionKey.String(cfg.ServiceVersion), semconv.DeploymentEnvironmentKey.String(cfg.Environment)))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, fmt.Errorf("telemetry resource: %w", err)
 	}
-
-	// Set global propagator to tracecontext (the default is no-op).
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-
+	propagators := []propagation.TextMapPropagator{propagation.TraceContext{}}
+	if cfg.EnableBaggage {
+		propagators = append(propagators, propagation.Baggage{})
+	}
+	t := &Telemetry{tracer: tracenoop.NewTracerProvider(), meter: metricnoop.NewMeterProvider(), propagator: propagation.NewCompositeTextMapPropagator(propagators...), done: make(chan struct{})}
+	rollback := func(cause error) (*Telemetry, error) {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return nil, errors.Join(cause, t.Shutdown(cleanup))
+	}
 	if cfg.EnableTracing {
-		traceProvider, err := initTracerProvider(ctx, res, cfg)
+		p, err := tf(ctx, res, cfg)
 		if err != nil {
-			return nil, err
+			return rollback(err)
 		}
-		otel.SetTracerProvider(traceProvider)
-		t.shutdownFuncs = append(t.shutdownFuncs, traceProvider.Shutdown)
-		log.Printf("[Telemetry] Tracing enabled for service '%s', exporting to %s", cfg.ServiceName, cfg.Endpoint)
+		t.tracer = p
+		t.shutdownFuncs = append(t.shutdownFuncs, p.Shutdown)
 	}
-
 	if cfg.EnableMetrics {
-		meterProvider, err := initMeterProvider(ctx, res, cfg)
+		p, err := mf(ctx, res, cfg)
 		if err != nil {
-			return nil, err
+			return rollback(err)
 		}
-		otel.SetMeterProvider(meterProvider)
-		t.shutdownFuncs = append(t.shutdownFuncs, meterProvider.Shutdown)
-		log.Printf("[Telemetry] Metrics enabled for service '%s', exporting to %s", cfg.ServiceName, cfg.Endpoint)
+		t.meter = p
+		t.shutdownFuncs = append(t.shutdownFuncs, p.Shutdown)
 	}
-
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
 	return t, nil
 }
+func (t *Telemetry) TracerProvider() apitrace.TracerProvider   { return t.tracer }
+func (t *Telemetry) MeterProvider() apimetric.MeterProvider    { return t.meter }
+func (t *Telemetry) Propagator() propagation.TextMapPropagator { return t.propagator }
 
-// Shutdown gracefully shuts down all OTel providers.
-func (t *Telemetry) Shutdown(ctx context.Context) error {
-	var errs []error
-	for _, fn := range t.shutdownFuncs {
-		if err := fn(ctx); err != nil {
-			errs = append(errs, err)
-		}
+// InstallGlobal is intended for a single process bootstrap owner. It must run
+// before concurrent serving; shutdown does not restore or replace globals.
+func (t *Telemetry) InstallGlobal() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopping {
+		return errors.New("telemetry: runtime closed")
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("failed to shutdown telemetry: %v", errs)
-	}
+	otel.SetTracerProvider(t.tracer)
+	otel.SetMeterProvider(t.meter)
+	otel.SetTextMapPropagator(t.propagator)
 	return nil
 }
 
+// Shutdown bounds the caller's wait; cleanup continues once, in reverse order.
+func (t *Telemetry) Shutdown(ctx context.Context) error {
+	t.mu.Lock()
+	if !t.stopping {
+		t.stopping = true
+		go func() {
+			var errs []error
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			for i := len(t.shutdownFuncs) - 1; i >= 0; i-- {
+				errs = append(errs, t.shutdownFuncs[i](cleanup))
+			}
+			t.shutdownErr = errors.Join(errs...)
+			close(t.done)
+		}()
+	}
+	t.mu.Unlock()
+	select {
+	case <-t.done:
+		return t.shutdownErr
+	default:
+	}
+	select {
+	case <-t.done:
+		return t.shutdownErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func initTracerProvider(ctx context.Context, res *resource.Resource, cfg Config) (*trace.TracerProvider, error) {
 	opts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.TLSConfig != nil {
+		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(cfg.TLSConfig.Clone())))
+	}
+	if len(cfg.Headers) > 0 {
+		opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
 	}
 	if cfg.Insecure {
 		opts = append(opts, otlptracegrpc.WithInsecure())
@@ -109,15 +153,8 @@ func initTracerProvider(ctx context.Context, res *resource.Resource, cfg Config)
 	}
 
 	samplingRate := cfg.SamplingRate
-	if samplingRate <= 0 || samplingRate >= 1.0 {
-		samplingRate = 1.0
-	}
-	var sampler trace.Sampler
-	if samplingRate == 1.0 {
-		sampler = trace.AlwaysSample()
-	} else {
-		sampler = trace.ParentBased(trace.TraceIDRatioBased(samplingRate))
-	}
+
+	sampler := trace.ParentBased(trace.TraceIDRatioBased(samplingRate))
 
 	bsp := trace.NewBatchSpanProcessor(traceExporter)
 	traceProvider := trace.NewTracerProvider(
@@ -132,6 +169,12 @@ func initTracerProvider(ctx context.Context, res *resource.Resource, cfg Config)
 func initMeterProvider(ctx context.Context, res *resource.Resource, cfg Config) (*metric.MeterProvider, error) {
 	opts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.TLSConfig != nil {
+		opts = append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(cfg.TLSConfig.Clone())))
+	}
+	if len(cfg.Headers) > 0 {
+		opts = append(opts, otlpmetricgrpc.WithHeaders(cfg.Headers))
 	}
 	if cfg.Insecure {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())

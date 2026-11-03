@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/labstack/echo/v4"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/web/response"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/web/response"
 )
 
 // ErrorHandler is a custom global error handler for Echo

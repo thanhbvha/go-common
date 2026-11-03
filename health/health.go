@@ -9,8 +9,8 @@
 //
 //	h := health.New().
 //	    WithVersion("v1.2.0").
-//	    AddReadinessCheck("database", health.GORMChecker(db)).
-//	    AddReadinessCheck("redis", health.RedisChecker(redisClient))
+//	    AddReadinessCheck("database", sqlchecker.New(db)).
+//	    AddReadinessCheck("redis", redischecker.New(redisClient))
 //
 //	mux.Handle("/health", nethttp.Handler(h))
 //	mux.Handle("/ready", nethttp.ReadyHandler(h))
@@ -20,13 +20,16 @@ package health
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ErrCheckPanic is reported internally when a health checker panics. The panic
 // value and stack are intentionally not exposed through probe responses.
 var ErrCheckPanic = errors.New("health: check panicked")
+var ErrCheckBusy = errors.New("health: previous check still running")
 
 // CheckFunc is a function that performs a single dependency health check.
 // Return nil if healthy, non-nil error if unhealthy.
@@ -55,16 +58,17 @@ type HealthResponse struct {
 }
 
 type checkEntry struct {
-	name string
-	fn   CheckFunc
+	name    string
+	fn      CheckFunc
+	running atomic.Bool
 }
 
 // Checker manages a set of named health check functions.
 // It is safe for concurrent use.
 type Checker struct {
 	mu              sync.RWMutex
-	readinessChecks []checkEntry
-	livenessChecks  []checkEntry
+	readinessChecks []*checkEntry
+	livenessChecks  []*checkEntry
 	version         string
 	timeout         time.Duration
 	includeErrors   bool
@@ -87,6 +91,9 @@ func (c *Checker) WithVersion(v string) *Checker {
 func (c *Checker) WithTimeout(d time.Duration) *Checker {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if d <= 0 {
+		panic("health: timeout must be positive")
+	}
 	c.timeout = d
 	return c
 }
@@ -106,7 +113,8 @@ func (c *Checker) WithErrorDetails(enabled bool) *Checker {
 func (c *Checker) AddReadinessCheck(name string, fn CheckFunc) *Checker {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.readinessChecks = append(c.readinessChecks, checkEntry{name, fn})
+	c.validateCheck(name, fn)
+	c.readinessChecks = append(c.readinessChecks, &checkEntry{name: name, fn: fn})
 	return c
 }
 
@@ -115,14 +123,15 @@ func (c *Checker) AddReadinessCheck(name string, fn CheckFunc) *Checker {
 func (c *Checker) AddLivenessCheck(name string, fn CheckFunc) *Checker {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.livenessChecks = append(c.livenessChecks, checkEntry{name, fn})
+	c.validateCheck(name, fn)
+	c.livenessChecks = append(c.livenessChecks, &checkEntry{name: name, fn: fn})
 	return c
 }
 
 // CheckReadiness runs all readiness checks concurrently.
 func (c *Checker) CheckReadiness(ctx context.Context) HealthResponse {
 	c.mu.RLock()
-	checks := make([]checkEntry, len(c.readinessChecks))
+	checks := make([]*checkEntry, len(c.readinessChecks))
 	copy(checks, c.readinessChecks)
 	c.mu.RUnlock()
 	return c.run(ctx, checks)
@@ -131,7 +140,7 @@ func (c *Checker) CheckReadiness(ctx context.Context) HealthResponse {
 // CheckLiveness runs all liveness checks concurrently.
 func (c *Checker) CheckLiveness(ctx context.Context) HealthResponse {
 	c.mu.RLock()
-	checks := make([]checkEntry, len(c.livenessChecks))
+	checks := make([]*checkEntry, len(c.livenessChecks))
 	copy(checks, c.livenessChecks)
 	c.mu.RUnlock()
 	return c.run(ctx, checks)
@@ -140,12 +149,12 @@ func (c *Checker) CheckLiveness(ctx context.Context) HealthResponse {
 // CheckHealth runs all checks (readiness + liveness) concurrently.
 func (c *Checker) CheckHealth(ctx context.Context) HealthResponse {
 	c.mu.RLock()
-	all := append(append([]checkEntry{}, c.readinessChecks...), c.livenessChecks...)
+	all := append(append([]*checkEntry{}, c.readinessChecks...), c.livenessChecks...)
 	c.mu.RUnlock()
 	return c.run(ctx, all)
 }
 
-func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
+func (c *Checker) run(ctx context.Context, checks []*checkEntry) HealthResponse {
 	c.mu.RLock()
 	timeout := c.timeout
 	includeErrors := c.includeErrors
@@ -162,12 +171,12 @@ func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
 	ch := make(chan result, len(checks))
 
 	for _, e := range checks {
-		go func(entry checkEntry) {
+		go func(entry *checkEntry) {
 			checkCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
 			start := time.Now()
-			err := executeCheck(checkCtx, entry.fn)
+			err := executeCheck(checkCtx, entry)
 			durMs := time.Since(start).Milliseconds()
 
 			r := CheckResult{Status: StatusOK, DurationMs: durMs}
@@ -194,7 +203,24 @@ func (c *Checker) run(ctx context.Context, checks []checkEntry) HealthResponse {
 	return HealthResponse{Status: overall, Checks: results, Version: version}
 }
 
-func executeCheck(ctx context.Context, check CheckFunc) error {
+func (c *Checker) validateCheck(name string, fn CheckFunc) {
+	if strings.TrimSpace(name) == "" || fn == nil {
+		panic("health: nonempty check name and callback required")
+	}
+	for _, e := range append(append([]*checkEntry{}, c.readinessChecks...), c.livenessChecks...) {
+		if e.name == name {
+			panic("health: duplicate check name " + name)
+		}
+	}
+}
+func executeCheck(ctx context.Context, entry *checkEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !entry.running.CompareAndSwap(false, true) {
+		return ErrCheckBusy
+	}
+
 	result := make(chan error, 1)
 	go func() {
 		var err error
@@ -202,9 +228,10 @@ func executeCheck(ctx context.Context, check CheckFunc) error {
 			if recover() != nil {
 				err = ErrCheckPanic
 			}
+			entry.running.Store(false)
 			result <- err
 		}()
-		err = check(ctx)
+		err = entry.fn(ctx)
 	}()
 
 	select {

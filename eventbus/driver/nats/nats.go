@@ -11,9 +11,9 @@ import (
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
-	"github.com/thanhbvha/go-common/eventbus/registry"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonnats "github.com/thanhbvha/go-common/nats"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonnats "github.com/thanhbvha/go-common/v2/nats"
 )
 
 func init() {

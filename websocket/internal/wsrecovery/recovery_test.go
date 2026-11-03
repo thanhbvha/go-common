@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
 )
 
 func TestHandlerLogsStructuredPanicAndConnectionMetadata(t *testing.T) {

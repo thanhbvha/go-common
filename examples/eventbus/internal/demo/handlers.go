@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus"
 )
 
 type UserMessage struct {

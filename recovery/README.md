@@ -1,5 +1,7 @@
 # Recovery
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 `recovery` converts a panic into a bounded, structured report without depending
 on an HTTP framework, logger implementation, or transport. Framework adapters
 for Fiber, Gin, and Echo live under `web/middleware`.
@@ -34,7 +36,6 @@ func runWorker(ctx context.Context, jobID string) {
 		logger.ErrorWithContext(ctx, "worker panic recovered",
 			slog.String("job_id", jobID),
 			slog.String("panic_type", report.Type),
-			slog.String("panic_message", report.Message),
 			slog.String("file", report.Origin.File),
 			slog.Int("line", report.Origin.Line),
 			slog.String("function", report.Origin.Function),
@@ -57,7 +58,7 @@ defer recovery.Catch(nil)
 
 Install request ID and access logging outside recovery, then place recovery
 before telemetry, authentication, rate limiting, and routes that it must
-protect. The adapters log the server-side report synchronously and return only
+protect. The adapters log type, origin and stack synchronously, omit panic values, and return only
 a generic HTTP 500 body:
 
 ```json

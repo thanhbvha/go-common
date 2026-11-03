@@ -1,31 +1,63 @@
-// Package validator provides struct validation using github.com/go-playground/validator.
-//
-// It wraps the standard validator to provide friendly, localized (Vietnamese) error
-// messages out-of-the-box and structures the errors into a standardized JSON format.
-//
-// Basic usage:
-//
-//	type User struct {
-//		Email string `validate:"required,email"`
-//	}
-//	if errs := validator.Struct(user); len(errs) > 0 {
-//		return response.ValidationError(c, errs)
-//	}
+// Package validator provides immutable, concurrency-safe request validation.
 package validator
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 
-	"github.com/go-playground/validator/v10"
+	playground "github.com/go-playground/validator/v10"
 )
 
-var validate *validator.Validate
+// Validator owns rules registered before construction completes. Rules themselves
+// must be concurrency-safe. A Validator may be shared across requests.
+type Validator struct{ engine *playground.Validate }
 
-func init() {
-	validate = validator.New()
+// New builds a validator with JSON field names and optional custom rules.
+// It never mutates package-global validation state.
+func New(rules map[string]playground.Func) (*Validator, error) {
+	v := newEngine()
+	for tag, fn := range rules {
+		if tag == "" || fn == nil {
+			return nil, errors.New("validator: rule tag and function are required")
+		}
+		if err := register(v, tag, fn); err != nil {
+			return nil, err
+		}
+	}
+	return &Validator{engine: v}, nil
 }
 
-// ErrorResponse represents a single validation error message
+func newEngine() *playground.Validate {
+	v := playground.New(playground.WithRequiredStructEnabled())
+	v.RegisterTagNameFunc(func(f reflect.StructField) string {
+		name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+		if name == "-" {
+			return ""
+		}
+		if name == "" {
+			return f.Name
+		}
+		return name
+	})
+	return v
+}
+
+var defaultValidator = &Validator{engine: newEngine()}
+
+// Validate uses the immutable default rules. Use New for application rules.
+func Validate(input any) ([]*ErrorResponse, error) { return defaultValidator.Validate(input) }
+
+func register(v *playground.Validate, tag string, fn playground.Func) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("validator: invalid rule tag")
+		}
+	}()
+	return v.RegisterValidation(tag, fn)
+}
+
 type ErrorResponse struct {
 	FailedField string `json:"field"`
 	Tag         string `json:"tag"`
@@ -33,41 +65,28 @@ type ErrorResponse struct {
 	Message     string `json:"message"`
 }
 
-// Struct validates a struct and returns friendly error messages
-func Struct(s interface{}) []*ErrorResponse {
-	var errors []*ErrorResponse
-	err := validate.Struct(s)
-	if err != nil {
-		for _, err := range err.(validator.ValidationErrors) {
-			var element ErrorResponse
-			element.FailedField = err.StructNamespace()
-			element.Tag = err.Tag()
-			element.Value = err.Param()
-			element.Message = getFriendlyMessage(err)
-			errors = append(errors, &element)
+// Validate returns field violations or an error for invalid usage/schema tags.
+// Internal errors do not contain the input value.
+func (v *Validator) Validate(input any) (violations []*ErrorResponse, err error) {
+	if v == nil || v.engine == nil {
+		return nil, errors.New("validator: instance is required")
+	}
+	defer func() {
+		if recover() != nil {
+			violations = nil
+			err = errors.New("validator: invalid validation schema")
 		}
+	}()
+	validationErr := v.engine.Struct(input)
+	if validationErr == nil {
+		return nil, nil
 	}
-	return errors
-}
-
-func getFriendlyMessage(err validator.FieldError) string {
-	switch err.Tag() {
-	case "required":
-		return fmt.Sprintf("Field %s is required", err.Field())
-	case "email":
-		return "Invalid email format"
-	case "min":
-		return fmt.Sprintf("Field %s must be at least %s characters long", err.Field(), err.Param())
-	case "max":
-		return fmt.Sprintf("Field %s must be at most %s characters long", err.Field(), err.Param())
-	case "len":
-		return fmt.Sprintf("Field %s must be exactly %s characters long", err.Field(), err.Param())
-	default:
-		return fmt.Sprintf("Field %s is invalid (error: %s)", err.Field(), err.Tag())
+	var fields playground.ValidationErrors
+	if !errors.As(validationErr, &fields) {
+		return nil, errors.New("validator: a non-nil struct or struct pointer is required")
 	}
-}
-
-// CustomRule allows adding a custom validation rule
-func CustomRule(tag string, fn validator.Func) error {
-	return validate.RegisterValidation(tag, fn)
+	for _, field := range fields {
+		violations = append(violations, &ErrorResponse{FailedField: field.Field(), Tag: field.Tag(), Value: field.Param(), Message: fmt.Sprintf("Field %s failed %s validation", field.Field(), field.Tag())})
+	}
+	return violations, nil
 }

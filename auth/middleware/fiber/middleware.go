@@ -3,10 +3,10 @@ package fiberauth
 
 import (
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	fiberresp "github.com/thanhbvha/go-common/web/response/fiber"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"github.com/thanhbvha/go-common/v2/auth/middleware/internal/authhttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	fiberresp "github.com/thanhbvha/go-common/v2/web/response/fiber"
 )
 
 // Middleware creates a Fiber middleware to protect routes using standard JWT.
@@ -22,7 +22,8 @@ func Middleware(manager *auth.Manager) fiber.Handler {
 		}
 		claims, err := manager.ValidateTokenContext(c.UserContext(), tokenString)
 		if err != nil {
-			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			return fiberresp.Error(c, status, message)
 		}
 
 		// Store UserInfo in Fiber's context for downstream handlers
@@ -51,7 +52,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) fiber.Han
 
 		claims, err := validator.ValidateRequestToken(c.UserContext(), tokenString)
 		if err != nil {
-			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			return fiberresp.Error(c, status, message)
 		}
 
 		c.Locals(ctxkey.LocalUserInfo, claims)
@@ -81,7 +83,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor func(c *fi
 
 		details, err := manager.ValidateTokenDetailsContext(c.UserContext(), tokenString, aad)
 		if err != nil {
-			return fiberresp.Error(c, fiber.StatusUnauthorized, "Invalid or expired token")
+			status, message := authhttp.Failure(err)
+			return fiberresp.Error(c, status, message)
 		}
 
 		userInfo := &details.UserInfo

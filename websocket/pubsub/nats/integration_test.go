@@ -8,15 +8,24 @@ import (
 	"testing"
 	"time"
 
-	commonnats "github.com/thanhbvha/go-common/nats"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	commonnats "github.com/thanhbvha/go-common/v2/nats"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 func TestNATSIntegrationPublishSubscribe(t *testing.T) {
 	if os.Getenv("WS_NATS_INTEGRATION") == "" {
+		if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+			t.Fatal("WS_NATS_INTEGRATION is required")
+		}
 		t.Skip("set WS_NATS_INTEGRATION=1")
 	}
-	client := commonnats.New(commonnats.DefaultConfig())
+	cfg := commonnats.DefaultConfig()
+	if url := os.Getenv("WS_NATS_URL"); url != "" {
+		cfg.URLs = []string{url}
+	} else if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+		t.Fatal("WS_NATS_URL is required")
+	}
+	client := commonnats.New(cfg)
 	if err := client.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}

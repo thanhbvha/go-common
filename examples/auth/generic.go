@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,10 +11,11 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
-
-	"github.com/thanhbvha/go-common/auth"
-	nethttpauth "github.com/thanhbvha/go-common/auth/middleware/nethttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/auth"
+	nethttpauth "github.com/thanhbvha/go-common/v2/auth/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/ratelimit"
+	nethttplimit "github.com/thanhbvha/go-common/v2/ratelimit/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 const (
@@ -22,13 +24,13 @@ const (
 )
 
 type exampleClaims struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	SessionID string `json:"sid"`
 	jwt.RegisteredClaims
 }
-
 type refreshRequest struct {
-	UserID       string `json:"user_id"`
+	SessionID    string `json:"session_id"`
 	RefreshToken string `json:"refresh_token"`
 }
 
@@ -37,159 +39,115 @@ func runGenericDemo() error {
 	if err != nil {
 		return err
 	}
-	redisAddress := os.Getenv("AUTH_REDIS_ADDR")
-	if redisAddress == "" {
-		redisAddress = "127.0.0.1:6379"
+	addr := os.Getenv("AUTH_REDIS_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:6379"
 	}
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: redisAddress, Password: os.Getenv("AUTH_REDIS_PASSWORD"),
-	})
-	defer func() { _ = redisClient.Close() }()
-	pingContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	pingErr := redisClient.Ping(pingContext).Err()
+	client := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("AUTH_REDIS_PASSWORD")})
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err = client.Ping(ctx).Err()
 	cancel()
-	if pingErr != nil {
-		return fmt.Errorf("connect to Redis at %s: %w", redisAddress, pingErr)
-	}
-
-	manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*exampleClaims]{
-		SecretKey:      secret,
-		Redis:          redisClient,
-		Issuer:         exampleIssuer,
-		Audience:       []string{exampleAudience},
-		Leeway:         30 * time.Second,
-		MaxLifetime:    accessTokenLifetime,
-		MaxTokenSize:   auth.DefaultMaxTokenSize,
-		MaxPayloadSize: auth.DefaultMaxPayloadSize,
-		TokenID: func(claims *exampleClaims) (string, error) {
-			return claims.ID, nil
-		},
-	})
 	if err != nil {
-		return fmt.Errorf("configure generic manager: %w", err)
+		return fmt.Errorf("connect to Redis: %w", err)
 	}
-	validator, err := auth.NewGenericTokenValidator(
-		manager,
-		func() *exampleClaims { return &exampleClaims{} },
-		nil, // The manager already performs fail-closed revocation checks.
-	)
+	sessions, err := auth.NewRedisSessionStore(auth.SessionStoreOptions{Redis: client, Namespace: "example:auth"})
 	if err != nil {
-		return fmt.Errorf("configure generic validator: %w", err)
+		return err
 	}
-
+	manager, err := auth.NewGenericManagerWithOptions(auth.GenericManagerOptions[*exampleClaims]{SecretKey: secret, Revocation: sessions, Issuer: exampleIssuer, Audience: []string{exampleAudience}, Leeway: 30 * time.Second, MaxLifetime: accessTokenLifetime, TokenID: func(c *exampleClaims) (string, error) { return c.SessionID, nil }})
+	if err != nil {
+		return err
+	}
+	validator, err := auth.NewGenericTokenValidator(manager, func() *exampleClaims { return &exampleClaims{} }, nil)
+	if err != nil {
+		return err
+	}
+	limiter, err := ratelimit.NewRedisLimiter(client, "example:auth:rate")
+	if err != nil {
+		return err
+	}
+	limit, err := nethttplimit.Middleware(limiter, ratelimit.MiddlewareConfig{Policy: ratelimit.Config{Limit: 10, Window: time.Minute}, FailurePolicy: ratelimit.FailClosed}, nil)
+	if err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
-		accessToken, claims, err := issueGenericAccessToken(r.Context(), manager, "generic-user", "admin")
+	// Demonstration credentials only: replace this fixed identity with verified
+	// credentials and a server-side role lookup in the application's identity store.
+	mux.Handle("POST /login", limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, err := sessions.Create(r.Context(), "generic-user", refreshTokenLifetime)
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			http.Error(w, "Session service unavailable", 503)
 			return
 		}
-		refreshToken, err := manager.GenerateRefreshToken(r.Context(), claims.UserID, refreshTokenLifetime)
+		token, _, err := issueGenericAccessToken(r.Context(), manager, session.Subject, "admin", session.ID)
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			_ = sessions.Revoke(r.Context(), session.ID)
+			http.Error(w, "Token issuance failed", 500)
 			return
 		}
-		setNoStore(w.Header())
-		writeJSON(w, http.StatusOK, map[string]any{
-			"access_token": accessToken, "refresh_token": refreshToken,
-			"token_type": "Bearer", "expires_in": int(accessTokenLifetime.Seconds()),
-		})
-	})
-
-	mux.HandleFunc("POST /refresh", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"access_token": token, "refresh_token": session.RefreshToken, "session_id": session.ID, "token_type": "Bearer", "expires_in": int(accessTokenLifetime.Seconds())})
+	})))
+	mux.Handle("POST /refresh", limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request refreshRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4*1024))
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil || request.UserID == "" || request.RefreshToken == "" {
-			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		if err := decoder.Decode(&request); err != nil || request.SessionID == "" || request.RefreshToken == "" {
+			http.Error(w, "Invalid refresh request", 400)
 			return
 		}
-		valid, err := manager.VerifyRefreshToken(r.Context(), request.UserID, request.RefreshToken)
+		session, err := sessions.Rotate(r.Context(), request.SessionID, request.RefreshToken)
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			status := 503
+			if errors.Is(err, auth.ErrInvalidRefreshToken) || errors.Is(err, auth.ErrRefreshReplay) || errors.Is(err, auth.ErrSessionExhausted) {
+				status = 401
+			}
+			http.Error(w, http.StatusText(status), status)
 			return
 		}
-		if !valid {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-			return
-		}
-		accessToken, _, err := issueGenericAccessToken(r.Context(), manager, request.UserID, "admin")
+		token, _, err := issueGenericAccessToken(r.Context(), manager, session.Subject, "admin", session.ID)
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			http.Error(w, "Token issuance failed; sign in again", 500)
 			return
 		}
-		rotatedRefreshToken, err := manager.GenerateRefreshToken(r.Context(), request.UserID, refreshTokenLifetime)
-		if err != nil {
-			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
-			return
-		}
-		setNoStore(w.Header())
-		writeJSON(w, http.StatusOK, map[string]any{
-			"access_token": accessToken, "token_type": "Bearer",
-			"refresh_token": rotatedRefreshToken,
-			"expires_in":    int(accessTokenLifetime.Seconds()),
-		})
-	})
-
+		writeJSON(w, 200, map[string]any{"access_token": token, "refresh_token": session.RefreshToken, "session_id": session.ID, "token_type": "Bearer", "expires_in": int(accessTokenLifetime.Seconds())})
+	})))
 	protected := nethttpauth.GenericMiddleware(validator)
 	mux.Handle("GET /api/profile", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := genericClaimsFromContext(r.Context())
 		if !ok {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			http.Error(w, "Unauthorized", 401)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"claims": claims, "stack": "net/http"})
+		writeJSON(w, 200, map[string]any{"claims": claims, "stack": "net/http"})
 	})))
 	mux.Handle("POST /logout", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := genericClaimsFromContext(r.Context())
-		if !ok || claims.ExpiresAt == nil {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		if !ok {
+			http.Error(w, "Unauthorized", 401)
 			return
 		}
-		remaining := time.Until(claims.ExpiresAt.Time)
-		if remaining <= 0 {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		if err := sessions.Revoke(r.Context(), claims.SessionID); err != nil {
+			http.Error(w, "Session service unavailable", 503)
 			return
 		}
-		if err := manager.RevokeRefreshToken(r.Context(), claims.UserID); err != nil {
-			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
-			return
-		}
-		if err := manager.RevokeToken(r.Context(), claims.ID, remaining); err != nil {
-			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(204)
 	})))
-
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	runHTTPServer("generic Redis-backed net/http", server)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { setNoStore(w.Header()); mux.ServeHTTP(w, r) })
+	runHTTPServer("generic Redis session net/http", &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second})
 	return nil
 }
 
-func issueGenericAccessToken(ctx context.Context, manager auth.ContextGenericManager[*exampleClaims], userID, role string) (string, *exampleClaims, error) {
+func issueGenericAccessToken(ctx context.Context, manager auth.ContextGenericManager[*exampleClaims], userID, role, sessionID string) (string, *exampleClaims, error) {
 	now := time.Now()
-	tokenID, err := randomID()
+	id, err := randomID()
 	if err != nil {
 		return "", nil, err
 	}
-	claims := &exampleClaims{
-		UserID: userID,
-		Role:   role,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(accessTokenLifetime)),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-			Issuer:    exampleIssuer,
-			Audience:  jwt.ClaimStrings{exampleAudience},
-			Subject:   userID,
-			ID:        tokenID,
-		},
-	}
+	claims := &exampleClaims{UserID: userID, Role: role, SessionID: sessionID, RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(now.Add(accessTokenLifetime)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), Issuer: exampleIssuer, Audience: jwt.ClaimStrings{exampleAudience}, Subject: userID, ID: id}}
 	token, err := manager.GenerateTokenContext(ctx, claims)
 	return token, claims, err
 }
-
 func genericClaimsFromContext(ctx context.Context) (*exampleClaims, bool) {
 	value, ok := ctxkey.GetAuthClaims(ctx)
 	if !ok {

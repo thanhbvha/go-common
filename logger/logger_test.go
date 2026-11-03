@@ -3,7 +3,7 @@ package logger_test
 import (
 	"testing"
 
-	"github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/logger"
 )
 
 func TestLoggerWith(t *testing.T) {
@@ -12,7 +12,7 @@ func TestLoggerWith(t *testing.T) {
 
 	child := l.With("service", "auth", "version", "v1")
 	// The child shares resources with the parent without modifying the original logger.
-	if child == l {
+	if child == l.Logger() {
 		t.Error("child logger should be a different instance")
 	}
 

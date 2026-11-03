@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 type testClaims struct{ ID string }

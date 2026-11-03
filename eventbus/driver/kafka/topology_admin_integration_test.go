@@ -9,8 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -18,7 +17,7 @@ import (
 func TestKafkaTopologyReconcileExpansionAndDLQLeaseIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +25,7 @@ func TestKafkaTopologyReconcileExpansionAndDLQLeaseIntegration(t *testing.T) {
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	secondCreated, err := NewWithConfig(cfg)
 	if err != nil {
@@ -91,7 +90,7 @@ func TestKafkaTopologyReconcileExpansionAndDLQLeaseIntegration(t *testing.T) {
 func TestKafkaEventPartitionExpansionIncludesTargetedAndPrivateTopics(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +98,7 @@ func TestKafkaEventPartitionExpansionIncludesTargetedAndPrivateTopics(t *testing
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	topo := transport.Topology{Namespace: "p675", JobType: fmt.Sprintf("event_expand_%d", time.Now().UnixNano()), Kind: transport.EventTopology, Options: map[string]any{kafkaEventLayoutOption: kafkaTargetedLayoutV1}}
 	if err := backend.EnsureTopology(ctx, topo); err != nil {
@@ -137,7 +136,7 @@ func TestKafkaEventPartitionExpansionIncludesTargetedAndPrivateTopics(t *testing
 func TestKafkaEnsureEventTopologyCreatesSinglePartitionControlTopics(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := commonkafka.DefaultConfig()
+	cfg := kafkaIntegrationConfig(t)
 	created, err := NewWithConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +144,7 @@ func TestKafkaEnsureEventTopologyCreatesSinglePartitionControlTopics(t *testing.
 	backend := created.(*kafkaTransport)
 	if err := backend.Ping(ctx); err != nil {
 		_ = backend.Close(context.Background())
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	topology := transport.Topology{
 		Namespace: "p675",

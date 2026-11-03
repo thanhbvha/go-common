@@ -8,9 +8,9 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/registry"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonredis "github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonredis "github.com/thanhbvha/go-common/v2/redis"
 )
 
 func init() {

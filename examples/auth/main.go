@@ -15,13 +15,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 
-	"github.com/thanhbvha/go-common/auth"
-	echoauth "github.com/thanhbvha/go-common/auth/middleware/echo"
-	fiberauth "github.com/thanhbvha/go-common/auth/middleware/fiber"
-	ginauth "github.com/thanhbvha/go-common/auth/middleware/gin"
-	nethttpauth "github.com/thanhbvha/go-common/auth/middleware/nethttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/utils/graceful"
+	"github.com/thanhbvha/go-common/v2/auth"
+	echoauth "github.com/thanhbvha/go-common/v2/auth/middleware/echo"
+	fiberauth "github.com/thanhbvha/go-common/v2/auth/middleware/fiber"
+	ginauth "github.com/thanhbvha/go-common/v2/auth/middleware/gin"
+	nethttpauth "github.com/thanhbvha/go-common/v2/auth/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/utils/graceful"
 )
 
 const address = ":3000"

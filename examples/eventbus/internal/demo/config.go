@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	commonconfig "github.com/thanhbvha/go-common/config"
+	commonconfig "github.com/thanhbvha/go-common/v2/config"
 )
 
 const (

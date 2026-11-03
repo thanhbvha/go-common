@@ -1,12 +1,12 @@
 # Cache & Distributed Lock Module
 
 ## Overview
-The `cache` module offers a unified interface `cache.Cache` for both high-performance local memory caching (via Ristretto) and distributed caching (via Redis). Additionally, it provides a robust Distributed Lock implementation based on the Redlock algorithm.
+The `cache` module offers a unified interface `cache.Cache` for both high-performance local memory caching (via Ristretto) and distributed caching (via Redis). Additionally, it provides a robust Distributed Lock implementation using single-Redis token-checked ownership sessions.
 
 ## Key Interfaces & Structs
 - `cache.Cache`: The main interface featuring `Set`, `Get`, `Delete`, and `Clear`.
 - `cache.NewMemoryCache(maxCapacity)`: Initializes an in-memory cache using Ristretto.
-- `cache.NewRedisCache(redisClient)`: Initializes a remote cache using go-redis.
+- `cache.NewRedisCache(redisClient, namespace)`: Initializes a namespaced remote cache using go-redis and returns a cache plus error.
 - `cache.Lock`: Interface for distributed locks (`Acquire`, `Extend`, `Release`).
 
 ## 🚨 Best Practices for AI/Developers

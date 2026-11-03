@@ -8,7 +8,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/thanhbvha/go-common/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation"
 	grpcframework "google.golang.org/grpc"
 )
 

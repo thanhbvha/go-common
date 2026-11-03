@@ -2,7 +2,10 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -11,25 +14,28 @@ import (
 // redisFixedWindowLimiter implements a Fixed Window Rate Limiter using Redis.
 // It uses a Lua script to ensure atomic increment and TTL setting.
 type redisFixedWindowLimiter struct {
-	client *redis.Client
+	client redis.UniversalClient
 	prefix string
 }
 
 // NewRedisLimiter creates a new Redis-based Limiter.
-func NewRedisLimiter(client *redis.Client, prefix string) Limiter {
+func NewRedisLimiter(client redis.UniversalClient, prefix string) (Limiter, error) {
+	if client == nil || (reflect.ValueOf(client).Kind() == reflect.Ptr && reflect.ValueOf(client).IsNil()) {
+		return nil, errors.New("ratelimit: redis client is required")
+	}
 	if prefix == "" {
 		prefix = "ratelimit"
 	}
 	return &redisFixedWindowLimiter{
 		client: client,
 		prefix: prefix,
-	}
+	}, nil
 }
 
 // Lua script for atomic fixed-window rate limiting.
 // KEYS[1] = key
 // ARGV[1] = limit
-// ARGV[2] = window (seconds)
+// ARGV[2] = window (milliseconds)
 const fixedWindowScript = `
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
@@ -45,8 +51,8 @@ current = redis.call("INCR", key)
 local ttl = redis.call("PTTL", key)
 
 if current == 1 then
-	redis.call("PEXPIRE", key, window * 1000)
-	ttl = window * 1000
+	redis.call("PEXPIRE", key, window)
+	ttl = window
 end
 
 local remaining = limit - current
@@ -54,13 +60,15 @@ return {1, remaining, ttl}
 `
 
 func (r *redisFixedWindowLimiter) Allow(ctx context.Context, key string, cfg Config) (*Result, error) {
-	fullKey := r.prefix + ":" + key
-	windowSecs := int64(cfg.Window.Seconds())
-	if windowSecs == 0 {
-		windowSecs = 1 // Prevent 0-second window
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
+	if strings.TrimSpace(key) == "" {
+		return nil, errors.New("ratelimit: key is required")
+	}
+	fullKey := r.prefix + ":" + key
 
-	res, err := r.client.Eval(ctx, fixedWindowScript, []string{fullKey}, cfg.Limit, windowSecs).Result()
+	res, err := r.client.Eval(ctx, fixedWindowScript, []string{fullKey}, cfg.Limit, cfg.Window.Milliseconds()).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +93,7 @@ func (r *redisFixedWindowLimiter) Allow(ctx context.Context, key string, cfg Con
 	}
 
 	if ttlMs < 0 {
-		ttlMs = 0
+		return nil, errors.New("ratelimit: quota key has no valid expiry")
 	}
 
 	return &Result{

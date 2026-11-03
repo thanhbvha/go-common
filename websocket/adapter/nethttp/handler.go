@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/thanhbvha/go-common/internal/httpkit"
-	"github.com/thanhbvha/go-common/logger"
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/websocket/core"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
+	"github.com/thanhbvha/go-common/v2/logger"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 // Config holds configuration for the standard net/http WebSocket adapter.

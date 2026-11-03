@@ -6,11 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -18,37 +19,34 @@ import (
 func TestNewWithClientSnapshotAndManualCommitPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	probe, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
+	probe, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer probe.Close()
 	if err := probe.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
-	for _, interval := range []time.Duration{0, time.Second} {
-		cfg := commonkafka.DefaultConfig()
-		cfg.ConsumerCommitInterval = interval
-		wrapper := commonkafka.New(cfg)
-		if err := wrapper.Connect(ctx); err != nil {
-			t.Fatal(err)
-		}
-		defer wrapper.Close()
-		cfg.Brokers[0] = "mutated.invalid:9092"
-		backend, err := NewWithClient(wrapper)
-		if err != nil {
-			t.Fatal(err)
-		}
-		consumer, err := backend.(*kafkaTransport).newManualConsumer(kgo.ConsumerGroup("snapshot-review"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer consumer.Close()
-		for _, client := range []*kgo.Client{wrapper.Native(), consumer} {
-			brokers := client.OptValue(kgo.SeedBrokers).([]string)
-			if len(brokers) != 1 || brokers[0] != "localhost:9092" {
-				t.Fatal("client snapshots diverged")
-			}
+	cfg := kafkaIntegrationConfig(t)
+	wrapper := commonkafka.New(cfg)
+	if err := wrapper.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer wrapper.Close()
+	cfg.Brokers[0] = "mutated.invalid:9092"
+	backend, err := NewWithClient(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := backend.(*kafkaTransport).newManualConsumer(kgo.ConsumerGroup("snapshot-review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+	for _, client := range []*kgo.Client{wrapper.Native(), consumer} {
+		brokers := client.OptValue(kgo.SeedBrokers).([]string)
+		if !slices.Equal(brokers, kafkaIntegrationBrokers(t)) {
+			t.Fatal("client snapshots diverged")
 		}
 	}
 }
@@ -56,7 +54,7 @@ func TestNewWithClientSnapshotAndManualCommitPolicy(t *testing.T) {
 func TestKafkaTransport_PublishAndConsume(t *testing.T) {
 	// Create base kgo.Client
 	cl, err := kgo.NewClient(
-		kgo.SeedBrokers("localhost:9092"),
+		kgo.SeedBrokers(kafkaIntegrationBrokers(t)...),
 	)
 	if err != nil {
 		t.Fatalf("kgo.NewClient: %v", err)
@@ -65,10 +63,10 @@ func TestKafkaTransport_PublishAndConsume(t *testing.T) {
 
 	// Need a quick ping to see if kafka is available
 	if err := cl.Ping(context.Background()); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
-	trans := newTestTransport(cl, []string{"localhost:9092"})
+	trans := newTestTransport(cl, kafkaIntegrationBrokers(t))
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("testjob_kafka_%d", time.Now().UnixNano())}
 
@@ -122,17 +120,17 @@ func TestKafkaTransport_PublishAndConsume(t *testing.T) {
 }
 
 func TestKafkaTransport_Delay(t *testing.T) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
+	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...))
 	if err != nil {
 		t.Fatalf("kgo.NewClient: %v", err)
 	}
 	defer cl.Close()
 
 	if err := cl.Ping(context.Background()); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
-	trans := newTestTransport(cl, []string{"localhost:9092"})
+	trans := newTestTransport(cl, kafkaIntegrationBrokers(t))
 	ctx := context.Background()
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("testjob_delay_%d", time.Now().UnixNano())}
 
@@ -181,13 +179,13 @@ func TestKafkaTransport_Delay(t *testing.T) {
 func TestKafkaTransport_PartitionProcessing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cl, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"), kgo.RecordPartitioner(kgo.ManualPartitioner()))
+	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...), kgo.RecordPartitioner(kgo.ManualPartitioner()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cl.Close()
 	if err := cl.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 	backend := newTestTransport(cl, nil).(*kafkaTransport)
 	topo := transport.Topology{Namespace: "testns", JobType: fmt.Sprintf("partition_%d", time.Now().UnixNano())}
@@ -247,7 +245,7 @@ func TestKafkaOffsetCoordinator_ContiguousBrokerCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	producer, err := kgo.NewClient(
-		kgo.SeedBrokers("localhost:9092"),
+		kgo.SeedBrokers(kafkaIntegrationBrokers(t)...),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 	)
 	if err != nil {
@@ -255,7 +253,7 @@ func TestKafkaOffsetCoordinator_ContiguousBrokerCommit(t *testing.T) {
 	}
 	defer producer.Close()
 	if err := producer.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
 	backend := newTestTransport(producer, nil).(*kafkaTransport)
@@ -349,7 +347,7 @@ func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	producer, err := kgo.NewClient(
-		kgo.SeedBrokers("localhost:9092"),
+		kgo.SeedBrokers(kafkaIntegrationBrokers(t)...),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 	)
 	if err != nil {
@@ -357,7 +355,7 @@ func TestKafkaRebalanceDrainsAndTransfersPartitions(t *testing.T) {
 	}
 	defer producer.Close()
 	if err := producer.Ping(ctx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
 	backend := newTestTransport(producer, nil).(*kafkaTransport)

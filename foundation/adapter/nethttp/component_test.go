@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/foundation"
-	"github.com/thanhbvha/go-common/foundation/adapter/nethttp"
+	"github.com/thanhbvha/go-common/v2/foundation"
+	"github.com/thanhbvha/go-common/v2/foundation/adapter/nethttp"
 )
 
 func TestComponentServesAndStops(t *testing.T) {

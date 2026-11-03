@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/thanhbvha/go-common/db/orm/backend/postgres"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )

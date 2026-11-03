@@ -1,15 +1,17 @@
 # go-common
 
-A collection of production-ready, framework-agnostic Go packages for building backend services.
+Composable, framework-agnostic Go packages for backend services. The v2 candidate hardens lifecycle, security, data access and delivery contracts; adoption evidence is tracked per module.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/thanhbvha/go-common.svg)](https://pkg.go.dev/github.com/thanhbvha/go-common)
+Start with the [reference backend](./examples/production), [v2 API guide](./docs/V2.md), and [production validation matrix](./docs/PRODUCTION.md).
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/thanhbvha/go-common/v2.svg)](https://pkg.go.dev/github.com/thanhbvha/go-common/v2)
 
 ## Packages
 
 | Package | Description |
 |---|---|
 | `foundation` | Supervised component lifecycle with startup rollback, runtime failure handling, graceful shutdown, and health state |
-| `logger` | Async structured logger (log/slog) with optional lumberjack file rotation |
+| `logger` | Structured slog runtime; synchronous default, optional bounded async logging and file rotation |
 | `config` | Environment variable and configuration file loader (Viper wrapper) |
 | `xerrors` | Structured error handling with HTTP status codes and string codes |
 | `recovery` | Framework-independent structured panic capture with net/http / Fiber / Gin / Echo middleware adapters |
@@ -20,11 +22,11 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 | `websocket` | Clustered, framework-agnostic real-time WebSocket server (net/http / Fiber / Gin / Echo) |
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
-| `web` | Web core utilities (standard response, validator, net/http / Fiber / Gin / Echo middleware adapters) |
+| `web` | Web core utilities (standard responsproductione, validator, net/http / Fiber / Gin / Echo middleware adapters) |
 | `graphql` | Framework-agnostic GraphQL engine with Generic DataLoader & Telemetry |
 | `utils` | Go Generics and cryptography helpers; includes legacy standalone graceful shutdown for applications not using `foundation` |
-| `cache` | Multi-tier Caching (Ristretto Local + Redis Remote) & Redis Distributed Lock |
-| `auth` | Enterprise Authentication with Encrypted JWT (AES-GCM) and Dynamic Token Binding |
+| `cache` | Independent namespaced Redis/local caches and session-owned Redis leases |
+| `auth` | JWT/encrypted JWT policy, key rotation, revocation and atomic refresh sessions |
 | `httpclient` | Resilient REST Client with Circuit Breaker (gobreaker) and Auto-Retry |
 | `ratelimit` | Distributed Rate Limiter (Fixed Window) using Redis Lua scripting |
 | `cron` | Job scheduler with renewable Redis leases, slot deduplication, and graceful shutdown |
@@ -33,17 +35,17 @@ A collection of production-ready, framework-agnostic Go packages for building ba
 
 ## Requirements
 
-- Go 1.26+
-- Redis 6.x+ (Redis 6.2+ recommended for `XAUTOCLAIM` support)
+- Go 1.26.10+
+- Redis 6.2+ APIs; current disposable integration fixtures use Redis 7
 - NATS Server 2.10+ with JetStream enabled (`-js` flag or `jetstream: enabled` in config)
-- Apache Kafka 2.8+ (or compatible brokers like Redpanda)
+- Apache Kafka 3.9.1 is the validated fixture; other broker versions require application validation
 
 ---
 
 ## Installation
 
 ```bash
-go get github.com/thanhbvha/go-common
+go get github.com/thanhbvha/go-common/v2
 ```
 
 ---
@@ -115,9 +117,9 @@ service bootstrap.
 
 ## 🤖 AI / MCP Integration (Cursor, Cline, VSCode)
 
-This library is **fully agentic**. We provide an official **Model Context Protocol (MCP)** server that allows AI coding assistants to instantly fetch and read the latest source code, architectural rules, and boilerplate code directly from both our root modules and the `examples/` directory.
+An optional **Model Context Protocol (MCP)** server allows AI coding assistants to fetch source code, architectural rules, and boilerplate from the root packages and `examples/` directory.
 
-This guarantees that the AI writes code adhering to our strict standards (e.g., proper graceful shutdown, structured error handling) and can adapt to the most recent changes in the library without leaving the editor.
+Review generated integrations against the current v2 APIs and runnable examples. Tool access does not replace application validation.
 
 ### Setup for Cursor IDE
 1. Open Cursor Settings -> Features -> MCP

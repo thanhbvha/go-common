@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thanhbvha/go-common/auth"
-	nethttpauth "github.com/thanhbvha/go-common/auth/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/auth"
+	nethttpauth "github.com/thanhbvha/go-common/v2/auth/middleware/nethttp"
 )
 
 const sessionCookieName = "auth_example_session"

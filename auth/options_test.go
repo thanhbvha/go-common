@@ -57,7 +57,7 @@ func TestManagerOptionsRejectWrongIssuer(t *testing.T) {
 
 func TestManagerRejectsIncomingLifetimeAbovePolicy(t *testing.T) {
 	const secret = "jwt-secret-key-that-is-at-least-32-bytes"
-	issuer, err := NewManager(secret)
+	issuer, err := NewManagerWithOptions(ManagerOptions{SecretKey: secret})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestNilManagersReturnStableError(t *testing.T) {
 	}
 }
 
-func TestLegacyConstructorAcceptsPreUpgradeClaimsDuringMigration(t *testing.T) {
+func TestRejectsTokensMissingIdentityOrKeyID(t *testing.T) {
 	const secret = "jwt-secret-key-that-is-at-least-32-bytes"
 	now := time.Now()
 	legacyClaims := CustomClaims{
@@ -107,18 +107,48 @@ func TestLegacyConstructorAcceptsPreUpgradeClaimsDuringMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyManager, err := NewManager(secret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := legacyManager.ValidateToken(token); err != nil {
-		t.Fatalf("compatibility constructor rejected legacy token: %v", err)
-	}
 	strictManager, err := NewManagerWithOptions(ManagerOptions{SecretKey: secret})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := strictManager.ValidateToken(token); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("strict manager legacy token error = %v", err)
+	}
+}
+
+func TestAllRequiredJWTFields(t *testing.T) {
+	secret := "jwt-secret-key-that-is-at-least-32-bytes"
+	manager, err := NewManagerWithOptions(ManagerOptions{SecretKey: secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, missing := range []string{"kid", "exp", "iat", "nbf", "sub", "jti"} {
+		t.Run(missing, func(t *testing.T) {
+			claims := CustomClaims{UserInfo: UserInfo{ID: "user"}, RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), Subject: "user", ID: "token-id"}}
+			switch missing {
+			case "exp":
+				claims.ExpiresAt = nil
+			case "iat":
+				claims.IssuedAt = nil
+			case "nbf":
+				claims.NotBefore = nil
+			case "sub":
+				claims.Subject = ""
+			case "jti":
+				claims.ID = ""
+			}
+			token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+			if missing != "kid" {
+				token.Header["kid"] = "default"
+			}
+			encoded, err := token.SignedString([]byte(secret))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.ValidateToken(encoded); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("missing %s accepted: %v", missing, err)
+			}
+		})
 	}
 }

@@ -19,23 +19,25 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
 
-	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
-	"github.com/thanhbvha/go-common/logger"
-	commonnats "github.com/thanhbvha/go-common/nats"
-	commonredis "github.com/thanhbvha/go-common/redis"
-	echomw "github.com/thanhbvha/go-common/web/middleware/echo"
-	fibermw "github.com/thanhbvha/go-common/web/middleware/fiber"
-	ginmw "github.com/thanhbvha/go-common/web/middleware/gin"
-	nethttpmw "github.com/thanhbvha/go-common/web/middleware/nethttp"
-	wsEcho "github.com/thanhbvha/go-common/websocket/adapter/echo"
-	wsFiber "github.com/thanhbvha/go-common/websocket/adapter/fiber"
-	wsGin "github.com/thanhbvha/go-common/websocket/adapter/gin"
-	wsNetHTTP "github.com/thanhbvha/go-common/websocket/adapter/nethttp"
-	"github.com/thanhbvha/go-common/websocket/core"
-	"github.com/thanhbvha/go-common/websocket/limiter"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
-	natspubsub "github.com/thanhbvha/go-common/websocket/pubsub/nats"
-	redispubsub "github.com/thanhbvha/go-common/websocket/pubsub/redis"
+	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
+	"github.com/thanhbvha/go-common/v2/logger"
+	commonnats "github.com/thanhbvha/go-common/v2/nats"
+	commonredis "github.com/thanhbvha/go-common/v2/redis"
+	echomw "github.com/thanhbvha/go-common/v2/web/middleware/echo"
+	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
+	ginmw "github.com/thanhbvha/go-common/v2/web/middleware/gin"
+	nethttpmw "github.com/thanhbvha/go-common/v2/web/middleware/nethttp"
+	"github.com/thanhbvha/go-common/v2/web/response"
+	wsEcho "github.com/thanhbvha/go-common/v2/websocket/adapter/echo"
+	wsFiber "github.com/thanhbvha/go-common/v2/websocket/adapter/fiber"
+	wsGin "github.com/thanhbvha/go-common/v2/websocket/adapter/gin"
+	wsNetHTTP "github.com/thanhbvha/go-common/v2/websocket/adapter/nethttp"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
+	natspubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/nats"
+	redispubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/redis"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 const (
@@ -182,6 +184,9 @@ func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, a
 	limits.ApplyManagerLimits(&config)
 	app.limits = limits
 
+	if err := config.ValidateProduction(); err != nil {
+		return nil, err
+	}
 	app.manager = core.NewManagerWithConfig(config)
 	if readiness, ok := bus.(pubsub.WaitReadyProvider); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -275,7 +280,7 @@ func registerHandlers(registry *core.EventRegistry) {
 			return sendError(conn, eventChatSend, err)
 		}
 		if payload.Text == "" {
-			return sendError(conn, eventChatSend, errors.New("text is required"))
+			return sendError(conn, eventChatSend, xerrors.New("TEXT_REQUIRED", "Text is required", http.StatusBadRequest))
 		}
 		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "chat.message", RequestID: conn.GetRequestID(), Data: map[string]any{
 			"room_id": payload.RoomID,
@@ -333,10 +338,10 @@ func handlerConfig(timeout time.Duration, maxPayloadBytes int, handler core.Cont
 
 func decodePayload(data []byte, destination any) error {
 	if len(data) == 0 || string(data) == "null" {
-		return errors.New("payload is required")
+		return xerrors.New("PAYLOAD_REQUIRED", "Payload is required", http.StatusBadRequest)
 	}
 	if err := json.Unmarshal(data, destination); err != nil {
-		return fmt.Errorf("invalid payload: %w", err)
+		return xerrors.Wrap(err, "INVALID_PAYLOAD", "Invalid event payload", http.StatusBadRequest)
 	}
 	return nil
 }
@@ -348,11 +353,55 @@ func sendEvent(conn *core.Connection, eventType string, data any) error {
 	return nil
 }
 
-func sendError(conn *core.Connection, source string, err error) error {
-	if !conn.SendJSON(core.OutgoingMessage{Type: "error", Data: map[string]any{"source": source, "message": err.Error()}, RequestID: conn.GetRequestID()}) {
-		return errors.New("outbound queue rejected error response")
+type errorEventSender interface {
+	SendJSON(any) bool
+	GetRequestID() string
+}
+
+// eventErrorPayload is the complete public error contract. Diagnostic causes,
+// fields, and stacks are never serialized into the WebSocket envelope.
+type eventErrorPayload struct {
+	Source  string `json:"source"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func publicEventError(source string, err error, requestID string) core.OutgoingMessage {
+	publicErr := err
+	switch {
+	case errors.Is(err, core.ErrUnauthorized):
+		publicErr = xerrors.Wrap(err, "FORBIDDEN", "You do not have permission to perform this operation", http.StatusForbidden)
+	case errors.Is(err, core.ErrRoomLimit):
+		publicErr = xerrors.Wrap(err, "ROOM_LIMIT", "Room subscription limit reached", http.StatusTooManyRequests)
+	case errors.Is(err, core.ErrInvalidPayload):
+		publicErr = xerrors.Wrap(err, "INVALID_PAYLOAD", "Invalid event payload", http.StatusBadRequest)
+	case errors.Is(err, core.ErrPayloadTooLarge):
+		publicErr = xerrors.Wrap(err, "PAYLOAD_TOO_LARGE", "Event payload exceeds the size limit", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, core.ErrConnectionInactive), errors.Is(err, core.ErrConnectionClosed):
+		publicErr = xerrors.Wrap(err, "CONNECTION_INACTIVE", "Connection is no longer active", http.StatusConflict)
+	case errors.Is(err, context.DeadlineExceeded):
+		publicErr = xerrors.Wrap(err, "REQUEST_TIMEOUT", "Request timed out", http.StatusRequestTimeout)
 	}
-	return nil
+	// Explicit xerrors 4xx messages are public application validation errors.
+	// Unknown errors and all 5xx details have one stable public fallback.
+	public := response.FromError(publicErr, requestID)
+	if public.Code < 400 || public.Code >= 500 {
+		public = response.NewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "", requestID)
+	}
+	return core.OutgoingMessage{Type: "error", Data: eventErrorPayload{Source: source, Code: public.Status, Message: public.Message}, RequestID: requestID}
+}
+
+func sendError(conn errorEventSender, source string, err error) error {
+	if err == nil {
+		err = errors.New("websocket: missing event failure cause")
+	}
+	logger.ErrorAsync("WebSocket event failed", "source", source, "request_id", conn.GetRequestID(), "error", err)
+	if !conn.SendJSON(publicEventError(source, err, conn.GetRequestID())) {
+		return errors.Join(err, errors.New("outbound queue rejected error response"))
+	}
+	// Preserve the diagnostic cause for core EventError/trace accounting after
+	// the safe client response has been queued.
+	return err
 }
 
 func (a *application) authenticate(userID, tenantID, accountID, sessionID, authorization string) (core.Identity, error) {

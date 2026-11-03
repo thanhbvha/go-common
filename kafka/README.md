@@ -1,14 +1,16 @@
 # kafka
 
-A production-ready Apache Kafka client for `go-common`, built on top of
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
+An Apache Kafka client toolkit for `go-common`, built on top of
 [`github.com/twmb/franz-go`](https://github.com/twmb/franz-go) (pure-Go, CGO-free).
 
 ## Features
 
 - **Full security support** — TLS/mTLS, SASL PLAIN, SCRAM-SHA-256/512, OAuthBearer
-- **Idempotent producer** — exactly-once write guarantees enabled by default
+- **Idempotent producer** — broker producer retry deduplication enabled by default; application handlers still require idempotency
 - **Flexible producer** — sync (`Produce`), batch (`ProduceBatch`), async (`ProduceAsync`), JSON helper (`ProduceJSON`)
-- **Consumer groups** — auto offset management, seek to offset/timestamp, pause/resume
+- **Consumer groups** — independent bounded subscriptions, synchronous commits, stop on first error
 - **Topic admin** — create, delete, describe, list topics; manage retention
 - **Global default** — `SetDefault` / `Default` pattern for zero-argument use across packages
 - **Structured logging** — pluggable `Logger` interface (compatible with `go-common/logger`)
@@ -83,11 +85,10 @@ franz-go's synchronous commit APIs only after processing succeeds.
 | `ProducerCompression` | `"snappy"` | `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `ConsumerGroup` | `""` | Consumer group ID (required for Subscribe) |
 | `ConsumerAutoOffsetReset` | `"earliest"` | `"earliest"` / `"latest"` |
-| `ConsumerCommitInterval` | `1s` | Auto-commit interval; `0` = manual commit |
 | `MaxConnRetries` | `3` | Connection attempts before error |
 
 The EventBus Kafka adapter always uses manual, synchronous commits for main and
-delay consumers, regardless of `ConsumerCommitInterval`. Its delayed scheduler
+delay consumers independently of the wrapper subscriptions. Its delayed scheduler
 uses three durable tier topics and a bounded per-sweep batch.
 
 ## Admin operations
@@ -110,3 +111,29 @@ topics, err := client.ListTopics(ctx)
 // Get consumer group offsets
 offsets, err := client.ConsumerGroupOffsets(ctx, "my-group", "my-topic")
 ```
+
+## v2 consumer and lifecycle contract
+
+Each `Subscribe` or `SubscribeBatch` call owns a separate native consumer with
+manual commits and rebalance fencing. `Subscribe` stops at the first handler
+error and synchronously commits only the successful prefix of its bounded poll.
+`SubscribeBatch` commits only successful whole batches. Poll or commit errors
+stop intake. Cancellation returns `ctx.Err()`. Restart the subscription to resume
+from committed offsets; duplicate processing after crashes or ambiguous commits
+is expected, so handlers must be idempotent and honor context cancellation.
+
+`Client` itself owns the producer/admin connection. Transient health failures do
+not replace this connection or block native reconnect behavior. `Close` is
+terminal and cancels its active subscription contexts; use a new client for a new
+lifecycle. The caller must join its subscription goroutines before closing other
+handler dependencies. Call `Flush(ctx)` before `Close` when confirmed publication completion
+is required. A canceled `ProduceBatch` returns a stable snapshot; zero entries
+mean the result was not observed, and broker acceptance can remain ambiguous.
+
+v2 removes `ConsumerCommitInterval`, `CommitOffsets`, `SeekToOffset`,
+`SeekToTime`, `PauseTopics`, and `ResumeTopics` from the convenience wrapper.
+Use `NativeClientFactory.NewManualConsumer` for explicit franz-go offset and
+assignment control. Both factory consumer constructors default to manual commits.
+Use `eventbus` for automatic retries, DLQ, scheduling, and bounded parallel
+processing. The EventBus Kafka driver has its own offset coordinator and does
+not use these convenience subscription loops.

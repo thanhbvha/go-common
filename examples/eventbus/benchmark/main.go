@@ -17,12 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	kafkadriver "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
+	natsdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
+	redisdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/examples/eventbus/internal/demo"
 )
 
 type config struct {

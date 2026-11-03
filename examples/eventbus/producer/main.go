@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/examples/eventbus/internal/demo"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/examples/eventbus/internal/demo"
 )
 
 func main() {

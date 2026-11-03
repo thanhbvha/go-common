@@ -1,5 +1,7 @@
 # nats
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 NATS client wrapper with lifecycle management, JetStream, KV Store, and JSON helpers. API pattern mirrors the `redis` package.
 
 ### Prerequisites
@@ -12,7 +14,7 @@ docker run -d --name nats -p 4222:4222 nats:latest -js
 ### Quick start
 
 ```go
-import "github.com/thanhbvha/go-common/nats"
+import "github.com/thanhbvha/go-common/v2/nats"
 
 cfg := nats.DefaultConfig()
 cfg.URLs   = []string{"nats://localhost:4222"}
@@ -100,7 +102,7 @@ ack, _ := client.JSPublish(ctx, "orders.new", payload)
 fmt.Println("seq:", ack.Sequence)
 
 // JSON shorthand
-ack, _ = client.JSPublishJSON("orders.new", order)
+ack, _ = client.JSPublishJSON(ctx, "orders.new", order)
 
 // Async (fire-and-check)
 future, _ := client.JSPublishAsync("orders.new", payload)
@@ -115,11 +117,11 @@ case err := <-future.Err():
 ### JetStream – Pull Subscribe (≈ XREADGROUP pull / BLOCK)
 
 ```go
-ps, _ := client.PullSubscribe("orders.>", "order-svc")
+ps, _ := client.PullSubscribe(ctx, "orders.>", "order-svc")
 defer ps.Unsubscribe()
 
 // Fetch up to 10, block for up to 5s
-msgs, _ := client.Fetch(ps, 10, nats.WithFetchTimeout(5*time.Second))
+msgs, _ := client.Fetch(ctx, ps, 10, nats.WithFetchTimeout(5*time.Second))
 for _, msg := range msgs {
     var order Order
     _ = msg.DecodeJSON(&order)  // JSON helper
@@ -132,14 +134,14 @@ for _, msg := range msgs {
 }
 
 // Non-blocking fetch
-msgs, _ = client.FetchNoWait(ps, 10)
+msgs, _ = client.FetchNoWait(ctx, ps, 10)
 ```
 
 ### JetStream – Push Subscribe (≈ XREADGROUP push mode)
 
 ```go
 // Individual push consumer
-sub, _ := client.JSSubscribe("orders.>", "order-svc",
+sub, _ := client.JSSubscribe(ctx, "orders.>", "order-svc",
     func(msg *nats.Msg) {
         _ = process(msg)
         _ = msg.Ack()
@@ -150,7 +152,7 @@ sub, _ := client.JSSubscribe("orders.>", "order-svc",
 // Queue / competing consumers (multiple workers sharing one durable)
 for i := 0; i < 3; i++ {
     workerID := i
-    client.JSQueueSubscribe("orders.>", "order-workers", "order-svc",
+    client.JSQueueSubscribe(ctx, "orders.>", "order-workers", "order-svc",
         func(msg *nats.Msg) {
             fmt.Printf("worker %d processing seq=%d\n", workerID, msg.Sequence)
             _ = msg.Ack()
@@ -186,9 +188,9 @@ entry, _ := client.KVGet(ctx, "config", "theme")
 fmt.Println(string(entry.Value), "rev:", entry.Revision)
 
 // JSON helpers
-_, _ = client.KVPutJSON("config", "ui", AppConfig{Theme: "dark"})
+_, _ = client.KVPutJSON(ctx, "config", "ui", AppConfig{Theme: "dark"})
 var cfg AppConfig
-_ = client.KVGetJSON("config", "ui", &cfg)
+_ = client.KVGetJSON(ctx, "config", "ui", &cfg)
 
 // Set only if not exists  (≈ Redis SET NX)
 _, err := client.KVCreate2(ctx, "config", "theme", []byte("light"))
@@ -262,3 +264,27 @@ _ = client.KVDeleteBucket(ctx, "config")         // drop entire bucket
 | `PullSubscription` | Handle for pull-based fetch |
 | `PubAck` | Publish confirmation (Stream, Sequence, Duplicate) |
 | `KVEntry` | KV record (Key, Value, Revision, Operation) |
+
+## v2 lifecycle and context contract
+
+`Connect(ctx)` bounds dialing, the initial handshake, and retry backoff. After
+startup the native connection owns reconnection; calling `Connect` during a
+transient disconnect does not replace it. `Close` is terminal and waits for drain
+completion up to `Config.DrainTimeout` (30 seconds by default). Prefer
+`Drain(ctx)` from an application lifecycle hook: it rejects new wrapper operations,
+waits for subscriber callbacks and publishers, then closes the native connection.
+Deadline expiry force-closes it. Construct a new client after shutdown.
+
+Every synchronous request, JetStream admin, publish, pull fetch, and KV operation
+accepts and propagates `context.Context`. v2 adds context as the first argument
+to `JSSubscribe`, `JSQueueSubscribe`, `PullSubscribe`, `Fetch`, `FetchNoWait`,
+`JSPublishJSON`, `KVPutJSON`, and `KVGetJSON`. Core publish/subscribe registration
+remains asynchronous. Stop returned subscriptions/watchers when finished.
+
+KV uses `github.com/nats-io/nats.go/jetstream`: `KVOption` configures its
+`KeyValueConfig`, watchers return `jetstream.KeyWatcher`, and `KVEntry.Operation`
+uses `jetstream.KeyValueOp`. Handle KV errors using that package's error values.
+The legacy `JetStream()` accessor remains available for native integrations,
+including EventBus. Persistent workloads must explicitly choose file storage,
+replicas, retention limits, and deployment capacity appropriate to their needs;
+the development defaults use memory storage and one replica.

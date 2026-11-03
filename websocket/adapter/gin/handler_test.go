@@ -8,8 +8,8 @@ import (
 
 	ginframework "github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {

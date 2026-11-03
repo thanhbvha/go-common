@@ -5,10 +5,10 @@ package nethttpauth
 import (
 	"net/http"
 
-	"github.com/thanhbvha/go-common/auth"
-	"github.com/thanhbvha/go-common/auth/middleware/internal/authhttp"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
-	httpresp "github.com/thanhbvha/go-common/web/response/nethttp"
+	"github.com/thanhbvha/go-common/v2/auth"
+	"github.com/thanhbvha/go-common/v2/auth/middleware/internal/authhttp"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	httpresp "github.com/thanhbvha/go-common/v2/web/response/nethttp"
 )
 
 const (
@@ -32,7 +32,8 @@ func Middleware(manager *auth.Manager) func(http.Handler) http.Handler {
 			}
 			claims, err := manager.ValidateTokenContext(r.Context(), tokenString)
 			if err != nil {
-				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				status, message := authhttp.Failure(err)
+				_ = httpresp.Error(w, r, status, message)
 				return
 			}
 
@@ -60,7 +61,8 @@ func GenericMiddleware[T any](validator auth.ContextTokenValidator[T]) func(http
 
 			claims, err := validator.ValidateRequestToken(r.Context(), tokenString)
 			if err != nil {
-				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				status, message := authhttp.Failure(err)
+				_ = httpresp.Error(w, r, status, message)
 				return
 			}
 
@@ -96,7 +98,8 @@ func EncryptedMiddleware(manager *auth.EncryptedManager, aadExtractor AADExtract
 			}
 			details, err := manager.ValidateTokenDetailsContext(r.Context(), tokenString, aad)
 			if err != nil {
-				_ = httpresp.Error(w, r, http.StatusUnauthorized, invalidTokenMessage)
+				status, message := authhttp.Failure(err)
+				_ = httpresp.Error(w, r, status, message)
 				return
 			}
 

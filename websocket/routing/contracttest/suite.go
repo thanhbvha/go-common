@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 type Factory func(*testing.T) (routing.SessionRegistry, func() routing.DeliveryTransport)

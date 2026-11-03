@@ -10,15 +10,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
-	"github.com/thanhbvha/go-common/eventbus/driver/memory"
-	natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonkafka "github.com/thanhbvha/go-common/kafka"
-	commonnats "github.com/thanhbvha/go-common/nats"
-	commonredis "github.com/thanhbvha/go-common/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	kafkadriver "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
+	"github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
+	natsdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
+	redisdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonkafka "github.com/thanhbvha/go-common/v2/kafka"
+	commonnats "github.com/thanhbvha/go-common/v2/nats"
+	commonredis "github.com/thanhbvha/go-common/v2/redis"
 )
 
 type Runtime struct {

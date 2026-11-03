@@ -6,7 +6,7 @@ import (
 )
 
 func TestJWTManager(t *testing.T) {
-	manager, err := NewManager("my-super-secret-key-must-be-32bytes")
+	manager, err := NewManagerWithOptions(ManagerOptions{SecretKey: "my-super-secret-key-must-be-32bytes"})
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -39,15 +39,6 @@ func TestJWTManager(t *testing.T) {
 		t.Errorf("Expected Role %s, got %s", user.Role, claims.UserInfo.Role)
 	}
 
-	// 3. Extract UserInfo Directly
-	extractedUser, err := manager.ExtractUserInfo(token)
-	if err != nil {
-		t.Fatalf("Failed to extract UserInfo: %v", err)
-	}
-	if extractedUser.Email != user.Email {
-		t.Errorf("Expected Email %s, got %s", user.Email, extractedUser.Email)
-	}
-
 	// 4. Test Expired Token with a controllable clock.
 	now := time.Now()
 	clockedManager, err := NewManagerWithOptions(ManagerOptions{
@@ -68,7 +59,7 @@ func TestJWTManager(t *testing.T) {
 	}
 
 	// 5. Test Invalid Key
-	badManager, err := NewManager("wrong-key-must-also-be-32-bytes!!")
+	badManager, err := NewManagerWithOptions(ManagerOptions{SecretKey: "wrong-key-must-also-be-32-bytes!!"})
 	if err != nil {
 		t.Fatalf("Failed to create bad manager: %v", err)
 	}
@@ -78,7 +69,7 @@ func TestJWTManager(t *testing.T) {
 	}
 
 	// 6. Test short key rejection
-	_, err = NewManager("tooshort")
+	_, err = NewManagerWithOptions(ManagerOptions{SecretKey: "tooshort"})
 	if err == nil {
 		t.Error("Expected error for short secret key")
 	}

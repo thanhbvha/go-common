@@ -1,139 +1,93 @@
-package auth_test
+package auth
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/auth"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-type TestEncryptedPayload struct {
-	AccountID string `json:"account_id"`
-	SecretPin string `json:"secret_pin"`
+type genericPayload struct {
+	User   string `json:"user"`
+	Secret string `json:"secret"`
 }
 
-func setupGenericEncryptedManager(t *testing.T) (auth.GenericEncryptedManager[TestEncryptedPayload], *miniredis.Miniredis) {
-	s, err := miniredis.Run()
+func TestGenericEncryptedSharesStrictPolicy(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	opts := GenericEncryptedManagerOptions[genericPayload]{EncryptedManagerOptions: EncryptedManagerOptions{SecretKey: strings.Repeat("s", 32), AESKey: strings.Repeat("e", 32), Issuer: "issuer", Audience: []string{"api"}, MaxLifetime: time.Hour, Clock: func() time.Time { return now }, AADPolicy: RequireAAD}, Subject: func(p genericPayload) (string, error) { return p.User, nil }}
+	manager, err := NewGenericEncryptedManagerWithOptions(opts)
 	if err != nil {
-		t.Fatalf("failed to start miniredis: %v", err)
+		t.Fatal(err)
 	}
-
-	client := redis.NewClient(&redis.Options{
-		Addr: s.Addr(),
-	})
-
-	mgr, err := auth.NewGenericEncryptedManager[TestEncryptedPayload](auth.GenericEncryptedOptions{
-		SecretKey: "super-secret-jwt-key-must-be-long",
-		AESKey:    "01234567890123456789012345678901",
-		Redis:     client,
-	})
+	payload := genericPayload{User: "user", Secret: "sensitive"}
+	for _, ttl := range []time.Duration{0, -time.Second, 2 * time.Hour} {
+		if _, err := manager.GenerateTokenContext(context.Background(), payload, ttl, []byte("session")); err == nil {
+			t.Fatalf("accepted TTL %s", ttl)
+		}
+	}
+	token, err := manager.GenerateTokenContext(context.Background(), payload, time.Hour, []byte("session"))
 	if err != nil {
-		t.Fatalf("failed to create generic encrypted manager: %v", err)
+		t.Fatal(err)
 	}
-
-	return mgr, s
-}
-
-func TestGenericEncryptedManager_GenerateAndVerifyToken(t *testing.T) {
-	mgr, mr := setupGenericEncryptedManager(t)
-	defer mr.Close()
-
-	payload := TestEncryptedPayload{
-		AccountID: "acc_999",
-		SecretPin: "123456",
-	}
-
-	aad := []byte("device_iphone_12")
-
-	token, err := mgr.GenerateToken(payload, 1*time.Hour, aad)
+	got, err := manager.ValidateTokenContext(context.Background(), token, []byte("session"))
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+		t.Fatal(err)
 	}
-	if token == "" {
-		t.Fatal("expected a valid token string")
+	if got.Payload != payload || got.ID == "" || got.Subject != "user" || got.Issuer != "issuer" {
+		t.Fatalf("result=%+v", got)
 	}
-
-	// Verify success
-	var decoded TestEncryptedPayload
-	err = mgr.VerifyToken(token, &decoded, aad)
-	if err != nil {
-		t.Fatalf("expected no error during verification, got %v", err)
+	if _, err = manager.ValidateTokenContext(context.Background(), token, []byte("wrong")); err == nil {
+		t.Fatal("wrong AAD accepted")
 	}
-
-	if decoded.AccountID != "acc_999" {
-		t.Errorf("expected AccountID to be 'acc_999', got '%s'", decoded.AccountID)
+	if _, err = manager.ValidateTokenContext(context.Background(), strings.Repeat("x", DefaultMaxTokenSize+1), []byte("session")); !errors.Is(err, ErrTokenTooLarge) {
+		t.Fatalf("oversized error=%v", err)
 	}
-	if decoded.SecretPin != "123456" {
-		t.Errorf("expected SecretPin to be '123456', got '%s'", decoded.SecretPin)
-	}
-
-	// Verify failure with wrong AAD
-	var decodedWrong TestEncryptedPayload
-	err = mgr.VerifyToken(token, &decodedWrong, []byte("wrong_device"))
-	if err == nil {
-		t.Fatal("expected error when verifying with wrong AAD, got nil")
+	claims := EncryptedClaims{Payload: "unused", RegisteredClaims: jwt.RegisteredClaims{Subject: "user"}}
+	bad, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(strings.Repeat("s", 32)))
+	if _, err = manager.ValidateTokenContext(context.Background(), bad, []byte("session")); err == nil {
+		t.Fatal("missing expiration accepted")
 	}
 }
 
-func TestGenericEncryptedManager_RefreshToken(t *testing.T) {
-	mgr, mr := setupGenericEncryptedManager(t)
-	defer mr.Close()
-
-	ctx := context.Background()
-	userID := "user_456"
-
-	rt, err := mgr.GenerateRefreshToken(ctx, userID, 24*time.Hour)
+func TestGenericEncryptedRevocationAndRotation(t *testing.T) {
+	checker := &stubRevocationChecker{}
+	opts := GenericEncryptedManagerOptions[genericPayload]{EncryptedManagerOptions: EncryptedManagerOptions{SecretKey: strings.Repeat("s", 32), AESKey: strings.Repeat("e", 32), Revocation: checker}, Subject: func(p genericPayload) (string, error) { return p.User, nil }}
+	manager, err := NewGenericEncryptedManagerWithOptions(opts)
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+		t.Fatal(err)
 	}
-
-	isValid, err := mgr.VerifyRefreshToken(ctx, userID, rt)
+	token, err := manager.GenerateTokenContext(context.Background(), genericPayload{User: "u"}, time.Hour, nil)
 	if err != nil {
-		t.Fatalf("expected no error verifying refresh token, got %v", err)
+		t.Fatal(err)
 	}
-	if !isValid {
-		t.Fatal("expected refresh token to be valid")
+	checker.revoked = true
+	if _, err = manager.ValidateTokenContext(context.Background(), token, nil); !errors.Is(err, ErrTokenRevoked) {
+		t.Fatalf("revoked error=%v", err)
 	}
-
-	err = mgr.RevokeRefreshToken(ctx, userID)
-	if err != nil {
-		t.Fatalf("expected no error revoking refresh token, got %v", err)
-	}
-
-	isValid, _ = mgr.VerifyRefreshToken(ctx, userID, rt)
-	if isValid {
-		t.Fatal("expected refresh token to be invalid after revocation")
+	checker.revoked = false
+	cause := errors.New("revocation backend unavailable")
+	checker.err = cause
+	if _, err = manager.ValidateTokenContext(context.Background(), token, nil); !errors.Is(err, ErrAuthBackendUnavailable) || !errors.Is(err, cause) {
+		t.Fatalf("backend classification=%v", err)
 	}
 }
 
-func TestGenericEncryptedManager_TokenRevocation(t *testing.T) {
-	mgr, mr := setupGenericEncryptedManager(t)
-	defer mr.Close()
-
-	ctx := context.Background()
-	jti := "unique-jti-789"
-
-	isRevoked, err := mgr.IsRevoked(ctx, jti)
+func TestGenericEncryptedRejectsNilPayloadBeforeSubjectExtraction(t *testing.T) {
+	manager, err := NewGenericEncryptedManagerWithOptions(GenericEncryptedManagerOptions[*genericPayload]{EncryptedManagerOptions: EncryptedManagerOptions{SecretKey: strings.Repeat("s", 32), AESKey: strings.Repeat("e", 32)}, Subject: func(p *genericPayload) (string, error) { return p.User, nil }})
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+		t.Fatal(err)
 	}
-	if isRevoked {
-		t.Fatal("expected token to not be revoked yet")
+	if _, err := manager.GenerateTokenContext(context.Background(), nil, time.Hour, nil); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatal(err)
 	}
-
-	err = mgr.RevokeToken(ctx, jti, 15*time.Minute)
+	token, err := manager.engine.generatePayload(context.Background(), "u", (*genericPayload)(nil), time.Hour, nil)
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+		t.Fatal(err)
 	}
-
-	isRevoked, err = mgr.IsRevoked(ctx, jti)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !isRevoked {
-		t.Fatal("expected token to be revoked")
+	if _, err := manager.ValidateTokenContext(context.Background(), token, nil); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatal(err)
 	}
 }

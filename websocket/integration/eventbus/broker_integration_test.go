@@ -5,6 +5,7 @@ package eventbus_test
 import (
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -13,20 +14,23 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	gonats "github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
-	bus "github.com/thanhbvha/go-common/eventbus"
-	natsbus "github.com/thanhbvha/go-common/eventbus/driver/nats"
-	redisbus "github.com/thanhbvha/go-common/eventbus/driver/redis"
-	bridge "github.com/thanhbvha/go-common/websocket/integration/eventbus"
-	"github.com/thanhbvha/go-common/websocket/routing"
-	"github.com/thanhbvha/go-common/websocket/routing/contracttest"
-	natsrouting "github.com/thanhbvha/go-common/websocket/routing/nats"
-	redisrouting "github.com/thanhbvha/go-common/websocket/routing/redis"
+	bus "github.com/thanhbvha/go-common/v2/eventbus"
+	natsbus "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
+	redisbus "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
+	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/routing/contracttest"
+	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
+	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
 )
 
 func realRedis(t *testing.T) *goredis.Client {
 	t.Helper()
 	binary, err := exec.LookPath("redis-server")
 	if err != nil {
+		if os.Getenv("EVENTBUS_INTEGRATION_REQUIRED") == "1" {
+			t.Fatal("redis-server is required", err)
+		}
 		t.Skip("redis-server not installed")
 	}
 	socket := filepath.Join(t.TempDir(), "redis.sock")

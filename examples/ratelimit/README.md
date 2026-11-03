@@ -20,10 +20,10 @@ seconds.
 1..6 | ForEach-Object { Invoke-WebRequest http://localhost:3000/api/data -SkipHttpErrorCheck | Select-Object StatusCode }
 ```
 
-The sixth request should return HTTP 429. Middleware currently fails open when
-Redis is unavailable, but this example verifies Redis during startup so that
-the behavior is visible. Decide explicitly whether fail-open is acceptable for
-sensitive endpoints such as login, OTP, and password reset.
+The sixth request returns HTTP 429 with Retry-After. This example explicitly
+uses FailClosed: Redis outages return HTTP 503 and never bypass the quota.
+Applications choosing FailOpen must select it during middleware construction
+and observe backend failures through OnError.
 
 IP-based limits can group users behind NAT. For authenticated APIs, use a custom
 key generator based on a verified user or API-key context, not a caller-supplied

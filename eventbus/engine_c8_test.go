@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/registry"
+	"github.com/thanhbvha/go-common/v2/eventbus/registry"
 )
 
 func TestEngine_C8_ShutdownGracefully(t *testing.T) {

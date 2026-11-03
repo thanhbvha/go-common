@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thanhbvha/go-common/grpc/interceptors"
+	"github.com/thanhbvha/go-common/v2/grpc/interceptors"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -96,8 +96,8 @@ func NewServer(cfg ServerConfig, options ...grpc.ServerOption) *Server {
 	if cfg.EnableHealth {
 		healthcheck = health.NewServer()
 		grpc_health_v1.RegisterHealthServer(srv, healthcheck)
-		// Mark server as ready
-		healthcheck.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+		// Readiness is application-owned; bootstrap must mark dependencies ready.
+		healthcheck.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	}
 
 	// 6. Enable Server Reflection for easier debugging (e.g. grpcurl, Postman)

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/health"
+	"github.com/thanhbvha/go-common/v2/health"
 )
 
 func TestHealthChecks(t *testing.T) {
@@ -109,5 +109,26 @@ func TestHealthChecksHideErrorDetailsByDefault(t *testing.T) {
 	res = c.WithErrorDetails(true).CheckReadiness(context.Background())
 	if got := res.Checks["database"].Error; got == "" {
 		t.Fatal("expected dependency error when diagnostic details are enabled")
+	}
+}
+
+func TestRepeatedProbesDoNotStartConcurrentBlockedChecks(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	checker := health.New().WithTimeout(time.Millisecond).AddReadinessCheck("blocked", func(context.Context) error { entered <- struct{}{}; <-release; return nil })
+	if checker.CheckReadiness(t.Context()).Status != health.StatusDown {
+		t.Fatal("blocked check healthy")
+	}
+	<-entered
+	for range 100 {
+		if checker.CheckReadiness(t.Context()).Status != health.StatusDown {
+			t.Fatal("busy check healthy")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("checker executed concurrently")
+	default:
 	}
 }

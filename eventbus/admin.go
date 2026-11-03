@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 // TopologyRef explicitly selects a task or event topology for administration.

@@ -3,15 +3,16 @@ package demo
 import (
 	"context"
 	"io"
+	"log/slog"
 	"sync"
 
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	commonlogger "github.com/thanhbvha/go-common/logger"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	commonlogger "github.com/thanhbvha/go-common/v2/logger"
 )
 
 type Logger struct {
-	base   *commonlogger.Logger
+	base   *slog.Logger
 	closer *commonlogger.Logger
 	silent bool
 }

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func TestRedisSingleNodeRetentionIntegration(t *testing.T) {
@@ -45,7 +45,7 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := rc.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis %s unavailable: %v", mode, err)
+		redisIntegrationUnavailable(t, "Redis "+mode, err)
 	}
 	namespace := fmt.Sprintf("p671r-%s-%d", mode, time.Now().UnixNano())
 	t.Cleanup(func() {
@@ -60,6 +60,11 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 	t.Cleanup(func() { _ = first.Close(context.Background()) })
 	topo := transport.Topology{Namespace: namespace, JobType: "watermark", Kind: transport.EventTopology,
 		Options: map[string]any{"redis.retention_interval": time.Hour, "redis.retention_batch_size": int64(100), redisEventLayoutOption: redisTargetedLayoutV1}}
+	// Direct driver fixtures must provision persisted layout/capacity metadata
+	// before registering subscribers, just like the public Bus startup path.
+	if err := first.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
 	for _, group := range []string{"fast", "slow"} {
 		if err := first.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: group}); err != nil {
 			t.Fatal(err)
@@ -150,6 +155,16 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 	}
 	restarted := New(rc).(*redisTransport)
 	t.Cleanup(func() { _ = restarted.Close(context.Background()) })
+	// Repeated provisioning after restart must preserve the subscriber manifest
+	// and acknowledged-retention state; tests never rely on previous test runs.
+	if err := restarted.EnsureTopology(ctx, topo); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []string{"fast", "slow"} {
+		if err := restarted.EnsureSubscription(ctx, transport.Subscription{Topology: topo, Group: group}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	report, err := restarted.RetentionReport(ctx, topo)
 	if err != nil || report.ActiveGroups != 2 || report.MissingGroups != 0 || report.UnmanagedGroups != 0 {
 		t.Fatalf("restart report=%+v err=%v", report, err)
@@ -157,6 +172,9 @@ func runLiveRetentionContract(t *testing.T, rc goredis.UniversalClient, mode str
 
 	capacityTopo := transport.Topology{Namespace: namespace, JobType: "offline-capacity", Kind: transport.EventTopology,
 		Options: map[string]any{"redis.max_ready_entries": int64(32), "redis.retention_interval": time.Hour, redisEventLayoutOption: redisTargetedLayoutV1}}
+	if err := restarted.EnsureTopology(ctx, capacityTopo); err != nil {
+		t.Fatal(err)
+	}
 	if err := restarted.EnsureSubscription(ctx, transport.Subscription{Topology: capacityTopo, Group: "offline"}); err != nil {
 		t.Fatal(err)
 	}

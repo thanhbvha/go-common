@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 type routingPubSub struct {

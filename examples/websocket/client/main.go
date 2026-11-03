@@ -20,7 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/thanhbvha/go-common/examples/websocket/internal/exampleconfig"
+	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
 )
 
 type clientConfig struct {

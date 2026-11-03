@@ -18,7 +18,7 @@ Invoke-RestMethod http://127.0.0.1:3000/panic
 ```
 
 The client receives a generic HTTP 500 response containing a request ID. The
-server log contains the synthetic panic message and its origin file, line,
+server log contains the panic type and its origin file, line,
 function, and bounded stack.
 
 Trigger a background-goroutine panic:

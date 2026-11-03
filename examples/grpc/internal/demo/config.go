@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/telemetry"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/telemetry"
 )
 
 const maxMessageBytes = 64 << 10
@@ -146,9 +146,12 @@ func initTelemetryProvider(ctx context.Context, service string, o CommonOptions)
 	cfg.Endpoint = o.OTLPEndpoint
 	cfg.Insecure = o.OTLPInsecure
 	cfg.SamplingRate = 0.1
-	tel, err := telemetry.Init(ctx, cfg)
+	tel, err := telemetry.New(ctx, cfg)
 	if err != nil {
 		return nil, errors.New("telemetry initialization failed")
+	}
+	if err := tel.InstallGlobal(); err != nil {
+		return nil, errors.Join(err, tel.Shutdown(context.WithoutCancel(ctx)))
 	}
 	return tel.Shutdown, nil
 }

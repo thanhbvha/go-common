@@ -1,4 +1,4 @@
-// Package nats provides a production-ready NATS client wrapper built on top of
+// Package nats provides a NATS client wrapper built on top of
 // github.com/nats-io/nats.go. It supports NATS Core (Pub/Sub, Request/Reply)
 // and JetStream (persistent streams, durable consumers, KV store).
 //
@@ -72,6 +72,9 @@ type Config struct {
 	// Default: 5s.
 	ConnectTimeout time.Duration
 
+	// DrainTimeout bounds Close; Drain(ctx) uses the caller deadline. Default: 30s.
+	DrainTimeout time.Duration
+
 	// ReconnectWait is the time to wait between reconnection attempts.
 	// Default: 2s.
 	ReconnectWait time.Duration
@@ -119,11 +122,12 @@ type Logger interface {
 	ErrorAsync(msg string, args ...any)
 }
 
-// DefaultConfig returns a Config pre-populated with sensible production defaults.
+// DefaultConfig returns the documented connection and development storage defaults.
 func DefaultConfig() Config {
 	return Config{
 		URLs:            []string{"nats://localhost:4222"},
 		ConnectTimeout:  5 * time.Second,
+		DrainTimeout:    30 * time.Second,
 		ReconnectWait:   2 * time.Second,
 		MaxReconnects:   60,
 		MaxConnRetries:  3,

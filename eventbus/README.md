@@ -1,5 +1,7 @@
 # EventBus
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 `eventbus` is a transport-neutral, at-least-once task and event delivery engine
 for Go services. It provides one public API over bounded in-memory delivery,
 Redis Streams, NATS JetStream, and Kafka while keeping each transport's real
@@ -100,7 +102,7 @@ and soak evidence.
 ## Installation
 
 ```bash
-go get github.com/thanhbvha/go-common
+go get github.com/thanhbvha/go-common/v2
 ```
 
 The module uses the Go version declared in the repository's `go.mod`.
@@ -120,8 +122,8 @@ import (
     "log"
     "time"
 
-    "github.com/thanhbvha/go-common/eventbus"
-    "github.com/thanhbvha/go-common/eventbus/driver/memory"
+    "github.com/thanhbvha/go-common/v2/eventbus"
+    "github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
 )
 
 type SendEmail struct {
@@ -316,7 +318,7 @@ Drivers register factories from `init`. Registry construction requires importing
 the selected driver and configuring its package-level default client first:
 
 ```go
-import _ "github.com/thanhbvha/go-common/eventbus/driver/memory"
+import _ "github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
 
 cfg := eventbus.DefaultConfig()
 cfg.Driver = "memory"
@@ -334,7 +336,7 @@ failure mode and is preferable for broker-backed applications.
 ### Memory
 
 ```go
-import "github.com/thanhbvha/go-common/eventbus/driver/memory"
+import "github.com/thanhbvha/go-common/v2/eventbus/driver/memory"
 
 tr := memory.New()
 bus, err := eventbus.Open(cfg, eventbus.WithTransport(tr))
@@ -352,8 +354,8 @@ Use memory only when process-local loss is acceptable.
 
 ```go
 import (
-    commonredis "github.com/thanhbvha/go-common/redis"
-    redisdriver "github.com/thanhbvha/go-common/eventbus/driver/redis"
+    commonredis "github.com/thanhbvha/go-common/v2/redis"
+    redisdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/redis"
 )
 
 clientCfg := commonredis.DefaultConfig()
@@ -391,8 +393,8 @@ redisdriver.WithRetentionMinAge(time.Hour)
 
 ```go
 import (
-    commonnats "github.com/thanhbvha/go-common/nats"
-    natsdriver "github.com/thanhbvha/go-common/eventbus/driver/nats"
+    commonnats "github.com/thanhbvha/go-common/v2/nats"
+    natsdriver "github.com/thanhbvha/go-common/v2/eventbus/driver/nats"
 )
 
 clientCfg := commonnats.DefaultConfig()
@@ -427,8 +429,8 @@ real durability of the deployment.
 
 ```go
 import (
-    commonkafka "github.com/thanhbvha/go-common/kafka"
-    kafkadriver "github.com/thanhbvha/go-common/eventbus/driver/kafka"
+    commonkafka "github.com/thanhbvha/go-common/v2/kafka"
+    kafkadriver "github.com/thanhbvha/go-common/v2/eventbus/driver/kafka"
 )
 
 clientCfg := commonkafka.DefaultConfig()

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/ratelimit"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/ratelimit"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 type stubLimiter struct {
@@ -39,7 +39,7 @@ func TestMiddlewareAllowsAndSetsHeaders(t *testing.T) {
 	req = req.WithContext(ctxkey.SetRequestID(req.Context(), "req-limit"))
 	recorder := httptest.NewRecorder()
 
-	Middleware(limiter, cfg, nil)(next).ServeHTTP(recorder, req)
+	mustMiddleware(t, limiter, cfg, nil)(next).ServeHTTP(recorder, req)
 
 	if !called || recorder.Code != http.StatusNoContent || limiter.key != "192.0.2.10" {
 		t.Fatalf("called = %v, status = %d, key = %q", called, recorder.Code, limiter.key)
@@ -61,7 +61,7 @@ func TestMiddlewareRejectsRequest(t *testing.T) {
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
 	recorder := httptest.NewRecorder()
 
-	Middleware(limiter, ratelimit.Config{Limit: 1, Window: time.Minute}, func(*http.Request) string {
+	mustMiddleware(t, limiter, ratelimit.Config{Limit: 1, Window: time.Minute}, func(*http.Request) string {
 		return "user-1"
 	})(next).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/items", nil))
 
@@ -90,12 +90,40 @@ func TestMiddlewareFailsOpen(t *testing.T) {
 			})
 			recorder := httptest.NewRecorder()
 
-			Middleware(tt.limiter, ratelimit.Config{Limit: 1, Window: time.Minute}, tt.keyGen)(next).
+			mustMiddleware(t, tt.limiter, ratelimit.Config{Limit: 1, Window: time.Minute}, tt.keyGen)(next).
 				ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 
 			if !called || recorder.Code != http.StatusNoContent {
 				t.Fatalf("called = %v, status = %d", called, recorder.Code)
 			}
 		})
+	}
+}
+
+func mustMiddleware(t *testing.T, l ratelimit.Limiter, cfg ratelimit.Config, keyGen KeyGenerator) func(http.Handler) http.Handler {
+	t.Helper()
+	middleware, err := Middleware(l, ratelimit.MiddlewareConfig{Policy: cfg, FailurePolicy: ratelimit.FailOpen}, keyGen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return middleware
+}
+func TestFailClosedAndExplicitPolicy(t *testing.T) {
+	cfg := ratelimit.MiddlewareConfig{Policy: ratelimit.Config{Limit: 1, Window: time.Second}}
+	if _, err := Middleware(&stubLimiter{}, cfg, nil); err == nil {
+		t.Fatal("missing failure policy accepted")
+	}
+	cfg.FailurePolicy = ratelimit.FailClosed
+	observed := false
+	cfg.OnError = func(context.Context, error) { observed = true }
+	mw, err := Middleware(&stubLimiter{err: errors.New("backend offline")}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	recorder := httptest.NewRecorder()
+	mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(recorder, httptest.NewRequest("GET", "/", nil))
+	if called || !observed || recorder.Code != 503 {
+		t.Fatalf("called=%v observed=%v status=%d", called, observed, recorder.Code)
 	}
 }

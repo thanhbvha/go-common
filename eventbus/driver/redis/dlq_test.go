@@ -10,8 +10,8 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/eventbus"
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 )
 
 func addDLQRecord(t *testing.T, backend *redisTransport, rc *goredis.Client, topo transport.Topology, recordID string, index int) []byte {

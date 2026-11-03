@@ -3,7 +3,7 @@ package kafka
 import (
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus"
+	"github.com/thanhbvha/go-common/v2/eventbus"
 )
 
 // WithPartitions sets the number of partitions when auto-creating topics.

@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thanhbvha/go-common/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
 // RuntimeMetrics contains low-cardinality cumulative WebSocket counters.

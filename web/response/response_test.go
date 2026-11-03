@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 func TestFromErrorMasksInternalError(t *testing.T) {
@@ -21,8 +21,31 @@ func TestFromErrorMasksInternalError(t *testing.T) {
 func TestFromErrorPreservesPublicCustomError(t *testing.T) {
 	err := xerrors.New("NOT_FOUND", "user does not exist", http.StatusNotFound)
 	got := FromError(err, "request-123")
-	if got.Code != http.StatusNotFound || got.Status != "NOT_FOUND" || got.Message != err.Error() {
+	if got.Code != http.StatusNotFound || got.Status != "NOT_FOUND" || got.Message != "user does not exist" {
 		t.Fatalf("unexpected response: %+v", got)
+	}
+}
+
+func TestFromErrorNeverExposesCauseOrServerMessage(t *testing.T) {
+	for _, status := range []int{400, 401, 404, 422, 500, 502, 503, 504} {
+		err := xerrors.Wrap(errors.New("password=secret"), "BACKEND", "public message", status)
+		got := FromError(err, "req")
+		want := "public message"
+		if status >= 500 {
+			want = internalErrorMessage
+		}
+		if got.Message != want {
+			t.Fatalf("status %d: unsafe message %q", status, got.Message)
+		}
+	}
+}
+
+func TestFromErrorInvalidStatusIsInternal(t *testing.T) {
+	for _, status := range []int{0, 200, 399, 600} {
+		got := FromError(xerrors.New("BAD", "private", status), "req")
+		if got.Code != 500 || got.Message != internalErrorMessage {
+			t.Fatalf("invalid status %d: %+v", status, got)
+		}
 	}
 }
 

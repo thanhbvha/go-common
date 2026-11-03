@@ -1,5 +1,7 @@
 # gRPC
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 Reusable gRPC client/server wrappers with unary and streaming recovery, error
 mapping, metadata-free request logging, optional OpenTelemetry, and health checks.
 
@@ -25,7 +27,7 @@ srv := common_grpc.NewServer(cfg,
     grpc.ChainStreamInterceptor(authStream),
 )
 // Register protobuf services before serving.
-// Health starts SERVING for compatibility; control readiness explicitly:
+// Health starts NOT_SERVING; initialize dependencies before marking ready:
 srv.Health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 // Initialize application dependencies, then set SERVING.
 
@@ -84,7 +86,7 @@ For `foundation`, keep blocking serving in `Component.Run`. The adapter can bind
 in Start, serve in Run and invoke the wrapper shutdown in Stop:
 
 ```go
-// grpcadapter: github.com/thanhbvha/go-common/foundation/adapter/grpc
+// grpcadapter: github.com/thanhbvha/go-common/v2/foundation/adapter/grpc
 // app: an initialized foundation.App; srv: the wrapper created above
 err := app.Register(grpcadapter.ComponentWithShutdown(
     "grpc", ":50051", srv.Server, srv.Shutdown,
@@ -132,12 +134,15 @@ are application choices: only retry operations safe to repeat, with a bounded bu
 
 ## Error and log policy
 
-Both unary and streaming RPCs preserve explicit gRPC statuses/details and map
-`xerrors` to gRPC codes. Context cancellation/deadline errors are mapped correctly.
+Both unary and streaming RPCs preserve explicit client-error gRPC statuses/details
+and map `xerrors` to gRPC codes. Context cancellation/deadline errors are mapped correctly.
 HTTP 422 maps to InvalidArgument and 413 to ResourceExhausted. Any non-nil error
 with a success HTTP status maps to Internal rather than silently succeeding.
-Unknown errors and 5xx `xerrors` expose a generic message. Explicit gRPC statuses
-and 4xx `xerrors.Message` are public contracts: keep sensitive data out of them.
+Unknown errors and 5xx `xerrors` expose a generic message. Explicit server/transport
+statuses (`Internal`, `Unknown`, `DataLoss`, `Unavailable`, `Unimplemented`,
+`DeadlineExceeded`, and `Canceled`) are rebuilt with generic messages and no
+details. Other explicit statuses and 4xx `xerrors.Message` values are public
+contracts: keep sensitive data out of them.
 
 Logs include method, latency and status, without payloads, metadata, raw errors or
 panic values. Recovery logs a stack trace and returns Internal. Protect access to

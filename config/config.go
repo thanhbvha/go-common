@@ -21,7 +21,11 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -29,6 +33,9 @@ import (
 
 // Options holds configuration for the config loader.
 type Options struct {
+	// Validate runs after decoding, before a configuration is accepted.
+	Validate func(any) error
+
 	// Path to the config file (e.g. "config.yaml", ".env")
 	// If empty, it will only read from environment variables.
 	Path string
@@ -55,41 +62,111 @@ func DefaultOptions() Options {
 
 // Load loads configuration from the given options into the target struct.
 // target should be a pointer to a struct.
-func Load(opts Options, target interface{}) error {
+func Load(opts Options, target any) error {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() || value.Elem().Kind() != reflect.Struct {
+		return errors.New("config: target must be a non-nil struct pointer")
+	}
 	v := viper.New()
-
 	if opts.Path != "" {
 		v.SetConfigFile(opts.Path)
-		if filepath.Base(opts.Path) == ".env" {
+		if strings.HasPrefix(filepath.Base(opts.Path), ".env") {
 			v.SetConfigType("env")
 		}
-		err := v.ReadInConfig()
-		if err != nil {
-			if !opts.IgnoreFileNotFound {
+		if err := v.ReadInConfig(); err != nil {
+			var notFound viper.ConfigFileNotFoundError
+			if !opts.IgnoreFileNotFound || (!errors.Is(err, os.ErrNotExist) && !errors.As(err, &notFound)) {
 				return err
 			}
-			// If IgnoreFileNotFound is true, we only ignore "not found" errors.
-			// Viper might return viper.ConfigFileNotFoundError or standard os.PathError.
-			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-				if !strings.Contains(err.Error(), "no such file or directory") &&
-					!strings.Contains(err.Error(), "The system cannot find the file specified") {
-					return err
-				}
+		}
+	}
+	if opts.AutomaticEnv {
+		v.SetEnvPrefix(opts.EnvPrefix)
+		v.AllowEmptyEnv(true)
+		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+		v.AutomaticEnv()
+		if err := bindFields(v, value.Elem().Type(), "", map[reflect.Type]bool{}); err != nil {
+			return err
+		}
+	}
+	// Decode into a fresh value. Failed parsing or validation never partially
+	// overwrites the caller's last accepted configuration.
+	candidate, err := cloneDefaults(value.Elem(), 0)
+	if err != nil {
+		return err
+	}
+	fresh := reflect.New(value.Elem().Type())
+	fresh.Elem().Set(candidate)
+	if err := v.Unmarshal(fresh.Interface()); err != nil {
+		return err
+	}
+	if opts.Validate != nil {
+		if err := opts.Validate(fresh.Interface()); err != nil {
+			return err
+		}
+	}
+	value.Elem().Set(fresh.Elem())
+	return nil
+}
+
+func bindFields(v *viper.Viper, t reflect.Type, prefix string, seen map[reflect.Type]bool) error {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	if seen[t] {
+		return fmt.Errorf("config: recursive configuration type %s", t)
+	}
+	seen[t] = true
+	defer delete(seen, t)
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		tag := strings.Split(f.Tag.Get("mapstructure"), ",")
+		name := tag[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(f.Name)
+		}
+		key := name
+		if prefix != "" {
+			key = prefix + "." + name
+		}
+		squash := false
+		for _, option := range tag[1:] {
+			squash = squash || option == "squash"
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		// Struct values with scalar decoding (notably time.Time) remain leaves.
+		if ft.Kind() == reflect.Struct && ft.PkgPath() != "time" {
+			if squash {
+				key = prefix
+			}
+			if err := bindFields(v, ft, key, seen); err != nil {
+				return err
+			}
+		} else {
+			// dotenv uses flat names; retain nested struct mapping without making file
+			// values higher precedence than actual environment variables.
+			flat := strings.NewReplacer(".", "_", "-", "_").Replace(key)
+			if flat != key && v.IsSet(flat) {
+				v.SetDefault(key, v.Get(flat))
+			}
+			if err := v.BindEnv(key); err != nil {
+				return err
 			}
 		}
 	}
-
-	if opts.AutomaticEnv {
-		if opts.EnvPrefix != "" {
-			v.SetEnvPrefix(opts.EnvPrefix)
-		}
-		// Replace dots and dashes with underscores for env variables
-		// e.g., database.host -> DATABASE_HOST
-		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
-		v.AutomaticEnv()
-	}
-
-	return v.Unmarshal(target)
+	return nil
 }
 
 // LoadEnv is a convenience function to load a .env file (if it exists)
@@ -99,4 +176,82 @@ func LoadEnv(path string, target interface{}) error {
 	opts.Path = path
 	opts.IgnoreFileNotFound = true // Usually .env is optional in production
 	return Load(opts, target)
+}
+
+// cloneDefaults keeps decoding transactional even when mapstructure merges into
+// caller-initialized pointer, map or slice defaults.
+func cloneDefaults(value reflect.Value, depth int) (reflect.Value, error) {
+	if depth > 128 {
+		return reflect.Value{}, errors.New("config: defaults exceed maximum nesting depth")
+	}
+	out := reflect.New(value.Type()).Elem()
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return out, nil
+		}
+		out.Set(reflect.New(value.Type().Elem()))
+		child, err := cloneDefaults(value.Elem(), depth+1)
+		if err != nil {
+			return out, err
+		}
+		out.Elem().Set(child)
+	case reflect.Interface:
+		if value.IsNil() {
+			return out, nil
+		}
+		child, err := cloneDefaults(value.Elem(), depth+1)
+		if err != nil {
+			return out, err
+		}
+		out.Set(child)
+	case reflect.Map:
+		if value.IsNil() {
+			return out, nil
+		}
+		out.Set(reflect.MakeMapWithSize(value.Type(), value.Len()))
+		iter := value.MapRange()
+		for iter.Next() {
+			child, err := cloneDefaults(iter.Value(), depth+1)
+			if err != nil {
+				return out, err
+			}
+			out.SetMapIndex(iter.Key(), child)
+		}
+	case reflect.Slice:
+		if value.IsNil() {
+			return out, nil
+		}
+		out.Set(reflect.MakeSlice(value.Type(), value.Len(), value.Len()))
+		for i := 0; i < value.Len(); i++ {
+			child, err := cloneDefaults(value.Index(i), depth+1)
+			if err != nil {
+				return out, err
+			}
+			out.Index(i).Set(child)
+		}
+	case reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			child, err := cloneDefaults(value.Index(i), depth+1)
+			if err != nil {
+				return out, err
+			}
+			out.Index(i).Set(child)
+		}
+	case reflect.Struct:
+		out.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			child, err := cloneDefaults(value.Field(i), depth+1)
+			if err != nil {
+				return out, err
+			}
+			out.Field(i).Set(child)
+		}
+	default:
+		out.Set(value)
+	}
+	return out, nil
 }

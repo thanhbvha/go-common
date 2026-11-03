@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -59,41 +60,44 @@ func (c *Client) ProduceBatch(ctx context.Context, msgs []Message) ([]ProduceRes
 		return nil, err
 	}
 
+	return produceBatch(ctx, kc, msgs)
+}
+
+type batchProducer interface {
+	Produce(context.Context, *kgo.Record, func(*kgo.Record, error))
+}
+
+func produceBatch(ctx context.Context, producer batchProducer, msgs []Message) ([]ProduceResult, error) {
+	type outcome struct {
+		index  int
+		result ProduceResult
+		err    error
+	}
+	completed := make(chan outcome, len(msgs))
 	results := make([]ProduceResult, len(msgs))
 	errs := make([]error, len(msgs))
-	done := make(chan struct{}, len(msgs))
-
 	for i, msg := range msgs {
-		rec := messageToRecord(msg)
-		idx := i
-		kc.Produce(ctx, rec, func(r *kgo.Record, callbackErr error) {
-			if callbackErr != nil {
-				errs[idx] = fmt.Errorf("kafka: produce failed for topic %q message %d: %w", r.Topic, idx, callbackErr)
+		producer.Produce(ctx, messageToRecord(msg), func(record *kgo.Record, err error) {
+			item := outcome{index: i}
+			if err != nil {
+				item.err = fmt.Errorf("kafka: produce topic=%q message=%d: %w", msg.Topic, i, err)
 			} else {
-				results[idx] = ProduceResult{
-					Topic:     r.Topic,
-					Partition: r.Partition,
-					Offset:    r.Offset,
-					Timestamp: r.Timestamp,
-				}
+				item.result = ProduceResult{Topic: record.Topic, Partition: record.Partition, Offset: record.Offset, Timestamp: record.Timestamp}
 			}
-			done <- struct{}{}
+			completed <- item
 		})
 	}
-
-	// Wait for all callbacks or context cancellation.
 	for range msgs {
 		select {
-		case <-done:
+		case item := <-completed:
+			results[item.index], errs[item.index] = item.result, item.err
 		case <-ctx.Done():
-			return results, fmt.Errorf("kafka: ProduceBatch context cancelled: %w", ctx.Err())
+			return results, fmt.Errorf("kafka: ProduceBatch context cancelled; acceptance may be ambiguous: %w", ctx.Err())
 		}
 	}
-
-	// Return the first non-nil error encountered.
-	for _, e := range errs {
-		if e != nil {
-			return results, e
+	for _, err := range errs {
+		if err != nil {
+			return results, err
 		}
 	}
 	return results, nil
@@ -162,12 +166,13 @@ func (c *Client) Flush(ctx context.Context) error {
 
 // ---- internal helpers ----
 
-// messageToRecord converts a Message to a *kgo.Record for franz-go.
+// messageToRecord snapshots caller-owned bytes for native asynchronous use.
+// Native callbacks may outlive a canceled synchronous publication.
 func messageToRecord(msg Message) *kgo.Record {
 	rec := &kgo.Record{
 		Topic: msg.Topic,
-		Key:   msg.Key,
-		Value: msg.Value,
+		Key:   bytes.Clone(msg.Key),
+		Value: bytes.Clone(msg.Value),
 	}
 
 	if !msg.Timestamp.IsZero() {
@@ -179,7 +184,7 @@ func messageToRecord(msg Message) *kgo.Record {
 	if len(msg.Headers) > 0 {
 		rec.Headers = make([]kgo.RecordHeader, len(msg.Headers))
 		for i, h := range msg.Headers {
-			rec.Headers[i] = kgo.RecordHeader{Key: h.Key, Value: h.Value}
+			rec.Headers[i] = kgo.RecordHeader{Key: h.Key, Value: bytes.Clone(h.Value)}
 		}
 	}
 

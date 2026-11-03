@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	buscontract "github.com/thanhbvha/go-common/eventbus/contracttest"
-	"github.com/thanhbvha/go-common/eventbus/transport"
-	transportcontract "github.com/thanhbvha/go-common/eventbus/transport/contracttest"
+	buscontract "github.com/thanhbvha/go-common/v2/eventbus/contracttest"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
+	transportcontract "github.com/thanhbvha/go-common/v2/eventbus/transport/contracttest"
 )
 
 func TestMemoryTransportContract(t *testing.T) {

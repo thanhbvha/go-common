@@ -9,20 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thanhbvha/go-common/eventbus/transport"
+	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestKafkaSettlementBrokerFaultWindows(t *testing.T) {
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer probeCancel()
-	producer, err := kgo.NewClient(kgo.SeedBrokers("localhost:9092"))
+	producer, err := kgo.NewClient(kgo.SeedBrokers(kafkaIntegrationBrokers(t)...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer producer.Close()
 	if err := producer.Ping(probeCtx); err != nil {
-		t.Skipf("Kafka not available: %v", err)
+		kafkaFixtureUnavailable(t, err)
 	}
 
 	for _, kind := range []transport.DecisionKind{transport.DecisionRetry, transport.DecisionDeadLetter} {

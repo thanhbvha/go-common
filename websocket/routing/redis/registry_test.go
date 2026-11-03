@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
-	"github.com/thanhbvha/go-common/websocket/routing"
-	"github.com/thanhbvha/go-common/websocket/routing/contracttest"
-	driver "github.com/thanhbvha/go-common/websocket/routing/redis"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/routing/contracttest"
+	driver "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
 	"testing"
 	"time"
 )

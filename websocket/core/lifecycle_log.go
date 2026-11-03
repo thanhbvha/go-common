@@ -1,8 +1,8 @@
 package core
 
 import (
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
 var lifecycleLogLimiter = limiter.NewRateLimiter(20, 40)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/thanhbvha/go-common/xerrors"
+	"github.com/thanhbvha/go-common/v2/xerrors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,9 +44,23 @@ func toStatus(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return status.Error(codes.DeadlineExceeded, "Request deadline exceeded")
 	}
-	// Explicit status errors are public contracts, including their details.
-	if _, ok := status.FromError(err); ok {
-		return err
+	// Explicit client-status errors remain public contracts. Server/transport
+	// statuses are rebuilt so their message and details cannot expose causes.
+	if grpcStatus, ok := status.FromError(err); ok {
+		switch grpcStatus.Code() {
+		case codes.Internal, codes.Unknown, codes.DataLoss:
+			return status.Error(grpcStatus.Code(), "Internal server error")
+		case codes.Unavailable:
+			return status.Error(grpcStatus.Code(), "Service unavailable")
+		case codes.Unimplemented:
+			return status.Error(grpcStatus.Code(), "Operation not implemented")
+		case codes.DeadlineExceeded:
+			return status.Error(grpcStatus.Code(), "Request deadline exceeded")
+		case codes.Canceled:
+			return status.Error(grpcStatus.Code(), "Request canceled")
+		default:
+			return err
+		}
 	}
 	return status.Error(codes.Internal, "Internal server error")
 }

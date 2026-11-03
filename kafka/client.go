@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -10,10 +11,14 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Client wraps a franz-go kgo.Client with lifecycle management, a periodic
-// health-check goroutine, and an optional structured logger.
-// All exported methods are safe for concurrent use.
+// ErrClosed identifies a terminal client lifecycle.
+var ErrClosed = errors.New("kafka: client is closed")
+
+// Client owns a native producer/admin client and independent subscriptions.
+// Health samples never replace or gate the native reconnect lifecycle.
 type Client struct {
+	lifecycle sync.Mutex
+	closed    bool
 	cfg       Config
 	kgo       *kgo.Client
 	connected bool
@@ -54,11 +59,24 @@ func MustConnect(ctx context.Context, cfg Config) *Client {
 // It retries up to Config.MaxConnRetries times with linear back-off.
 // Calling Connect on an already-connected Client is a no-op.
 func (c *Client) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.connected {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	c.mu.RLock()
+	closed, initialized := c.closed, c.kgo != nil
+	c.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if initialized {
 		return nil
+	}
+	connectCtx, cancelConnect := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancelConnect)
+	defer stop()
+	defer cancelConnect()
+	ctx = connectCtx
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	opts, err := c.buildOptions()
@@ -77,6 +95,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	)
 
 	for i := 0; i < maxRetries; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		kgoClient, lastErr = kgo.NewClient(opts...)
 		if lastErr == nil {
 			// Perform a metadata ping to verify actual broker connectivity.
@@ -111,8 +132,14 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("kafka: failed to connect after %d retries: %w", maxRetries, lastErr)
 	}
 
+	if err := ctx.Err(); err != nil {
+		kgoClient.Close()
+		return err
+	}
+	c.mu.Lock()
 	c.kgo = kgoClient
 	c.connected = true
+	c.mu.Unlock()
 
 	go c.runHealthCheck()
 
@@ -126,26 +153,22 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close flushes pending produce records, commits pending offsets, and closes
-// the underlying Kafka client. Subsequent calls return nil without doing work.
+// Close stops owned activity and closes the native producer/admin client.
+// Close is terminal: create a new Client to establish another lifecycle.
+// Flush(ctx) before Close when publication completion must be confirmed.
 func (c *Client) Close() error {
+	c.cancel()
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.cancel != nil {
-		c.cancel()
+	c.closed = true
+	native := c.kgo
+	c.kgo = nil
+	c.connected = false
+	c.mu.Unlock()
+	if native != nil {
+		native.Close()
 	}
-
-	if c.kgo != nil {
-		c.kgo.Close()
-		c.kgo = nil
-		c.connected = false
-
-		if c.cfg.Logger != nil {
-			c.cfg.Logger.Info("kafka: connection closed")
-		}
-	}
-
 	return nil
 }
 
@@ -226,10 +249,6 @@ func (c *Client) buildOptions() ([]kgo.Opt, error) {
 		return nil, err
 	}
 	opts := append(slices.Clone(factory.base), factory.producer...)
-	if c.cfg.ConsumerGroup != "" {
-		opts = append(opts, factory.consumer...)
-		opts = append(opts, kgo.ConsumerGroup(c.cfg.ConsumerGroup))
-	}
 	return opts, nil
 }
 
@@ -257,7 +276,9 @@ func (c *Client) runHealthCheck() {
 			cancel()
 
 			c.mu.Lock()
-			c.connected = (err == nil)
+			if c.kgo == kc && !c.closed {
+				c.connected = (err == nil)
+			}
 			c.mu.Unlock()
 
 			if err != nil && c.cfg.Logger != nil {
@@ -272,10 +293,13 @@ func (c *Client) runHealthCheck() {
 func (c *Client) requireConnected() (*kgo.Client, error) {
 	c.mu.RLock()
 	kc := c.kgo
-	ok := c.connected
+	ok := !c.closed
 	c.mu.RUnlock()
 
-	if !ok || kc == nil {
+	if !ok {
+		return nil, ErrClosed
+	}
+	if kc == nil {
 		return nil, fmt.Errorf("kafka: client is not connected — call Connect first")
 	}
 	return kc, nil

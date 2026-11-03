@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	panicrecovery "github.com/thanhbvha/go-common/recovery"
-	"github.com/thanhbvha/go-common/websocket/internal/wsrecovery"
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
 )
 
 // TaskMetadata identifies a worker task without including message payloads.

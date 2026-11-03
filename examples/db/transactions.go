@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/thanhbvha/go-common/db/orm"
+	"github.com/thanhbvha/go-common/v2/db/orm"
 )
 
 func demoTransactions(ctx context.Context, opt options) error {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thanhbvha/go-common/auth"
+	"github.com/thanhbvha/go-common/v2/auth"
 )
 
 func runRotationDemo() error {

@@ -1,5 +1,7 @@
 # xerrors
 
+Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+
 A structured error handling package that wraps standard Go errors with business-level contexts, such as String Codes (e.g., `UNAUTHORIZED`) and HTTP Status Codes. This makes it trivial to map backend errors directly to REST API responses.
 
 ### Key Features
@@ -15,7 +17,7 @@ A structured error handling package that wraps standard Go errors with business-
 The package comes with many standard HTTP errors out of the box.
 
 ```go
-import "github.com/thanhbvha/go-common/xerrors"
+import "github.com/thanhbvha/go-common/v2/xerrors"
 
 func GetUser(id string) (*User, error) {
     if id == "" {
@@ -61,19 +63,17 @@ func QueryData() error {
 }
 ```
 
-#### 4. Extracting Context in API Handlers (e.g. Fiber/Gin)
+#### 4. Mapping a Safe Public Response
 
-When an error bubbles up to your HTTP handler, you can easily extract the Status Code and String Code to format your JSON response.
+Do not serialize `err.Error()`: wrapped causes are diagnostic. Use the shared
+response mapper so unknown errors, invalid statuses and all 5xx messages are
+masked consistently.
 
 ```go
 func ErrorMiddleware(c *fiber.Ctx, err error) error {
-    statusCode := xerrors.HTTPStatusCode(err) // Defaults to 500 if not a CustomError
-    stringCode := xerrors.GetCode(err)        // Defaults to "INTERNAL_ERROR"
-    
-    return c.Status(statusCode).JSON(fiber.Map{
-        "code":    stringCode,
-        "message": err.Error(),
-    })
+    requestID, _ := c.Locals("request_id").(string)
+    public := response.FromError(err, requestID)
+    return c.Status(public.Code).JSON(public)
 }
 ```
 
@@ -89,3 +89,11 @@ func ErrorMiddleware(c *fiber.Ctx, err error) error {
 | `Is(err, target)` | Proxy for standard `errors.Is`. |
 | `As(err, target)` | Proxy for standard `errors.As`. |
 | `Join(errs...)` | Proxy for standard `errors.Join`. |
+
+## Public transport policy
+
+`Error()` remains diagnostic and includes the cause; do not send it to clients.
+The web error mapper publishes only `CustomError.Message` for valid 4xx errors,
+masking causes and all 5xx/unknown errors. `HTTPStatusCode` normalizes invalid
+statuses on non-nil errors to 500. Keep public messages free of credentials and
+personal data; retain diagnostic context in the cause and structured fields.

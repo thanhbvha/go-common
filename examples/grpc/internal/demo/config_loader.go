@@ -4,11 +4,8 @@ import (
 	"errors"
 	"flag"
 	"os"
-	"reflect"
-	"strings"
 
-	"github.com/spf13/viper"
-	commonconfig "github.com/thanhbvha/go-common/config"
+	commonconfig "github.com/thanhbvha/go-common/v2/config"
 )
 
 // parseConfiguration loads settings once at startup. Only flags explicitly passed
@@ -49,33 +46,5 @@ func loadOptions(path, prefix string, target any) error {
 	if err := commonconfig.Load(opts, target); err != nil {
 		return errors.New("could not load gRPC configuration; check file and value types")
 	}
-	// Viper AutomaticEnv alone does not enumerate keys absent from YAML during
-	// Unmarshal. Bind the example's tagged fields so env-only deployments work too.
-	env := viper.New()
-	env.SetEnvPrefix(prefix)
-	env.AllowEmptyEnv(true)
-	for _, key := range optionKeys(reflect.TypeOf(target).Elem()) {
-		if err := env.BindEnv(key); err != nil {
-			return errors.New("could not bind gRPC environment configuration")
-		}
-	}
-	if err := env.Unmarshal(target); err != nil {
-		return errors.New("invalid gRPC environment configuration; check value types")
-	}
 	return nil
-}
-
-// Options use flat YAML keys, with CommonOptions embedded via mapstructure squash.
-func optionKeys(t reflect.Type) []string {
-	var keys []string
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		tag := field.Tag.Get("mapstructure")
-		if field.Anonymous && strings.Contains(tag, ",squash") {
-			keys = append(keys, optionKeys(field.Type)...)
-		} else if key := strings.Split(tag, ",")[0]; key != "" && key != "-" {
-			keys = append(keys, key)
-		}
-	}
-	return keys
 }

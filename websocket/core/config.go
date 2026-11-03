@@ -1,12 +1,14 @@
 package core
 
 import (
+	"errors"
+	"reflect"
 	"runtime"
 	"time"
 
-	"github.com/thanhbvha/go-common/websocket/pool"
-	"github.com/thanhbvha/go-common/websocket/pubsub"
-	"github.com/thanhbvha/go-common/websocket/routing"
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 // PubSubOwnership controls whether manager shutdown also shuts down the bus.
@@ -79,6 +81,24 @@ func DefaultManagerConfig() ManagerConfig {
 		PongWait:                  pongWait,
 		PingPeriod:                pingPeriod,
 	}
+}
+
+// ValidateProduction requires an explicit application authorization policy.
+// Call this before NewManagerWithConfig; trusted local constructors retain their
+// permissive defaults. Authentication still belongs to the HTTP adapter, and
+// the application policy must enforce tenant/room access for verified identities.
+func (config ManagerConfig) ValidateProduction() error {
+	if config.Authorizer == nil {
+		return errors.New("websocket: production requires an explicit Authorizer")
+	}
+	value := reflect.ValueOf(config.Authorizer)
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		if value.IsNil() {
+			return errors.New("websocket: production Authorizer must not be typed nil")
+		}
+	}
+	return nil
 }
 
 func normalizeManagerConfig(config ManagerConfig) (ManagerConfig, bool) {

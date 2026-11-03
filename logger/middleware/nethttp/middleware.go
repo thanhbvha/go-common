@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thanhbvha/go-common/internal/httpkit"
-	"github.com/thanhbvha/go-common/logger"
-	"github.com/thanhbvha/go-common/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
+	"github.com/thanhbvha/go-common/v2/logger"
+	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
 )
 
 const requestIDHeader = "X-Request-ID"

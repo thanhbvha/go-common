@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/thanhbvha/go-common/db/orm/backend"
+	"github.com/thanhbvha/go-common/v2/db/orm/backend"
 	driver "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
