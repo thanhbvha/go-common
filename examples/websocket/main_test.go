@@ -24,8 +24,20 @@ func TestConfiguredLimitsAndShutdownError(t *testing.T) {
 	}
 	defer app.close()
 	_, connections := app.adapterLimiters()
-	if !connections.AddConnection("peer") || connections.AddConnection("peer") {
-		t.Fatal("configured per-IP connection limit not applied")
+	for attempt := 1; attempt <= settings.MaxConnectionsPerIP; attempt++ {
+		if !connections.AddConnection("peer") {
+			t.Fatalf("connection %d of %d was rejected", attempt, settings.MaxConnectionsPerIP)
+		}
+	}
+	if connections.AddConnection("peer") {
+		t.Fatalf("connection above configured per-IP limit %d was accepted", settings.MaxConnectionsPerIP)
+	}
+	if got := connections.GetConnectionCount("peer"); got != settings.MaxConnectionsPerIP {
+		t.Fatalf("connection count = %d, want %d", got, settings.MaxConnectionsPerIP)
+	}
+	connections.RemoveConnection("peer")
+	if !connections.AddConnection("peer") {
+		t.Fatal("released per-IP connection slot was not reusable")
 	}
 	if app.manager.GetConfig().ExecutorPartitions != 2 {
 		t.Fatal("configured executor partitions not applied")
