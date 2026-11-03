@@ -79,5 +79,5 @@ fi
 export MONGODB_TEST_FAILPOINTS=1
 # Failover changes the entire fixture: serialize packages so it cannot interrupt
 # another package's non-transactional fixture creation.
-go test -p 1 -race -tags=integration -count=1 -timeout=180s ./db/mongodb ./examples/db_mongodb
+go test -v -p 1 -race -tags=integration -count=1 -timeout=180s ./db/mongodb ./examples/db_mongodb
 go vet -tags=integration ./db/mongodb ./examples/db_mongodb

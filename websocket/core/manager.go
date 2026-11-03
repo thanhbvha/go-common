@@ -48,6 +48,8 @@ type Manager struct {
 	subscriptionErrors  atomic.Uint64
 	state               atomic.Int32
 	shutdownOnce        sync.Once
+	shutdownCtx         context.Context
+	shutdownErr         error
 	done                chan struct{}
 }
 
@@ -526,6 +528,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 		defer timer.Stop()
 	}
 
+	distributedCleanup := false
 	if m.config.Distributed != nil {
 		registerCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
 		location, err := m.config.Distributed.Register(registerCtx, routing.Location{TenantID: identity.TenantID, UserID: identity.UserID, SessionID: identity.SessionID, ShardID: shard.name}, func(payload []byte) error {
@@ -544,7 +547,11 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 			return err
 		}
 		connection.location = &location
+		distributedCleanup = true
 		defer func() {
+			if !distributedCleanup {
+				return
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = m.config.Distributed.Remove(cleanupCtx, location)
@@ -556,6 +563,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 		return fmt.Errorf("failed to register connection")
 	}
 	m.config.Observer.ConnectionOpened()
+	distributedCleanup = false // The shard owns cleanup after registration commits.
 	reserved = false
 
 	if !m.config.DisableLifecycleLogging {
@@ -678,9 +686,24 @@ func (m *Manager) finishShutdown() {
 	m.shards = make(map[string]*Shard)
 	m.shardMutex.Unlock()
 
-	for _, shard := range shards {
-		_ = shard.Shutdown(context.Background())
+	ctx := m.shutdownCtx
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	drainCtx, cancel := context.WithTimeout(ctx, m.config.DrainTimeout)
+	defer cancel()
+	var drains sync.WaitGroup
+	var errorMu sync.Mutex
+	for _, shard := range shards {
+		drains.Go(func() {
+			if err := shard.Shutdown(drainCtx); err != nil {
+				errorMu.Lock()
+				m.shutdownErr = errors.Join(m.shutdownErr, err)
+				errorMu.Unlock()
+			}
+		})
+	}
+	drains.Wait()
 	for _, registration := range m.pubsubRegistrations {
 		m.pubsubManager.UnregisterHandler(registration)
 	}
@@ -699,12 +722,13 @@ func (m *Manager) finishShutdown() {
 // Shutdown drains shards, connections, event handlers, and pub/sub consumers.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.shutdownOnce.Do(func() {
+		m.shutdownCtx = ctx
 		m.state.Store(int32(StateDraining))
 		m.cancel()
 	})
 	select {
 	case <-m.done:
-		return nil
+		return m.shutdownErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}

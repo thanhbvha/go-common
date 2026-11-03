@@ -102,11 +102,32 @@ bounded executor dispatch counters; manager stats expose subscription errors.
 
 ## Session lifecycle and failure recovery
 
-Gateway lifecycle operations remain serialized; session and room snapshots are
-copied under the local index mutex, with registry I/O outside that mutex. This
-also orders renew against leave/remove, preventing a delayed renewal from
-recreating a removed session or room. Local detachment checks the current owner.
-Close callbacks for replacement/fencing run after releasing the lifecycle lock.
+Lifecycle operations are ordered per logical session rather than per gateway.
+Waiting for a session gate or registry permit observes the caller's deadline.
+`GatewayConfig.RegistryConcurrency` defaults to 32 and bounds registry operations.
+Remove detaches local indexes before waiting for registry work, even if its
+budget has expired. Renewal processes at most 256 idle sessions per batch,
+skipping busy sessions; a session with an expired local lease rejects delivery.
+Per-session gates remain held across renew and room refresh so a delayed renewal
+cannot race a successful remove/leave and recreate its metadata. Replacement and
+fencing close callbacks run after releasing those gates.
+
+Delivery snapshots recipients under the index mutex, then performs enqueue outside
+it. A separate cancellable gate preserves enqueue order and dedupe per session.
+The bounded dedupe cache uses up to 64 stripes with capacity divided between them;
+hash skew can evict entries before the aggregate capacity is reached. No callback
+or socket close runs under the shared index/cache mutexes. Slow-consumer closure
+marks the connection closed immediately and schedules at most one network closer.
+
+`Gateway.Close` atomically closes operation admission, cancels in-flight operation
+contexts, joins those operations and the renewal loop, then closes transport.
+A registration response received after cancellation cannot commit locally; the
+gateway attempts generation-fenced cleanup with a fresh five-second budget.
+Close may time out if a registry/callback ignores cancellation; retry Close with a
+fresh context before releasing borrowed clients. NATS subscription cancellation
+joins running callbacks, and RPC Close tracks callbacks independently as well.
+After Close, Remove can still detach local indexes but returns unavailable rather
+than starting registry I/O; shut down managers before closing their borrowed gateway.
 
 A replacement is locally routable while registration is in flight. The old
 connection is closed only after registry confirmation. On registration error,
@@ -131,13 +152,29 @@ Other failures prevent extension of gateway readiness. Custom registries can
 continue implementing only `SessionRegistry`; the legacy stale-result path uses
 resolve for fencing and waits for a successful renewal before extending readiness.
 
-Shard shutdown closes sockets and detaches shard maps first, then explicitly
-unregisters each distributed session, including connections with no running
-handler. Broker cleanup uses up to 32 workers and a shared five-second budget per
-shard. Even after that budget expires, every captured session is detached from
-the gateway so closed connections cannot keep renewing. Broker clients must honor
-context deadlines; unrelated lifecycle operations can delay acquiring the gateway
-lock. Shutdown does not guarantee immediate Redis cleanup during an outage.
+Manager shutdown rejects upgrades and starts shard shutdown concurrently. Shards
+detach their maps, stop outbound admission, and flush accepted messages in FIFO
+order before closing sockets. New inbound business intake is discarded once the
+connection starts draining. `ManagerConfig.DrainTimeout` defaults to five seconds
+for outbound drain; the first Shutdown caller's cancellation/deadline also applies.
+The manager shares that drain budget across shards. Connection.Drain also handles
+the registration window before Run has started the pumps.
+
+Expired drain budgets force socket close. Shutdown retains drain errors, including
+`ErrDrainIncomplete` when accepted messages could not be written; another Shutdown
+call does not erase a prior forced-drain result. Optional `DrainObserver` reports
+connections drained, forced drains and messages still unwritten at the cutoff;
+`AtomicObserver.RuntimeMetrics` exposes `connectionsDrained`, `drainForced` and
+`drainDiscarded`. This is a socket-write guarantee within the budget, not client
+ACK or business-handler completion. Drain application business intake separately
+before manager shutdown when handlers need to publish their final responses.
+
+Distributed cleanup runs after outbound drain, with up to 32 workers per shard
+and at most five seconds of broker work within the remaining shutdown context.
+Every captured session is detached from the gateway even after that budget expires.
+The shard owns cleanup for committed connections; the manager only cleans up
+registrations that never committed to a shard. Clients must honor context deadlines.
+Remote registry cleanup remains best-effort, with lease expiry as outage fallback.
 
 Broadcast fallback and client ACK/offline inbox/replay remain separate feature
 work requiring application policy. The EventBus delivery guarantees above are
@@ -167,6 +204,37 @@ compatible with older writers and require no migration.
 Full-capacity rejection and user-wide resolution retain O(N) scan costs. See the
 benchmark reports linked from [WebSocket measurements](../BENCHMARKS.md) for the
 measured tradeoffs and saturation-test limits.
+
+## Room lookup and node index rollout
+
+All new Redis registry writers maintain the existing room member sorted set plus
+a room-node lease index and per-node member sets in the same tenant hash slot.
+Join/renew/remove/leave update these structures atomically. A node's score is the
+maximum live member expiry, so removing one device or an older generation cannot
+remove another live device's node lease. All derived keys have lease-based TTLs.
+
+The default compatibility reader aggregates distinct node IDs inside Redis and
+returns only those IDs. It still scans legacy memberships on the server, but
+network response size and Go decoding scale with hosting nodes.
+
+After all writers support the new index, enable the fast reader explicitly:
+
+```go
+registry := redisrouting.NewRegistry(client, namespace, redisrouting.WithRoomNodeIndex())
+```
+
+The fast reader prunes expired node scores and reads only node leases; it never
+loads the recipient member set. Before enabling it on an existing namespace:
+upgrade every writer, stop old writers, and wait for the longest old room lease
+to expire or for all live memberships to be refreshed by upgraded writers.
+An old writer can maintain a legacy membership without updating its node lease.
+Keep compatibility reads while writers are mixed. To roll back writers, first
+disable indexed reads everywhere. No destructive backfill or key-format rewrite
+is needed; the session hash format and legacy room members are preserved.
+
+The node index adds Redis writes and per-room/per-node metadata. Benchmark room
+cardinality, membership churn and renewal cost on a disposable real Redis before
+enabling it for a workload. One tenant still shares one Redis Cluster slot.
 
 ## Business bridge
 

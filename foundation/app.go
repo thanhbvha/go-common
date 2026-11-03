@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/thanhbvha/go-common/v2/health"
 )
@@ -99,6 +100,20 @@ func (a *App) Register(component Component) error {
 	if component.Start == nil && component.Run == nil && component.Stop == nil {
 		return fmt.Errorf("%w: at least one callback is required", ErrInvalidComponent)
 	}
+	dependencies := make([]string, len(component.DependsOn))
+	seen := make(map[string]bool, len(dependencies))
+	for i, dependency := range component.DependsOn {
+		dependency, err = normalizedName(dependency)
+		if err != nil {
+			return fmt.Errorf("%w: dependency name %v", ErrInvalidComponent, err)
+		}
+		if dependency == name || seen[dependency] {
+			return fmt.Errorf("%w: self or duplicate dependency %q for %q", ErrInvalidComponent, dependency, name)
+		}
+		seen[dependency] = true
+		dependencies[i] = dependency
+	}
+	component.DependsOn = dependencies
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -141,6 +156,11 @@ func (a *App) Run(parent context.Context) error {
 	a.state = StateStarting
 	components := append([]Component(nil), a.components...)
 	a.mu.Unlock()
+	components, err := orderComponents(components)
+	if err != nil {
+		a.finish(err)
+		return err
+	}
 
 	var stopSignals context.CancelFunc = func() {}
 	if len(a.signals) > 0 {
@@ -256,16 +276,17 @@ func (a *App) Shutdown(ctx context.Context) error {
 }
 
 func (a *App) start(runCtx context.Context, components []Component) ([]Component, error) {
+	began := time.Now()
 	startupCtx, cancel := context.WithTimeout(runCtx, a.cfg.StartupTimeout)
 	defer cancel()
 
 	started := make([]Component, 0, len(components))
-	for _, component := range components {
+	for i, component := range components {
 		if err := startupCtx.Err(); err != nil {
 			if runCtx.Err() != nil {
 				return started, nil
 			}
-			return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: err}
+			return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: lifecycleTimeout(err, PhaseStart, "before start", component.Name, began, a.cfg.StartupTimeout, components[i:])}
 		}
 		if component.Start != nil {
 			err, pending := callBounded(startupCtx, component.Start)
@@ -276,7 +297,7 @@ func (a *App) start(runCtx context.Context, components []Component) ([]Component
 				if runCtx.Err() != nil {
 					return started, nil
 				}
-				return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: err}
+				return started, &ComponentError{Component: component.Name, Phase: PhaseStart, Err: lifecycleTimeout(err, PhaseStart, "start callback", component.Name, began, a.cfg.StartupTimeout, components[i:])}
 			}
 		}
 		started = append(started, component)
@@ -291,20 +312,26 @@ func (a *App) runComponent(ctx context.Context, component Component, results cha
 }
 
 func (a *App) stop(started []Component, runnerDone map[string]<-chan struct{}) error {
+	began := time.Now()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
 	defer cancel()
 
 	var errs []error
 	for i := len(started) - 1; i >= 0; i-- {
 		if shutdownCtx.Err() != nil {
+			errs = append(errs, &ComponentError{Component: started[i].Name, Phase: PhaseStop, Err: lifecycleTimeout(shutdownCtx.Err(), PhaseStop, "before stop", started[i].Name, began, a.cfg.ShutdownTimeout, reverseComponents(started[:i+1]))})
 			break
 		}
 		component := started[i]
 		if component.Stop != nil {
-			if err, _ := callBounded(shutdownCtx, component.Stop); err != nil {
-				errs = append(errs, &ComponentError{Component: component.Name, Phase: PhaseStop, Err: err})
+			err, _ := callBounded(shutdownCtx, component.Stop)
+			if err != nil {
+				errs = append(errs, &ComponentError{Component: component.Name, Phase: PhaseStop, Err: lifecycleTimeout(err, PhaseStop, "stop callback", component.Name, began, a.cfg.ShutdownTimeout, reverseComponents(started[:i+1]))})
 			}
 			if shutdownCtx.Err() != nil {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					errs = append(errs, &ComponentError{Component: component.Name, Phase: PhaseStop, Err: lifecycleTimeout(shutdownCtx.Err(), PhaseStop, "after stop callback", component.Name, began, a.cfg.ShutdownTimeout, reverseComponents(started[:i+1]))})
+				}
 				break
 			}
 		}
@@ -317,7 +344,7 @@ func (a *App) stop(started []Component, runnerDone map[string]<-chan struct{}) e
 				errs = append(errs, &ComponentError{
 					Component: component.Name,
 					Phase:     PhaseStop,
-					Err:       fmt.Errorf("runner did not stop: %w", shutdownCtx.Err()),
+					Err:       lifecycleTimeout(shutdownCtx.Err(), PhaseStop, "runner wait", component.Name, began, a.cfg.ShutdownTimeout, reverseComponents(started[:i+1])),
 				})
 				return errors.Join(errs...)
 			}

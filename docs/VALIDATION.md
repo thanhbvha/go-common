@@ -12,7 +12,9 @@ go mod verify
 go build ./...
 go test -race -count=1 -timeout=180s ./...
 go vet ./...
-go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+bash .github/scripts/security-gate.sh
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+bash .github/scripts/test-faults.sh
 bash .github/scripts/test-fuzz.sh
 bash .github/scripts/test-databases.sh
 bash .github/scripts/test-mongodb.sh replica
@@ -24,6 +26,40 @@ PRODUCTION_SOAK_DURATION=60m bash .github/scripts/test-production.sh
 Every infrastructure script creates isolated fixtures and cleans up only the
 processes or containers it created. Required integration mode rejects missing
 fixture addresses rather than silently skipping or using localhost defaults.
+
+## Release evidence workflow
+
+Run `release-evidence` manually on the exact candidate revision. It runs quality,
+security, fuzz, SQL, both MongoDB profiles, brokers, repeated fault drills and a
+fixed 60-minute reference soak in one checkout. No tag or release is published.
+The final verifier rejects missing gates, failed commands, revision mismatches,
+modified logs, skipped infrastructure/fault tests and missing soak completion.
+Verbose test logs make skips visible; scanner errors also fail the security gate.
+
+Download `release-evidence-<sha>-<attempt>` from that successful trusted Actions
+run. Extract it into `artifacts/`, then check it from the repository root with:
+
+```bash
+python3 .github/scripts/release-evidence.py verify <full-40-character-sha>
+```
+
+Each gate records its command, revision, run/attempt IDs, exit status and log
+SHA-256. These hashes detect corruption; they are not signatures. Check the
+trusted workflow run's revision and conclusion as well as the local verifier.
+Handwritten historical results below do not substitute for this release run.
+
+The security gate retains the JSON scan and checks source/symbol findings before
+converting that same stream through govulncheck's text handler. JSON mode alone
+does not fail on vulnerabilities. Reachable findings fail closed; module-only
+findings remain visible for review and require the disposition below.
+
+Local CI-gate checks on Windows/amd64 with Go 1.27.3 on 2026-11-03 passed:
+`go test ./...`, `go vet ./...`, five shuffled race-enabled fault-suite passes,
+the evidence verifier regression cases, shell syntax and workflow YAML parsing.
+The live security scan found zero reachable/imported vulnerabilities and one
+module-only finding. Docker broker/database suites and a fresh 60-minute soak
+were not run in this check. This working-tree validation is not release evidence
+for a committed revision; the trusted workflow must still run after commit.
 
 ## Evidence collected on 2026-11-03
 

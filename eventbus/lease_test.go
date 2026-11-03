@@ -107,7 +107,7 @@ func TestHeartbeatPanicPreventsSettlement(t *testing.T) {
 				panicAt:           panicAt,
 			}
 			canceled := false
-			d := withSessionCancel(base, func() { canceled = true })
+			d := withSessionFailure(base, func(error) { canceled = true })
 			called := false
 			e.processDelivery(TaskTopology, "lease", "", func(ctx context.Context, _ Job) error {
 				called = true
@@ -129,7 +129,7 @@ func TestHeartbeatPanicPreventsSettlement(t *testing.T) {
 
 func TestSessionWrapperPreservesLeaseCapability(t *testing.T) {
 	lease := &leaseTestDelivery{failAt: 10}
-	wrapped := withSessionCancel(lease, func() {})
+	wrapped := withSessionFailure(lease, func(error) {})
 	got, ok := wrapped.(transport.LeaseDelivery)
 	if !ok {
 		t.Fatal("lease capability was stripped")
@@ -137,7 +137,7 @@ func TestSessionWrapperPreservesLeaseCapability(t *testing.T) {
 	if got.HeartbeatInterval() != lease.HeartbeatInterval() {
 		t.Fatalf("heartbeat interval = %v", got.HeartbeatInterval())
 	}
-	plain := withSessionCancel(&metadataDelivery{}, func() {})
+	plain := withSessionFailure(&metadataDelivery{}, func(error) {})
 	if _, ok := plain.(transport.LeaseDelivery); ok {
 		t.Fatal("plain delivery gained lease capability")
 	}

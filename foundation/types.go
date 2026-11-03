@@ -1,7 +1,7 @@
 // Package foundation provides a supervised application lifecycle for Go services.
 //
-// Components start in registration order, run concurrently, and stop in reverse
-// registration order. Runtime failures trigger graceful shutdown and are returned
+// Components start in dependency order, run concurrently, and stop in reverse
+// startup order. Runtime failures trigger graceful shutdown and are returned
 // to the caller instead of being lost in background goroutines.
 package foundation
 
@@ -38,10 +38,14 @@ type Config struct {
 // Component is one supervised application unit. All callbacks are optional,
 // but at least one must be provided.
 type Component struct {
-	Name  string
-	Start func(context.Context) error
-	Run   func(context.Context) error
-	Stop  func(context.Context) error
+	Name string
+	// DependsOn names components whose initialization must complete first.
+	// References may be registered later; Run validates the complete graph.
+	// This does not imply runner readiness or serialize concurrent Run callbacks.
+	DependsOn []string
+	Start     func(context.Context) error
+	Run       func(context.Context) error
+	Stop      func(context.Context) error
 }
 
 // State represents the current application lifecycle state.

@@ -124,7 +124,12 @@ func TestShardShutdownHonorsDeadlineWithBlockedClose(t *testing.T) {
 	close(gate)
 	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := shard.Shutdown(ctx); err != nil {
-		t.Fatal(err)
+	if err := shard.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("forced drain lost its terminal result: %v", err)
+	}
+	select {
+	case <-c.closedDone:
+	case <-ctx.Done():
+		t.Fatal("socket close did not finish")
 	}
 }

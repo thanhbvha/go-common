@@ -436,7 +436,6 @@ func (e *engine) consumeLoop(kind TopologyKind, jobType string, handlerName stri
 		}
 		if errors.Is(err, ErrRecoveredPanic) {
 			consecutivePanics++
-			e.recordInfrastructurePanic()
 			if consecutivePanics >= maxConsecutiveConsumerPanics {
 				e.cfg.Logger.ErrorAsync("eventbus: consumer stopped after panic storm", "job_type", jobType, "handler_name", handlerName)
 				return
@@ -482,6 +481,15 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 	}
 	defer finish()
 	defer cancel()
+	// Keep panic classification independently of context cancellation: a
+	// concurrent ordinary failure or transport return must not hide a panic.
+	var sessionPanicked atomic.Bool
+	failSession := func(err error) {
+		if safeIs(err, ErrRecoveredPanic) {
+			sessionPanicked.Store(true)
+		}
+		cancel()
+	}
 
 	// Each task/subscriber owns a fixed worker pool and a bounded intake queue.
 	// A full queue blocks the synchronous transport callback, applying
@@ -523,7 +531,7 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 					if e.workerCtx.Err() != nil {
 						return
 					}
-					delivery = withSessionCancel(delivery, cancel)
+					delivery = withSessionFailure(delivery, failSession)
 					panicked := guardCall(panicScopeWorker, "process delivery", func(record panicRecord) {
 						e.cfg.Logger.ErrorAsync("eventbus: worker panic recovered",
 							"job_type", jobType,
@@ -535,7 +543,7 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 					})
 					if panicked {
 						e.recordInfrastructurePanic()
-						cancel()
+						failSession(ErrRecoveredPanic)
 						return
 					}
 				}
@@ -575,6 +583,7 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 	}
 
 	err := guardError(panicScopeConsumer, "transport consume", func(record panicRecord) {
+		e.recordInfrastructurePanic()
 		e.cfg.Logger.ErrorAsync("eventbus: consumer panic recovered",
 			"job_type", jobType,
 			"handler_name", handlerName,
@@ -584,6 +593,12 @@ func (e *engine) consumeSession(sub transport.Subscription, handler Handler) err
 		return e.transport.Consume(ctx, sub, deliverFn)
 	})
 	cancel()
+	// Workers can fail after Consume returns, including during driver cleanup.
+	// Join them before inspecting the session result.
+	finishWorkers()
+	if sessionPanicked.Load() {
+		return errors.Join(err, ErrRecoveredPanic)
+	}
 	return err
 }
 
@@ -616,7 +631,7 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		err := guardError(panicScopeHeartbeat, "initial delivery heartbeat", func(record panicRecord) {
 			e.recordInfrastructurePanic()
 			if canceler, ok := delivery.(sessionCanceler); ok {
-				canceler.cancelSession()
+				canceler.failSession(ErrRecoveredPanic)
 			}
 			e.cfg.Logger.ErrorAsync("eventbus: heartbeat panic recovered", "job_type", jobType, "stack", record.Stack)
 		}, func() error {
@@ -624,6 +639,9 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 		})
 		cancel()
 		if err != nil {
+			if canceler, ok := delivery.(sessionCanceler); ok {
+				canceler.failSession(err)
+			}
 			e.cfg.Logger.WarnAsync("delivery lease unavailable before processing", "error_type", safeErrorType(err))
 			return
 		}
@@ -713,11 +731,17 @@ func (e *engine) processDelivery(kind TopologyKind, jobType string, handlerName 
 				e.recordInfrastructurePanic()
 				executionCancel()
 				if canceler, ok := delivery.(sessionCanceler); ok {
-					canceler.cancelSession()
+					canceler.failSession(ErrRecoveredPanic)
 				}
 				e.cfg.Logger.ErrorAsync("eventbus: heartbeat panic recovered", "job_type", jobType, "id", job.ID(), "stack", capturePanicStack(4))
 			}()
-			e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() { heartbeatFailed.Store(true); executionCancel() })
+			e.heartbeatLoop(executionCtx, delivery, jobType, job.ID(), leaseInterval, func() {
+				heartbeatFailed.Store(true)
+				executionCancel()
+				if canceler, ok := delivery.(sessionCanceler); ok {
+					canceler.failSession(transport.ErrLeaseLost)
+				}
+			})
 			completed = true
 		}()
 		defer func() {
@@ -877,7 +901,7 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	err := guardError(panicScopeSettlement, "delivery settlement", func(record panicRecord) {
 		e.recordInfrastructurePanic()
 		if canceler, ok := delivery.(sessionCanceler); ok {
-			canceler.cancelSession()
+			canceler.failSession(ErrRecoveredPanic)
 		}
 		e.cfg.Logger.ErrorAsync("eventbus: settlement panic recovered",
 			"job_id", jobID,
@@ -898,6 +922,11 @@ func (e *engine) settleDelivery(delivery transport.Delivery, decision transport.
 	}
 	e.traceSettlement(opCtx, decision.Kind.String(), outcome)
 	if err != nil {
+		// Never repeat an uncertain terminal operation on this delivery. End
+		// intake so driver cleanup can recover unsettled sources and permits.
+		if canceler, ok := delivery.(sessionCanceler); ok {
+			canceler.failSession(err)
+		}
 		e.cfg.Logger.ErrorAsync("eventbus: delivery settlement failed",
 			"job_id", jobID,
 			"decision", decision.Kind.String(),

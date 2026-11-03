@@ -14,6 +14,7 @@ import (
 	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/v2/websocket/pool"
 	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
 )
 
 const (
@@ -66,6 +67,7 @@ type Shard struct {
 	handlerSupervisor *HandlerSupervisor
 	stopOnce          sync.Once
 	shutdownOnce      sync.Once
+	shutdownErr       error
 	done              chan struct{}
 }
 
@@ -264,6 +266,9 @@ func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) e
 	s.mu.Unlock()
 	conn.roomsMu.Unlock()
 	if err != nil {
+		if !valid && errors.Is(err, routing.ErrStale) {
+			return ErrConnectionInactive
+		}
 		return err
 	}
 	if !valid {
@@ -452,7 +457,6 @@ func (s *Shard) Run() {
 	for {
 		select {
 		case <-s.ctx.Done():
-			s.shutdown(context.Background())
 			return
 		case ev := <-s.incomingMessage:
 			s.handleIncomingMessageEvent(ev)
@@ -599,10 +603,29 @@ func (s *Shard) shutdown(ctx context.Context) {
 
 		logger.InfoAsync("Shutting down Shard", "shard", s.name, "connections", len(connections))
 		for _, conn := range connections {
-			conn.Close("Shard shutdown")
+			conn.beginDrain()
 			s.releaseManagerConnection(conn)
 			s.observer().ConnectionClosed()
 		}
+		jobs := make(chan *Connection)
+		var drainers sync.WaitGroup
+		var errorMu sync.Mutex
+		for range min(32, len(connections)) {
+			drainers.Go(func() {
+				for conn := range jobs {
+					if err := conn.Drain(ctx); err != nil {
+						errorMu.Lock()
+						s.shutdownErr = errors.Join(s.shutdownErr, err)
+						errorMu.Unlock()
+					}
+				}
+			})
+		}
+		for _, conn := range connections {
+			jobs <- conn
+		}
+		close(jobs)
+		drainers.Wait()
 		// The maps above are detached, so pump cleanup cannot unregister these
 		// sessions. Explicitly clean the registry even for connections never Run.
 		// One shared budget bounds total broker work across the entire shard.
@@ -680,13 +703,13 @@ func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
 func (s *Shard) Shutdown(ctx context.Context) error {
 	s.stopOnce.Do(func() {
 		s.cancel()
-		go s.shutdown(context.Background())
-		// Coordination is best effort and must not delay socket cleanup or the caller's deadline.
+		shutdownCtx, cancel := context.WithTimeout(ctx, s.config.DrainTimeout)
+		go func() { defer cancel(); s.shutdown(shutdownCtx) }()
 		go func() { _ = s.coordinator.GetPubSubManager().NotifyShardDestroy(s.name) }()
 	})
 	select {
 	case <-s.done:
-		return nil
+		return s.shutdownErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}

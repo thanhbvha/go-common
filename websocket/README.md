@@ -1,150 +1,111 @@
-# WebSocket
+# WebSocket v2
 
-Operational maturity, defaults and adoption gates are tracked in the [production matrix](../docs/PRODUCTION.md).
+WebSocket connections, bounded event execution and tenant-scoped realtime routing
+for `github.com/thanhbvha/go-common/v2`. This repository requires Go 1.26.10 or
+later. Import packages under `/v2/websocket`; there is no separate
+`websocket/v2` Go module.
 
-Production-oriented WebSocket infrastructure for Go services. The module provides a framework-independent core, bounded event execution, user and room fan-out, structured identity and authorization, connection quotas, graceful shutdown, observability, and optional Redis Pub/Sub or NATS routing for multi-node deployments.
+Use explicit instances: `core.NewManagerWithConfig`, `core.NewEventRegistry`, a
+started `routing.Gateway`, and `routing.Router`. The core is framework independent;
+adapters support net/http, Gin, Echo and Fiber. Global constructors and legacy
+pub/sub remain available for existing applications.
 
-Supported HTTP adapters:
+Start with the [complete v2 example](../examples/websocket/v2/README.md): server,
+scripted/listening client, Redis or NATS delivery, EventBus business dispatch,
+user/session/room notifications, protected admin APIs and bounded shutdown. Its
+tests exercise two gateways and separate tenants.
 
-- Standard `net/http`: `websocket/adapter/nethttp`
-- Gin: `websocket/adapter/gin`
-- Echo: `websocket/adapter/echo`
-- Fiber: `websocket/adapter/fiber`
+## Choose an integration
 
-The recommended production path is explicit dependency injection through `core.NewManagerWithConfig`. Package-level global APIs remain available for compatibility and simple examples.
-
-## Capabilities
-
-- Single-node operation without an external broker.
-- Multi-node best-effort fan-out through Redis Pub/Sub or Core NATS.
-- Multiple physical connections per user for tabs and devices.
-- User, room, shard-local, and cross-node fan-out.
-- Bounded outbound, inbound, executor, and handler concurrency.
-- Per-connection message and byte rate limiting.
-- Node-local connection quotas per user, account, and tenant.
-- Structured identities, event authorization, room authorization, payload validation, and session expiry.
-- FIFO event execution for the same connection with parallel execution across partitions.
-- Bounded supervision for handlers that ignore cancellation after timeout.
-- Readiness checks covering lifecycle, executor, broker, and accounting state.
-- Manager-scoped metrics, event latency histograms, and optional tracing hooks.
-- Graceful manager, shard, connection, executor, and owned-broker shutdown.
-- Benchmarks, fuzz targets, load scenarios, soak scripts, and profiling support.
-
-## Delivery Model
-
-Redis Pub/Sub and Core NATS are best-effort transports. They do not provide acknowledgement, replay, consumer offsets, offline delivery, or exactly-once semantics. Persist business data before fan-out and let reconnecting clients resynchronize from the system of record.
-
-When delivery must be persistent, store the business event in the system of record and use an outbox, inbox, or one of the repository's queue packages. Keep persistent processing separate from `pubsub.Manager` and let reconnecting clients resynchronize from durable application state.
-
-Typical architecture:
-
-```text
-database or service API = source of truth
-websocket core          = live client transport
-Redis/NATS pubsub       = best-effort cross-node fan-out
-outbox/inbox or queue   = persistent processing when required
-```
-
-Do not use best-effort WebSocket delivery as the only record for payments, ledgers, audits, critical commands, or guaranteed offline messages.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    Client["WebSocket client"] --> Adapter["HTTP adapter: net/http, Gin, Echo, or Fiber"]
-    Adapter --> Auth["Authentication, origin policy, and upgrade limits"]
-    Auth --> Manager["core.Manager"]
-    Manager --> Shard["core.Shard"]
-
-    subgraph ConnectionLifecycle["Connection lifecycle"]
-        Reader["Read pump"] --> Inbound["Bounded shard inbound queue"]
-        SendQueue["Bounded connection send queue"] --> Writer["Write pump"]
-    end
-
-    Shard --> Reader
-    Shard --> SendQueue
-    Inbound --> Registry["EventRegistry validation and authorization"]
-    Registry --> Executor["Partitioned bounded executor"]
-    Executor --> Supervisor["Bounded handler supervisor"]
-    Supervisor --> Handler["Application handler"]
-    Handler --> SendQueue
-    Writer --> Client
-
-    Manager --> Broker["Optional Redis Pub/Sub or NATS broker"]
-    Broker --> Manager
-    Broker --> Peers["Peer application nodes"]
-    Peers --> Broker
-```
-
-The adapter authenticates and upgrades the request before the manager admits the connection and assigns it to a shard. Inbound events pass through bounded queues, registry validation and authorization, partitioned execution, and bounded handler supervision. Handler responses and shard fan-out share the connection's bounded send queue and write pump.
-
-The broker path is optional and best-effort. In single-node mode the manager uses the no-op pub/sub implementation, so no external broker or peer nodes participate.
-
-### Manager
-
-`core.Manager` owns the runtime configuration, shards, connection accounting, event executor, handler supervisor, event registry, authorization policy, observer, and pub/sub registrations.
-
-The manager lifecycle is:
-
-```text
-StateStarting -> StateRunning -> StateDraining -> StateStopped
-```
-
-Only `StateRunning` accepts new connections.
-
-### Shards and rooms
-
-A shard is a technical connection partition, not a business chat room. User IDs are routed with xxHash:
-
-```text
-shard index = xxhash(userID) % MaxShards
-```
-
-Shard state uses lock-based synchronous registration, unregistration, room mutation, and fan-out. The inbound event queue remains asynchronous and bounded.
-
-A room is a logical fan-out group inside a shard. One connection may join multiple rooms, subject to `MaxRoomsPerConnection`. Removing a connection only visits the rooms joined by that connection rather than scanning every room in the shard.
-
-### Event execution
-
-Inbound messages use this envelope:
-
-```json
-{
-  "type": "chat.send",
-  "data": {
-    "text": "hello"
-  }
-}
-```
-
-Events from the same connection are assigned to the same executor partition and retain FIFO execution order. Events from different connections may execute concurrently. There is no global ordering across connections, shards, processes, or broker nodes.
-
-Each handler also runs through a fixed-capacity supervisor. If a handler exceeds its timeout:
-
-- Its context is canceled.
-- The executor partition is released for later work.
-- A non-cooperative handler remains counted as quarantined until it exits.
-- New work is rejected when the fixed supervisor capacity is exhausted.
-
-This bounds goroutine growth even when application handlers ignore cancellation.
-
-## Installation
+| Requirement | Integration |
+|---|---|
+| One process with local connections | Manager + adapter; no broker required |
+| Target users, devices or rooms across nodes | Redis registry + Gateway + Router + Redis Pub/Sub or NATS Core delivery |
+| Process business commands independently of connections | EventBus bridge, with Local or Business dispatch per event |
+| Maintain an existing shard-based publication path | Legacy `websocket/pubsub`; do not also publish the same message through Router |
+| Run the complete v2 flow | [v2 server and client](../examples/websocket/v2/README.md) |
+| Split gateway/worker/router; mix Kafka/Redis/NATS | [cluster example](../examples/websocket/cluster/README.md) |
+| Compare four HTTP adapters or generate load | [adapter examples](../examples/websocket/README.md), [load generator](../examples/websocket/loadtest) |
 
 ```bash
 go get github.com/thanhbvha/go-common/v2
 ```
 
-## Quick Start: Explicit Manager
+## Architecture and ownership
 
-The following `net/http` example uses an explicit manager, structured identities, a private event registry, authorization, bounded configuration, and graceful shutdown.
+```mermaid
+flowchart LR
+    Client --> Adapter[HTTP authentication and upgrade]
+    Adapter --> Manager[core.Manager]
+    Manager --> Shard[Local connection shard]
+    Shard --> Connection[Bounded queue and socket writer]
+    Connection --> Client
+    Client --> Events[Validate and authorize events]
+    Events --> Local[Local handler]
+    Events --> Business[Business dispatch]
+    Business --> Bus[EventBus command / worker / notification]
+    Local --> Router[routing.Router]
+    Bus --> Router
+    Router --> Registry[Redis session and room leases]
+    Router --> Delivery[Redis Pub/Sub or NATS Core RPC]
+    Delivery --> Gateway[routing.Gateway]
+    Gateway --> Connection
+```
+
+| Component | Responsibility | Ownership |
+|---|---|---|
+| `core.Manager` | Shards, connections, accounting, execution and supervision | Owns connections and internally created executor; borrows Gateway |
+| `core.Connection` | One reader, one writer, bounded outbound queue, identity and rooms | Shard owns committed connection cleanup |
+| `core.EventRegistry` | Validation, timeout, authorization/dispatch integration | Explicit instance per service/manager |
+| `routing.Gateway` | Tenant/session/room indexes, leases, enqueue/dedupe | Start before Manager; close after Manager |
+| `routing.Router` | Resolve locations, group destination nodes and inspect results | Uses a started transport; does not own broker clients |
+| Redis registry | Session generations, TTLs and room membership | Borrows `redis.UniversalClient` |
+| Delivery transport | Two node subscriptions and request/result correlation | Borrows Redis/NATS connection; close before that connection |
+| EventBus bridge | Declare `ws.command` / `ws.notification`, publish and route work | Borrows Bus and Router; declare before Bus.Start |
+
+An injected event executor is borrowed. Legacy pub/sub is closed only with
+`PubSubOwnership: core.PubSubOwned`. Setting `ManagerConfig.Distributed` substitutes
+a noop legacy pub/sub manager; use Router for cross-node traffic in that mode.
+
+## Delivery contract
+
+| Result | Meaning / application action |
+|---|---|
+| `Enqueued` | Outbound queue accepted the payload, or the gateway remembers acceptance for this message/session generation |
+| `Offline` | No resolved recipients; no notification has been stored for later |
+| `QueueFull` | Queue rejected this attempt; failed enqueue is not deduped as delivered |
+| `Stale`, `NotFound` | Location generation changed or disappeared; Router re-resolves at most twice |
+| `Unavailable` | Lease, gateway state or capacity prevents acceptance |
+| `Unknown` | No usable reply; publication may already have caused enqueue |
+
+Inspect **both** the error and `result.Retryable()`. Partial results may include
+accepted and rejected recipients. Retry the same logical notification with the
+**same message ID and payload**; never reuse an ID for an unrelated notification.
+
+`Enqueued` is not a socket-write or client-receipt acknowledgement. Redis Pub/Sub
+and NATS Core do not provide an offline inbox, replay or exactly-once delivery.
+Persist durable application state and let clients resynchronize. EventBus
+retry/durability belongs to its selected driver and does not make WebSocket
+client delivery durable.
+
+FIFO is the order of successful enqueue on each connection, not global ordering.
+Local events run through a partitioned executor. A timed-out non-cooperative
+handler may remain quarantined and overlap later work; handlers must obey context.
+
+## Minimal single-process server
+
+This complete example needs a server-issued credential in `WS_DEMO_TOKEN`.
+It binds that credential to a trusted demo identity and exposes one ping event.
+Replace the lookup with verified application authentication.
 
 ```go
 package main
 
 import (
     "context"
-    "encoding/json"
+    "crypto/subtle"
     "errors"
+    "log"
     "net/http"
     "os"
     "os/signal"
@@ -153,737 +114,334 @@ import (
 
     wshttp "github.com/thanhbvha/go-common/v2/websocket/adapter/nethttp"
     "github.com/thanhbvha/go-common/v2/websocket/core"
+    "github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
-type authorizer struct{}
-
-func (authorizer) CanSubscribe(ctx context.Context, identity core.Identity, roomID string) error {
-    if identity.UserID == "" {
-        return core.ErrUnauthorized
-    }
-    return nil
+type pingPolicy struct{}
+func (pingPolicy) CanSubscribe(context.Context, core.Identity, string) error {
+    return core.ErrUnauthorized
 }
-
-func (authorizer) CanPublish(ctx context.Context, identity core.Identity, eventType string) error {
-    if identity.UserID == "" {
-        return core.ErrUnauthorized
-    }
-    return nil
+func (pingPolicy) CanPublish(_ context.Context, i core.Identity, event string) error {
+    if i.TenantID == "demo" && i.UserID == "alice" && event == "ping" { return nil }
+    return core.ErrUnauthorized
 }
 
 func main() {
-    registry := core.NewEventRegistry()
-    registry.Register("chat.send", core.HandlerConfig{
-        Timeout:         2 * time.Second,
-        MaxPayloadBytes: 4 * 1024,
-        Validate: func(payload []byte) error {
-            if !json.Valid(payload) {
-                return core.ErrInvalidPayload
-            }
-            return nil
-        },
-        Handler: func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
-            conn.SendJSON(core.OutgoingMessage{
-                Type:      "chat.echo",
-                Data:      json.RawMessage(message.Data),
-                RequestID: conn.GetRequestID(),
-            })
+    token := os.Getenv("WS_DEMO_TOKEN")
+    if len(token) < 32 { log.Fatal("set WS_DEMO_TOKEN to a credential of at least 32 bytes") }
+    events := core.NewEventRegistry()
+    events.Register("ping", core.HandlerConfig{
+        Timeout: time.Second, MaxPayloadBytes: 128,
+        Handler: func(_ context.Context, c *core.Connection, _ core.IncomingMessage) error {
+            if !c.SendJSON(core.OutgoingMessage{Type: "pong", Data: "ok"}) { return core.ErrSendQueueFull }
             return nil
         },
     })
-
-    config := core.DefaultManagerConfig()
-    config.EventRegistry = registry
-    config.Authorizer = authorizer{}
-    config.MaxConnections = 20_000
-    config.MaxShards = 64
-    config.MaxShardConnections = 1_000
-    config.MaxConnectionsPerUser = 5
-    config.MaxConnectionsPerTenant = 5_000
-    config.MaxMessageBytes = 16 * 1024
-    config.MessagesPerSecond = 20
-    config.MessageBurst = 50
-
-    if err := config.ValidateProduction(); err != nil {
-        panic(err)
-    }
-    manager := core.NewManagerWithConfig(config)
-
-    handler := wshttp.NewHandler(wshttp.Config{
+    cfg := core.DefaultManagerConfig()
+    cfg.EventRegistry, cfg.Authorizer = events, pingPolicy{}
+    cfg.Observer = &core.AtomicObserver{}
+    cfg.MaxConnections, cfg.MaxConnectionsPerUser = 1000, 4
+    if err := cfg.ValidateProduction(); err != nil { log.Fatal(err) }
+    manager := core.NewManagerWithConfig(cfg)
+    h := wshttp.NewHandler(wshttp.Config{
         Manager: manager,
+        RateLimiter: limiter.NewRateLimiter(50, 100),
+        ConnectionLimiter: limiter.NewConnectionLimiter(20),
         AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
-            userID := r.Header.Get("X-User-ID")
-            tenantID := r.Header.Get("X-Tenant-ID")
-            if userID == "" {
-                return core.Identity{}, errors.New("unauthorized")
+            if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+                return core.Identity{}, core.ErrUnauthorized
             }
-            return core.Identity{
-                UserID:   userID,
-                TenantID: tenantID,
-                SessionID: r.Header.Get("X-Session-ID"),
-            }, nil
+            return core.Identity{TenantID: "demo", UserID: "alice", ExpiresAt: time.Now().Add(time.Hour)}, nil
         },
     })
-
     mux := http.NewServeMux()
-    mux.HandleFunc("/ws", handler.HandleUpgrade)
-    mux.HandleFunc("/health", handler.HandleHealthCheck)
-
-    server := &http.Server{
-        Addr:              ":8080",
-        Handler:           mux,
-        ReadHeaderTimeout: 5 * time.Second,
+    mux.HandleFunc("GET /ws", h.HandleUpgrade)
+    mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+        if !manager.Readiness().Ready { w.WriteHeader(http.StatusServiceUnavailable) }
+    })
+    server := &http.Server{Addr: "127.0.0.1:8090", Handler: mux, ReadHeaderTimeout: 5*time.Second}
+    failed := make(chan error, 1)
+    go func() { failed <- server.ListenAndServe() }()
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
+    select {
+    case <-ctx.Done():
+    case err := <-failed:
+        if !errors.Is(err, http.ErrServerClosed) { log.Print("HTTP listener stopped") }
     }
-
-    go func() {
-        if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-            panic(err)
-        }
-    }()
-
-    signals := make(chan os.Signal, 1)
-    signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-    <-signals
-
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    _ = server.Shutdown(ctx)
-    _ = manager.Shutdown(ctx)
+    httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
+    if err := server.Shutdown(httpCtx); err != nil { log.Print("HTTP shutdown incomplete") }
+    cancelHTTP()
+    wsCtx, cancelWS := context.WithTimeout(context.Background(), 6*time.Second)
+    defer cancelWS()
+    if err := manager.Shutdown(wsCtx); err != nil { log.Print("WebSocket drain incomplete") }
 }
 ```
 
-Use credentials established by trusted middleware or validated bearer/session tokens in real applications. Do not trust identity headers directly from the public internet.
+Send `{"type":"ping","data":{}}` using an authenticated client. Input is
+`core.IncomingMessage{Type, Data}`; output is `core.OutgoingMessage{Type, Data,
+RequestID}`. RequestID comes from server request context; core does not define a
+per-message client correlation/ACK protocol.
 
-## Compatibility Quick Start
+## Adapters, identity and authorization
 
-For existing applications, package-level registration and the global manager remain supported:
+All adapters accept Manager, AuthenticateIdentity and upgrade/connection limiters.
+Default authentication rejects upgrades; AuthenticateIdentity overrides legacy
+Authenticate. Use the following callback and registration for each adapter:
+
+| Adapter | Identity callback | Register upgrade |
+|---|---|---|
+| `adapter/nethttp` | `func(*http.Request) (core.Identity, error)` | `mux.HandleFunc("GET /ws", h.HandleUpgrade)` |
+| `adapter/gin` | `func(*gin.Context) (core.Identity, error)` | `router.GET("/ws", h.HandleUpgrade)` |
+| `adapter/echo` | `func(echo.Context) (core.Identity, error)` | `server.GET("/ws", h.HandleUpgrade)` |
+| `adapter/fiber` | `func(*fiber.Ctx) (core.Identity, error)` | `app.Get("/ws", h.HandleUpgrade)` |
+
+Net/http, Gin and Echo use Gorilla Upgrader; Fiber exposes CheckOrigin. Defaults
+require same-origin when Origin is present, and permit clients with no Origin.
+Cross-origin access needs an explicit allowlist; Origin is not authentication.
+Trust proxy headers only behind configured trusted proxies.
+
+Browser WebSocket cannot set an arbitrary Authorization header. Use verified
+same-site cookies or a separately designed short-lived upgrade-ticket flow.
+The example Go client uses a bearer header; it never puts credentials in URLs.
+
+Build Identity (TenantID, UserID, AccountID, SessionID, ExpiresAt) from verified
+server-side data. HTTP authentication, CanPublish and CanSubscribe are separate
+checks. Validate and authorize payload targets too. `ValidateProduction` requires
+an explicit non-nil authorizer, but cannot verify your business policy.
+
+Distributed identities require tenant and user. With no SessionID, Manager creates
+one per physical connection in distributed/business mode. A stable authenticated
+SessionID identifies a device/login: registration replaces its location with a
+fresh generation. Cross-node takeover closes the old owner when renewal detects
+fencing, not synchronously across the cluster.
+
+Local `Shard.SendToUser` / `SendToRoom` are shard scoped and use raw identifiers;
+they are not tenant security boundaries. Namespace/authorize local IDs. Router
+always takes an explicit tenant. Client-supplied identity/role/tenant fields are
+not authentication or permission to select privileged routing targets.
+
+## Distributed setup and sends
+
+The built-in session registry requires Redis even with NATS delivery. NATS Core
+delivery alone does not require JetStream. Keep broker TLS verification enabled
+and load credentials from deployment configuration.
+
+The following is startup wiring inside an application with `ctx` and a connected
+Redis UniversalClient. Imports are `websocket/core`, `websocket/routing`,
+`websocket/routing/redis` as `redisrouting`, and optionally `websocket/routing/nats`
+as `natsrouting`. The [complete example](../examples/websocket/v2/app.go) also
+handles startup rollback and explicit dependency shutdown.
 
 ```go
-core.RegisterHandler("chat.send", func(conn *core.Connection, message core.IncomingMessage) error {
-    return nil
+registry := redisrouting.NewRegistry(redisClient, "my-service")
+delivery := redisrouting.NewTransport(redisClient, "my-service")
+// Alternative: natsrouting.NewTransport(natsClient, "my-service")
+gateway, err := routing.NewGateway(routing.GatewayConfig{
+    Registry: registry, Transport: delivery, RegistryConcurrency: 32,
+    LeaseTTL: 30*time.Second, RenewInterval: 10*time.Second,
+    DedupeTTL: time.Minute, DedupeCapacity: 100000, MaxPayloadBytes: 16*1024,
 })
+if err != nil { return err }
+if err := gateway.Start(ctx); err != nil { return err }
+router, err := routing.NewRouter(routing.RouterConfig{
+    Registry: registry, Transport: delivery, Timeout: 3*time.Second, MaxPayloadBytes: 16*1024,
+})
+if err != nil { return err }
+cfg := core.DefaultManagerConfig()
+cfg.Distributed, cfg.EventRegistry, cfg.Authorizer = gateway, applicationEvents, applicationPolicy
+if err := cfg.ValidateProduction(); err != nil { return err }
+manager := core.NewManagerWithConfig(cfg)
+```
 
-handler := wshttp.NewHandler(wshttp.Config{
-    Authenticate: func(r *http.Request) (string, error) {
-        return authenticateUser(r)
+Router-only processes start delivery with
+`delivery.Start(startupCtx, routing.NewID(), nil)`. NodeID defaults to a UUID;
+custom IDs must be unique per process incarnation, including rolling restarts.
+
+```go
+id := routing.NewID() // Persist/reuse this ID for retries of this logical send.
+result, err := router.SendToUser(ctx, tenant, user, payload, id)
+// Or: router.SendToSession(ctx, tenant, user, session, payload, id)
+// Or: router.SendToRoom(ctx, tenant, room, payload, id)
+if err != nil || result.Retryable() {
+    // Keep partial outcomes; apply the application's bounded retry policy.
+}
+accepted := result.Count(routing.Enqueued)
+_ = accepted
+```
+
+Rooms fan out once per hosting node, across that node's shards. Room results have
+compact node/status Outcomes and recipient Counts: Outcomes length is not audience
+size. Each send uses at most 32 destination workers. Transport permits 1,024
+pending requests and caps encoded envelopes at 2 MiB. The raw payload default is
+1 MiB; broker limits must also fit JSON/base64 and envelope overhead.
+
+## Event handlers and EventBus
+
+Register events on an explicit registry before constructing Manager:
+
+```go
+events.Register("chat.send", core.HandlerConfig{
+    Dispatch: core.Local, Timeout: 2*time.Second, MaxPayloadBytes: 2048,
+    Validate: validateChatPayload,
+    Handler: func(ctx context.Context, c *core.Connection, m core.IncomingMessage) error {
+        return handleChat(ctx, c, m) // Authorize the payload's room/target here.
     },
 })
-
-defer core.GetGlobalManager().Shutdown(context.Background())
-```
-
-New production code should prefer an explicit `EventRegistry`, `Authorizer`, `Observer`, pub/sub manager, and `*core.Manager` injection. This avoids initialization-order dependencies and permits multiple isolated managers in the same process.
-
-## Adapter Configuration
-
-All adapters expose equivalent concepts with framework-specific callback types:
-
-| Field | Purpose |
-|---|---|
-| `Manager` | Explicit `*core.Manager`; falls back to `core.GetGlobalManager()` when omitted |
-| `AuthenticateIdentity` | Preferred structured authentication callback; takes precedence over `Authenticate` |
-| `Authenticate` | Legacy callback returning only `UserID` |
-| `RateLimiter` | Limits upgrade attempts; defaults to the package global limiter |
-| `ConnectionLimiter` | Limits concurrent upgrades by `ConnectionKey` |
-| `ConnectionKey` | Resolves the limiter key and connection metadata key |
-| `Upgrader` | Gorilla upgrader for net/http, Gin, and Echo |
-| `CheckOrigin` | Fiber browser-origin policy |
-
-Adapter constructors:
-
-```go
-netHTTPHandler := wsNetHTTP.NewHandler(wsNetHTTP.Config{Manager: manager, AuthenticateIdentity: authenticateHTTP})
-ginHandler := wsGin.NewHandler(wsGin.Config{Manager: manager, AuthenticateIdentity: authenticateGin})
-echoHandler := wsEcho.NewHandler(wsEcho.Config{Manager: manager, AuthenticateIdentity: authenticateEcho})
-fiberHandler := wsFiber.NewHandler(wsFiber.Config{Manager: manager, AuthenticateIdentity: authenticateFiber})
-```
-
-The adapter default authenticator rejects every upgrade. Authentication must be explicitly configured.
-
-## Manager Configuration
-
-Start from `core.DefaultManagerConfig()` and override values based on measured workload characteristics.
-
-### Dependencies and ownership
-
-| Field | Default | Meaning |
-|---|---:|---|
-| `PubSub` | New no-op manager | Cross-node message router; no-op means single-node mode |
-| `PubSubOwnership` | `PubSubBorrowed` | Whether manager shutdown also shuts down the broker manager |
-| `EventRegistry` | New registry | Event type to validation, timeout, and handler mapping |
-| `Authorizer` | Allow-all | Event publication and room subscription policy |
-| `EventExecutor` | Created internally | Optional injected partitioned executor |
-| `Observer` | `AtomicObserver` | Manager-scoped metrics and event outcomes |
-
-Use `PubSubBorrowed` when a Redis/NATS manager is shared with another component or manager. Use `PubSubOwned` when the WebSocket manager exclusively owns it.
-
-An injected `EventExecutor` is treated as borrowed and is not shut down by the manager. An internally created executor is owned and shut down by the manager.
-
-### Capacity and queues
-
-| Field | Default | Scope and behavior |
-|---|---:|---|
-| `MaxConnections` | `200000` | Logical admission ceiling for active plus reserved connections in one manager |
-| `MaxShards` | `1000` | Maximum technical shards, not room count |
-| `MaxShardConnections` | `100000` | Per-shard connection ceiling |
-| `SendQueueSize` | `256` | Outbound messages buffered per connection |
-| `InboundQueueSize` | `4096` | Raw client events buffered per shard |
-| `BroadcastQueueSize` | `4096` | Compatibility field; synchronous broadcast currently does not use this queue |
-| `ExecutorPartitions` | `runtime.NumCPU()` | FIFO worker partitions for business events |
-| `ExecutorQueueSize` | `256` | Queued tasks per executor partition |
-| `MaxPendingHandlers` | `64` | Pending or running business events per connection |
-| `MaxHandlerGoroutines` | `runtime.NumCPU() * 4` | Manager-wide handler and quarantined-handler permit budget |
-
-These values are limits, not validated server capacity. Set production values only after Linux, TLS, kernel, memory, broker, and business-handler load testing.
-
-Approximate executor queue capacity is:
-
-```text
-ExecutorPartitions * ExecutorQueueSize
-```
-
-One partition may become full while other partitions have capacity because tasks are assigned by connection ID.
-
-### Payload and rate limits
-
-| Field | Default | Meaning |
-|---|---:|---|
-| `MaxMessageBytes` | `1024` | Maximum inbound WebSocket message size |
-| `MessagesPerSecond` | `100` | Sustained inbound messages per second per connection |
-| `MessageBurst` | `200` | Maximum message token bucket burst per connection |
-| `BytesPerSecond` | `65536` | Sustained inbound bytes per second per connection |
-| `ByteBurst` | `131072` | Maximum byte token bucket burst per connection |
-
-Both message and byte limiters must allow an inbound message. A rejected message is dropped rather than queued indefinitely.
-
-The default 1 KiB payload is appropriate for small commands, presence, or typing events. Chat or document patches usually require an explicit larger limit. Large files and media should use HTTP/object storage rather than WebSocket frames.
-
-### Rooms, consumers, and identity quotas
-
-| Field | Default | Meaning |
-|---|---:|---|
-| `MaxRoomsPerConnection` | `100` | Maximum logical rooms joined by one physical connection |
-| `SlowConsumerDropThreshold` | `1` | Consecutive full outbound queue events before closing a connection |
-| `MaxConnectionsPerUser` | `0` | Node-local per-user connection quota; zero disables it |
-| `MaxConnectionsPerAccount` | `0` | Node-local per-account connection quota; zero disables it |
-| `MaxConnectionsPerTenant` | `0` | Node-local per-tenant connection quota; zero disables it |
-
-A successful outbound enqueue resets the slow-consumer consecutive-drop count. Raising the threshold tolerates brief congestion but does not restore already dropped messages.
-
-Identity quotas are enforced atomically with manager capacity reservation. They are node-local, not strict cluster-wide quotas. With ten pods, a per-tenant limit of 1,000 may permit approximately 10,000 cluster-wide connections depending on load distribution.
-
-### Network deadlines and logging
-
-| Field | Default | Meaning |
-|---|---:|---|
-| `WriteWait` | `10s` | Deadline for an outbound frame or ping write |
-| `PongWait` | `60s` | Read deadline extended by each pong |
-| `PingPeriod` | `54s` | Ping interval; must remain below `PongWait` |
-| `DisableLifecycleLogging` | `false` | Disables high-volume connection open/close logs; errors remain enabled |
-
-Lifecycle logs are rate-limited. Operational metrics should be the authoritative source for connection counts and drops.
-
-## Event Registration
-
-### Configured registry
-
-```go
-registry := core.NewEventRegistry()
-
-registry.Register("document.patch", core.HandlerConfig{
-    MaxPayloadBytes: 32 * 1024,
-    Timeout:         1500 * time.Millisecond,
-    Validate: func(payload []byte) error {
-        if len(payload) == 0 {
-            return core.ErrInvalidPayload
-        }
-        return nil
-    },
-    Handler: func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
-        return applyPatch(ctx, conn.Identity(), message.Data)
-    },
-})
-
-config.EventRegistry = registry
-```
-
-### Compatibility registration
-
-```go
-core.RegisterHandler("chat.send", func(conn *core.Connection, message core.IncomingMessage) error {
-    return nil
-})
-
-core.RegisterContextHandler("chat.send", 2*time.Second, func(
-    ctx context.Context,
-    conn *core.Connection,
-    message core.IncomingMessage,
-) error {
-    return nil
+events.Register("business.echo", core.HandlerConfig{
+    Dispatch: core.Business, Timeout: 3*time.Second,
+    MaxPayloadBytes: 2048, Validate: validateBusinessPayload,
 })
 ```
 
-Handlers must observe `ctx` in database, HTTP, queue, and blocking calls. Timeout releases the executor partition, but Go cannot forcibly terminate a non-cooperative goroutine. The supervisor bounds those remaining goroutines with `MaxHandlerGoroutines`.
-
-## Identity and Authorization
-
-```go
-type Identity struct {
-    UserID    string
-    TenantID  string
-    AccountID string
-    SessionID string
-    ExpiresAt time.Time
-}
-```
-
-`UserID` is required by the standard adapters. `TenantID`, `AccountID`, and `SessionID` enable multi-tenant authorization, quotas, and revocation. A non-zero `ExpiresAt` automatically closes the connection when the identity expires.
-
-Authorization interface:
-
-```go
-type Authorizer interface {
-    CanSubscribe(context.Context, Identity, string) error
-    CanPublish(context.Context, Identity, string) error
-}
-```
-
-The default authorizer allows every operation. Applications with private rooms or restricted event types must inject an authorizer.
-
-Revoke active sessions:
-
-```go
-count := manager.DisconnectIdentity(func(identity core.Identity) bool {
-    return identity.SessionID == revokedSessionID
-}, "session revoked")
-```
-
-## User and Room Operations
-
-Inside an event handler:
-
-```go
-shard := conn.GetShard()
-
-if err := shard.JoinRoom(ctx, "project:42", conn); err != nil {
-    return err
-}
-
-shard.SendToUser("user-123", []byte(`{"type":"notification"}`))
-shard.SendToRoom("project:42", []byte(`{"type":"project.updated"}`))
-shard.Broadcast([]byte(`{"type":"local.broadcast"}`))
-shard.BroadcastGlobal([]byte(`{"type":"cluster.broadcast"}`))
-
-if err := shard.LeaveRoom(ctx, "project:42", conn); err != nil {
-    return err
-}
-```
-
-Room join and leave are idempotent. Joining requires the connection to be active on the shard and authorized by `Authorizer.CanSubscribe`.
-
-## Message and Ownership Contract
-
-- One outbound application message is one WebSocket text frame.
-- `Connection.Send` clones the caller's byte slice before enqueueing; the caller may immediately reuse or mutate it.
-- User, room, and shard fan-out clone a payload once and share the immutable copy across connection queues.
-- Successfully enqueued messages are written FIFO on that connection.
-- No global ordering is promised across connections, shards, processes, or broker nodes.
-- A full send queue drops the current message and may close the slow consumer according to `SlowConsumerDropThreshold`.
-- Inbound queue or executor overload drops/rejects work instead of growing memory without a bound.
-- Applications requiring retries must implement idempotency and retry at the business layer or use an outbox, inbox, or dedicated queue package.
-
-## Single-Node Mode
-
-Omit `PubSub` or explicitly use a no-op manager:
-
-```go
-config := core.DefaultManagerConfig()
-config.PubSub = pubsub.NewNoopManager()
-config.PubSubOwnership = core.PubSubOwned
-
-manager := core.NewManagerWithConfig(config)
-```
-
-Single-node mode supports all local connection, user, room, executor, quota, authorization, and observability features. Cross-node messages are unavailable.
-
-## Redis Pub/Sub
-
-```go
-import (
-    "context"
-    "time"
-
-    commonredis "github.com/thanhbvha/go-common/v2/redis"
-    "github.com/thanhbvha/go-common/v2/websocket/core"
-    redispubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/redis"
-)
-
-redisConfig := commonredis.DefaultConfig()
-redisConfig.Host = "redis"
-redisConfig.Port = 6379
-
-redisClient := commonredis.New(redisConfig)
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-if err := redisClient.Connect(ctx); err != nil {
-    return err
-}
-
-bus := redispubsub.NewManagerWithClient(redisClient)
-
-config := core.DefaultManagerConfig()
-config.PubSub = bus
-config.PubSubOwnership = core.PubSubOwned
-manager := core.NewManagerWithConfig(config)
-```
-
-Use `PubSubBorrowed` if another component owns `bus`.
-
-## NATS
-
-```go
-import (
-    commonnats "github.com/thanhbvha/go-common/v2/nats"
-    "github.com/thanhbvha/go-common/v2/websocket/core"
-    natspubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/nats"
-)
-
-natsConfig := commonnats.DefaultConfig()
-natsConfig.URLs = []string{"nats://nats:4222"}
-natsClient := commonnats.New(natsConfig)
-if err := natsClient.Connect(ctx); err != nil {
-    return err
-}
-
-bus := natspubsub.NewManagerWithClient(natsClient)
-
-config := core.DefaultManagerConfig()
-config.PubSub = bus
-config.PubSubOwnership = core.PubSubOwned
-manager := core.NewManagerWithConfig(config)
-```
-
-Refer to the `nats` package configuration for URL, credentials, timeout, and reconnect settings.
-
-## Broker Failure Policy and Readiness
-
-Redis and NATS managers support these policies:
-
-| Policy | Behavior |
-|---|---|
-| `pubsub.FailStartup` | Broker operations fail and readiness remains false when unavailable; the application must enforce startup failure with `WaitReady` |
-| `pubsub.StayUnready` | Process may remain alive but broker readiness is false until recovery |
-| `pubsub.AllowStandalone` | Permit standalone operation when no broker is available |
-
-Broker managers track desired and active subscriptions, reconcile missing subscriptions with capped jittered backoff, expose reconnect state and counters, and implement `WaitReady(ctx)`.
-
-Constructors return a manager rather than a startup error. If broker availability is mandatory, use `NewManagerWithClientAndPolicy(..., pubsub.FailStartup)`, call `WaitReady` with a startup deadline, and terminate startup when it returns an error.
-
-```go
-if readyProvider, ok := config.PubSub.(pubsub.WaitReadyProvider); ok {
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    if err := readyProvider.WaitReady(ctx); err != nil {
-        return err
-    }
-}
-```
-
-Broker states include `standalone`, `disconnected`, `recovering_subscriptions`, `ready`, and `closed`.
-
-## Observability
-
-`AtomicObserver` records manager-local cumulative counters:
-
-```text
-connections opened and closed
-inbound messages and bytes
-outbound messages and bytes
-outbound drops and slow consumers
-malformed, unknown, submitted, dropped, errored, timed-out, and panicked events
-```
-
-Event latency buckets:
-
-```text
-< 1 ms
-< 5 ms
-< 10 ms
-< 50 ms
-< 100 ms
->= 100 ms
-```
-
-Custom observers implement `core.Observer`. Snapshot-capable implementations may also implement `core.SnapshotObserver`. Event latency and tracing are optional through `core.LatencyObserver` and `core.TraceObserver`.
-
-Avoid raw user, account, tenant, room, or session IDs as metric labels because they create unbounded cardinality.
-
-Manager stats include:
-
-- Manager lifecycle and configured limits.
-- Total and per-shard connections.
-- Executor queue, completion, rejection, panic, and in-flight state.
-- Handler supervisor running, quarantined, rejected, and accepting state.
-- Runtime and event counters.
-- Event latency buckets.
-
-## Health and Operational Endpoints
-
-Every adapter provides equivalents of:
-
-- `HandleHealthCheck`
-- `HandleStats`
-- `HandleShardManagement`
-
-Readiness requires:
-
-```text
-manager state is running
-AND event executor is accepting
-AND broker is ready
-AND manager and shard connection accounting match
-```
-
-Operational endpoints expose topology and runtime metadata. Put them on an internal listener or protect them with administrator authentication. The Fiber server helper only registers public routes documented by that helper; register sensitive operational handlers explicitly.
-
-## Graceful Shutdown
-
-Shut down HTTP admission first, then the WebSocket manager:
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-defer cancel()
-
-_ = httpServer.Shutdown(ctx)
-if err := manager.Shutdown(ctx); err != nil {
-    return err
-}
-```
-
-Manager shutdown:
-
-- Moves the manager to draining state and rejects new connections.
-- Shuts down all shards and closes active connections.
-- Waits for started connection pumps within the supplied context.
-- Stops handler supervision from accepting new work.
-- Shuts down an internally owned event executor.
-- Unregisters only this manager's pub/sub callbacks.
-- Shuts down pub/sub only when configured as `PubSubOwned`.
-
-`Connection.Close` is idempotent and non-blocking. `Connection.Wait(ctx)` and `Connection.CloseAndWait(ctx, reason)` provide bounded lifecycle waiting after a connection has started.
-
-## Security Checklist
-
-- Configure `AuthenticateIdentity` or `Authenticate`; the default rejects upgrades.
-- Derive identity from validated credentials or trusted middleware, not arbitrary query parameters or public headers.
-- Inject an `Authorizer` for private events and rooms; the default is allow-all.
-- Keep browser same-origin defaults or configure a strict origin allowlist.
-- Configure trusted proxies before using forwarded client IP headers.
-- Set realistic message, byte, payload, room, connection, account, and tenant limits.
-- Keep administrative health, stats, and shard endpoints private or authenticated.
-- Never log frames, credentials, tokens, or broker payload contents.
-- Persist critical data before best-effort fan-out.
-- Use idempotency with domain persistence, an outbox/inbox, or a dedicated queue for operations that cannot be lost or duplicated.
-
-## Error and Overload Behavior
-
-| Condition | Behavior |
-|---|---|
-| Manager is draining or stopped | Reject upgrade or connection registration |
-| Manager or identity quota reached | Reject and close the new connection |
-| Shard capacity reached | Reject and close before manager accounting commits |
-| Inbound rate limit exceeded | Drop the inbound event |
-| Shard inbound queue full | Drop the inbound event |
-| Per-connection pending-handler limit reached | Drop the event |
-| Executor partition queue full | Reject and count the event as dropped |
-| Handler supervisor capacity exhausted | Reject the invocation |
-| Handler timeout | Cancel context, release executor partition, quarantine if still running |
-| Outbound queue full | Drop message and close after configured consecutive threshold |
-| Redis/NATS unavailable | Behavior follows cluster failure policy and readiness state |
-| Handler panic | Recover, count panic, keep executor available for future tasks |
-
-## Performance and Capacity
-
-The repository includes logging-free microbenchmarks, fuzz tests, integration tests, load scenarios, soak scripts, and a profiling helper:
+Local is the default. Business dispatch publishes a validated command through
+ManagerConfig.CommandPublisher. Once EventBus accepts a task, the connection does
+not own its processing lifetime. The example uses strict JSON decoding and
+`web/validator.Validate`. Malformed, unknown, unauthorized and rejected events are
+counted. Core does not automatically send validation/handler error frames; define
+that behavior in the application protocol.
+
+Before Bus.Start, create `websocket/integration/eventbus.New` with the borrowed
+Bus and Router, register a `ws.command` task handler and wire CommandPublisher.
+The bridge declares `ws.command` and `ws.notification`. Router instances share
+subscriber group `realtime-router`. Redis/NATS EventBus need the driver's
+`WithEventLayoutTargeted()` notification topology option. See the complete
+[bridge wiring and worker](../examples/websocket/v2/app.go).
+
+Workers decode BusinessCommand, perform idempotent work and publish Notification
+with a stable ID. Offline is terminal success; unknown/queue-full/partial results
+can trigger EventBus retry/DLQ. The bridge does not own Bus.Start/Drain/Close.
+Database atomicity, outbox/inbox and business idempotency belong to the application.
+For Kafka EventBus and explicit publication dedupe policy, see the
+[cluster example](../examples/websocket/cluster/README.md).
+
+## Configuration reference
+
+Start from `core.DefaultManagerConfig()`. Most nonpositive core limits normalize
+to defaults rather than disabling the feature.
+
+| Core field | Default | Scope |
+|---|---:|---|
+| MaxConnections / MaxShards / MaxShardConnections | 200000 / 1000 / 100000 | Node-local admission; shard count includes default shard |
+| SendQueueSize / InboundQueueSize | 256 / 4096 | Messages per connection / events per shard |
+| BroadcastQueueSize | 4096 | Compatibility field; synchronous broadcast does not use this queue |
+| ExecutorPartitions / ExecutorQueueSize | CPU count / 256 | Partitions and pending tasks per partition |
+| MaxHandlerGoroutines / MaxPendingHandlers | CPU count × 4 / 64 | Supervised handlers per manager / pending work per connection |
+| MaxMessageBytes | 1024 | Inbound frame bytes; independent of Router outbound payload bound |
+| MessagesPerSecond / MessageBurst | 100 / 200 | Per-connection message bucket |
+| BytesPerSecond / ByteBurst | 65536 / 131072 | Per-connection inbound byte bucket |
+| MaxRoomsPerConnection | 100 | Connection room quota |
+| SlowConsumerDropThreshold | 1 | Consecutive queue drops before disconnect |
+| MaxConnectionsPerUser/Account/Tenant | 0 | Optional node-local quotas; zero leaves a dimension unlimited |
+| WriteWait / PongWait / PingPeriod | 10s / 60s / 54s | Write deadline / pong-based read deadline / ping interval |
+| DrainTimeout | 5s | Shared outbound drain budget across manager shards |
+| DisableLifecycleLogging | false | Suppress lifecycle logs; set privacy policy for other logs separately |
+
+Admission includes active plus reserved connections. Quotas are node-local, not
+cluster-global. Quota dimensions use raw Identity user/account/tenant values;
+tenant-local user/account IDs may share a quota unless the application uses
+globally unique identifiers. Redis registry defaults to 1,000 sessions per tenant/user; configure
+WithMaxSessionsPerUser deliberately alongside app quotas. Queues are bounded by
+item count, not total outbound bytes. Account for payloads, socket/TLS buffers,
+handlers and slow clients when sizing them.
+
+| Gateway / Router field | Default | Behavior |
+|---|---:|---|
+| Gateway LeaseTTL / RenewInterval | 30s / TTL ÷ 3 | Interval must be positive and below TTL |
+| Gateway RegistryConcurrency | 32 | Bound simultaneous registry operations |
+| Gateway DedupeTTL / DedupeCapacity | 1 minute / 100000 | Bounded, process-local; restart/expiry/eviction allow duplicates |
+| Gateway MaxPayloadBytes | 1 MiB | Raw targeted payload bound |
+| Router Timeout / MaxPayloadBytes | 5s / 1 MiB | Send deadline and raw payload bound |
+
+## Coordination and room indexing
+
+Lifecycle operations are ordered per logical session. Gate/permit waits observe
+cancellation; registry I/O never holds the shared index mutex. Remove detaches
+local state before broker work. Renewal processes idle sessions in batches of at
+most 256 and stays ordered with remove/leave. Busy sessions are skipped; expired
+observed session leases reject delivery. Legacy ownership lookups do not prove
+successful lease extension.
+
+Delivery snapshots recipients under the index lock, then enqueues with a separate
+per-session gate. Dedupe has up to 64 bounded stripes; hash skew can evict entries
+before total capacity is reached. Slow-consumer network close runs separately.
+Unrelated sessions can progress; a single hot session still serializes.
+
+Redis generations fence delayed cleanup. Lua keys share a tenant hash slot; one
+hot tenant still occupies one Redis Cluster slot. Default room reads aggregate
+node IDs in Redis but still scan legacy memberships on the server. New writers
+also maintain room-node leases.
+
+WithRoomNodeIndex enables reads proportional to hosting nodes. Enable only after
+all writers support the index and old memberships expire or refresh. Keep
+compatibility reads during mixed-version rollout; disable indexed reads before
+rolling writers back. The index adds writes and metadata; follow the
+[detailed rollout guide](routing/README.md#room-lookup-and-node-index-rollout).
+
+## Shutdown and drain
+
+Manager lifecycle is `Starting → Running → Draining → Stopped`. Shutdown rejects
+new connections, detaches shard maps, stops outbound admission, flushes accepted
+messages in FIFO order, then closes sockets. The first caller context and
+DrainTimeout bound outbound drain across shards. Expiry forces close; another
+Shutdown call does not erase retained drain failures. ErrDrainIncomplete means
+accepted messages could not all be written.
+
+Connection.Drain flushes its outbound queue and can start pumps in the registration
+window before Run. It does not finish business work or acknowledge client receipt.
+Close is idempotent and does not wait for pumps, but calls underlying network Close.
+Wait(ctx) waits for lifecycle completion after Run. A canceled wait does not prove
+that a callback/driver which ignores cancellation has stopped.
+
+For borrowed dependencies, use this order:
+
+1. Mark readiness false; stop HTTP upgrades and business publication from existing sockets.
+2. Drain accepted business work and notification consumers while routing and sockets remain available. Broker backlog/offline replay need application policy.
+3. Call Manager.Shutdown with a fresh bounded context to flush outbound queues.
+4. Close Gateway and any separate router transport, each with a fresh context.
+5. Release broker clients after their borrowers stop; retain/report cleanup failures.
+
+HTTP shutdown does not close hijacked WebSocket connections. Use fresh cleanup
+contexts rather than an already canceled signal context. Gateway.Close closes
+operation admission, cancels/joins in-flight work and renewal, compensates late
+registration commits, then closes transport. If it times out, retry with a fresh
+budget before releasing clients. Closing Gateway alone does not close sockets.
+
+Unregister is best-effort with bounded retries and generation fencing; lease expiry
+is outage fallback. DrainTimeout bounds outbound work, not arbitrary user code or
+an injected executor/driver that ignores cancellation.
+
+## Operations and verification
+
+Manager.Readiness checks lifecycle, executor, broker and accounting. GetStats
+exposes connections, event/executor/supervisor counters, inbound/outbound outcomes
+and event/queue latency buckets. Protect stats and management endpoints with
+application admin authorization; adapters do not supply that authorization.
+
+AtomicObserver implements optional DrainObserver and exposes connectionsDrained,
+drainForced and drainDiscarded (messages unwritten at cutoff). Gateway reports
+sessions, rooms, dedupe entries, lease failures, enqueues/rejections and unregister
+failures/retries. Router reports attempts, unknowns, partials and stale retries.
+Avoid identity/payload labels and credential-bearing log fields.
+
+Run from the repository root:
 
 ```bash
-go test -run '^$' -bench . -benchmem ./websocket/core
-go test -run '^$' -bench BenchmarkPubSubDecode -benchmem ./websocket/pubsub
-bash scripts/websocket-profile.sh
+go test ./websocket/... ./examples/websocket/...
+go vet ./websocket/... ./examples/websocket/...
+go test -race -count=10 ./websocket/core ./websocket/pool ./websocket/pubsub/... ./websocket/adapter/... ./websocket/routing/... ./examples/websocket/v2/...
 ```
 
-Load generator examples:
+Tagged live pub/sub tests require Redis localhost:6379 and NATS localhost:4222.
+The v2 example Compose file deliberately uses different host ports.
 
 ```bash
-go run ./examples/websocket/loadtest \
-  -target ws://127.0.0.1:8080/ws \
-  -scenario message \
-  -connections 1000 \
-  -messages 100
-
-go run ./examples/websocket/loadtest -scenario idle -connections 10000 -hold 10m
-go run ./examples/websocket/loadtest -scenario churn -connections 1000 -reconnects 10
-go run ./examples/websocket/loadtest -scenario reconnect -connections 1000 -reconnects 5
-go run ./examples/websocket/loadtest -scenario rolling-drain -connections 5000 -hold 5m
+WS_REDIS_INTEGRATION=1 WS_NATS_INTEGRATION=1 go test -tags=integration -count=1 ./websocket/pubsub/redis ./websocket/pubsub/nats
 ```
 
-Available scenarios are `message`, `idle`, `churn`, `fanout`, `reconnect`, and `rolling-drain`.
-
-Microbenchmarks measure in-memory operations. They do not include real network writes, TLS, kernel socket buffers, broker latency, database calls, downstream services, or production scheduling. Do not derive maximum connection capacity directly from benchmark nanoseconds.
-
-Before production approval, retain evidence for:
-
-- Linux and TLS capacity at target container limits.
-- Payload, message-rate, and fan-out distributions representative of production.
-- 24-hour and 72-hour soak tests.
-- Multi-node and multi-zone behavior.
-- Broker restart and subscription recovery.
-- Reconnect storms.
-- Rolling drain and canary rollback.
-- CPU, memory, file descriptor, network, queue, drop, and latency thresholds.
-
-## Recommended Starting Profiles
-
-These are initial hypotheses, not production guarantees.
-
-### Chat or notification service
-
-```go
-config := core.DefaultManagerConfig()
-config.MaxConnections = 20_000
-config.MaxShards = 64
-config.MaxShardConnections = 1_000
-config.SendQueueSize = 128
-config.InboundQueueSize = 1_024
-config.MaxMessageBytes = 16 * 1024
-config.MessagesPerSecond = 20
-config.MessageBurst = 50
-config.BytesPerSecond = 32 * 1024
-config.ByteBurst = 64 * 1024
-config.MaxPendingHandlers = 16
-config.MaxHandlerGoroutines = 64
-config.MaxRoomsPerConnection = 50
-config.SlowConsumerDropThreshold = 2
-config.MaxConnectionsPerUser = 5
-```
-
-### Presence or telemetry with many idle connections
-
-```go
-config := core.DefaultManagerConfig()
-config.MaxConnections = 50_000
-config.MaxShards = 128
-config.MaxShardConnections = 1_000
-config.SendQueueSize = 32
-config.InboundQueueSize = 512
-config.MaxMessageBytes = 4 * 1024
-config.MessagesPerSecond = 5
-config.MessageBurst = 10
-config.BytesPerSecond = 8 * 1024
-config.ByteBurst = 16 * 1024
-config.MaxPendingHandlers = 4
-config.MaxHandlerGoroutines = 32
-config.MaxRoomsPerConnection = 10
-config.SlowConsumerDropThreshold = 1
-```
-
-Queue size has direct memory consequences. A `SendQueueSize` of 256 reserves channel slots for every connection even when idle. Smaller queues are usually preferable for large idle populations.
-
-## Suitable Workloads
-
-Strong fits:
-
-- Chat with database persistence and reconnect synchronization.
-- Notifications, progress updates, and operational alerts.
-- Presence, typing indicators, cursors, and ephemeral state.
-- Realtime dashboards and device monitoring.
-- Multi-tenant SaaS live updates.
-- Live tracking and game lobbies.
-- Turn-based or moderate-rate realtime commands.
-
-Requires additional domain infrastructure:
-
-- Collaborative editing needs OT or CRDT, conflict handling, and replay.
-- Financial feeds need sequence numbers, snapshots, and resume semantics.
-- Critical workflows need durable storage, idempotency, acknowledgements, and retries.
-- Strict cluster-wide quotas need a distributed lease or reservation system.
-- High-frequency authoritative game simulation needs workload-specific networking and state architecture.
-
-Not intended for direct file, audio, or video streaming.
-
-## Testing
-
-```bash
-go test ./websocket/...
-go test -race ./websocket/core ./websocket/pubsub/... ./websocket/adapter/...
-go vet ./...
-```
-
-Redis and NATS integration tests use the `integration` build tag and environment gates documented in the repository CI and operational files.
-
-Fuzz regression corpora under `websocket/core/testdata/fuzz` are source-controlled test fixtures. They preserve inputs that previously exposed parser failures and should not be ignored or deleted as build artifacts.
-
-## Key Types
-
-| Symbol | Description |
-|---|---|
-| `core.ManagerConfig` | Dependencies, limits, queues, quotas, and deadlines for one manager |
-| `core.Manager` | Lifecycle, shard routing, accounting, pub/sub integration, and shutdown |
-| `core.Shard` | Connection, user-session, room, and fan-out partition |
-| `core.Connection` | Active client session with read/write pumps and bounded send queue |
-| `core.Conn` | Minimal framework-independent transport abstraction |
-| `core.EventRegistry` | Manager-scoped event registration table |
-| `core.HandlerConfig` | Handler timeout, validation, and payload policy |
-| `core.Identity` | User, tenant, account, session, and expiry metadata |
-| `core.Authorizer` | Event and room authorization policy |
-| `core.Observer` | Runtime and event observation interface |
-| `core.AtomicObserver` | Default manager-local atomic metrics and latency buckets |
-| `pool.PartitionedExecutor` | Bounded FIFO-per-partition business executor |
-| `pubsub.Manager` | Best-effort cross-node routing abstraction |
-| `redispubsub.Manager` | Redis Pub/Sub backend |
-| `natspubsub.Manager` | Core NATS backend |
-
-## Further Documentation
-
-- `examples/websocket`: runnable net/http, Fiber, Gin, and Echo examples.
-
-## Opt-in targeted routing and EventBus integration
-
-For tenant-scoped user/session delivery, rooms across shards/nodes, Redis session
-leases, and the business EventBus bridge, see [routing](routing/README.md) and the
-[runnable cluster example](../examples/websocket/cluster/README.md).
-
-`Connection.Enqueue` reports closed/full queues explicitly; `Send` returns true
-only for an accepted enqueue. Slow consumers remain connected until the configured
-drop threshold. Shard creation rejects capacity exhaustion with nil instead of
-silently changing the requested shard. Legacy pub/sub remains supported.
-
-The [refactor measurements](BENCHMARKS.md) record a same-machine baseline,
-corrected fan-out benchmarks and a real-broker enqueue smoke run. Manager stats
-include `eventQueueLatency` buckets covering inbound and executor wait.
-
-## Production authorization and tenant boundaries
-
-Call `ManagerConfig.ValidateProduction()` before `NewManagerWithConfig` in a
-production bootstrap. It rejects missing or typed-nil authorization policies.
-The trusted/local constructors retain permissive defaults; this validation does
-not authenticate HTTP requests or prove that an application policy is correct.
-Supply `AuthenticateIdentity` in the adapter and derive user, tenant, account,
-session, and expiry from verified credentials or trusted server middleware.
-Client query parameters and identity headers are not proof of identity. The
-quick-start header extraction requires an authenticated gateway that strips
-client-supplied headers; the runnable examples use a shared token and configurable
-identities for demonstrations, and are not an identity provider.
-
-Legacy `Shard.SendToUser`, `SendToRoom`, and pub/sub use caller-supplied string
-IDs without tenant scoping. Use globally unique application IDs or one isolated
-manager for a tenant on that path. For shared tenant-local IDs and cross-node
-fan-out, use `routing.Router` with explicit tenant IDs and an authorization
-policy validating room/event access. A room prefix is a naming convention;
-application authorization must verify membership and ownership.
-
-Room join/leave calls serialize only operations of the same connection. Registry
-network I/O runs outside shard and room-state locks, so an unavailable registry
-does not stall unrelated connections or local fan-out. Late join completion on a
-closed/unregistered connection is rejected and generation-fenced cleanup removes
-the remote membership; registry lease expiry is the fallback if cleanup fails.
+See [benchmarks and profiling](BENCHMARKS.md), the
+[gateway comparison](benchmarks/gateway-drain-20261103.md),
+[routing details](routing/README.md), and the
+[production matrix](../docs/PRODUCTION.md). Synthetic fan-out measurements are not
+broker rankings or capacity claims. Include hot users, TLS, payload size, node
+count, slow consumers and reconnect churn in deployment tests.

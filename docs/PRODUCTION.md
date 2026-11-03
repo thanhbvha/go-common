@@ -60,7 +60,14 @@ need to be initialized and does not expand that application's production scope.
 ## Release gates
 
 A v2 prerelease may be cut after the repository quality, fuzz, database, broker
-and reference-service jobs pass on one revision. A stable tag additionally needs:
+and reference-service jobs pass on one revision.
+
+Use the manual `release-evidence` workflow and its verified artifact described in
+[validation evidence](VALIDATION.md#release-evidence-workflow) to establish that
+revision. The workflow collects evidence only; release approval and publishing
+remain separate actions.
+
+A stable tag additionally needs:
 
 - no reachable vulnerability without a written disposition;
 - the selected real-infrastructure and failure matrix passing without skips;

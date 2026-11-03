@@ -35,6 +35,7 @@ type RPCTransport struct {
 	cancel          context.CancelFunc
 	closeDone       chan struct{}
 	started, closed bool
+	callbacks       operationGroup
 }
 
 func NewRPCTransport(w Wire, prefix string) *RPCTransport {
@@ -90,6 +91,10 @@ func (t *RPCTransport) Ready() bool {
 	return t.started && !t.closed && t.wire.Ready()
 }
 func (t *RPCTransport) receive(b []byte) {
+	if !t.callbacks.begin() {
+		return
+	}
+	defer t.callbacks.end()
 	if len(b) > 2<<20 {
 		return
 	}
@@ -170,6 +175,7 @@ func (t *RPCTransport) Close(ctx context.Context) error {
 	t.mu.Lock()
 	if !t.closed {
 		t.closed = true
+		callbacksDone := t.callbacks.stop()
 		if t.cancel != nil {
 			t.cancel()
 		}
@@ -179,6 +185,7 @@ func (t *RPCTransport) Close(ctx context.Context) error {
 			for _, cancel := range cs {
 				cancel()
 			}
+			<-callbacksDone
 			close(t.closeDone)
 		}()
 	}

@@ -22,6 +22,7 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - run: bash .github/scripts/check-boundaries.sh
       - run: go mod verify
       - run: go build ./...
@@ -30,7 +31,7 @@ jobs:
       - name: Vulnerability scan
         run: |
           mkdir -p artifacts
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... | tee "artifacts/govulncheck-${{ matrix.go }}.json"
+          bash .github/scripts/security-gate.sh "artifacts/govulncheck-${{ matrix.go }}.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -67,3 +68,12 @@ jobs:
         with:
           name: broker-matrix
           path: artifacts/broker-matrix.txt
+  faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: bash .github/scripts/test-faults.sh

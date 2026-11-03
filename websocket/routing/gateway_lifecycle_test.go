@@ -44,10 +44,11 @@ func TestRenewPartialResultsFenceOnlyStaleOwner(t *testing.T) {
 		if id == "stale" {
 			s.close = func() {
 				closed = true
-				if !g.lifecycle.TryLock() {
-					t.Error("close callback runs under lifecycle lock")
+				unlock, ok := g.sessionLocks.tryAcquire(s.location.Key())
+				if !ok {
+					t.Error("close callback runs under session lifecycle lock")
 				} else {
-					g.lifecycle.Unlock()
+					unlock()
 				}
 			}
 		}
@@ -104,9 +105,10 @@ func (legacyRenewalRegistry) Resolve(_ context.Context, t, u, s string) ([]Locat
 func TestLegacyPartialRenewDoesNotExtendLease(t *testing.T) {
 	g, _ := NewGateway(GatewayConfig{NodeID: "node", Registry: legacyRenewalRegistry{}, Transport: readyTransport{}})
 	defer g.cancel()
-	g.installLocal(&localSession{location: Location{TenantID: "t", UserID: "u", SessionID: "s", NodeID: "node", Generation: "g"}})
+	l := Location{TenantID: "t", UserID: "u", SessionID: "s", NodeID: "node", Generation: "g"}
+	g.installLocal(&localSession{location: l})
 	g.renew()
-	if g.leaseUntil.Load() != 0 || g.Stats().Sessions != 1 || g.Stats().LeaseFailures != 1 {
+	if g.leaseUntil.Load() != 0 || g.Stats().Sessions != 1 || g.Stats().LeaseFailures != 1 || g.sessions[l.Key()].leaseUntil.Load() != 0 {
 		t.Fatal("resolve was mistaken for a successful renewal")
 	}
 }

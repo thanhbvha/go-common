@@ -1,0 +1,45 @@
+name: release-evidence
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y redis-server
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: quality
+        run: python3 .github/scripts/release-evidence.py run quality -- bash .github/scripts/check-quality.sh
+      - name: security
+        run: python3 .github/scripts/release-evidence.py run security -- bash .github/scripts/security-gate.sh
+      - name: fuzz
+        run: python3 .github/scripts/release-evidence.py run fuzz -- bash .github/scripts/test-fuzz.sh
+      - name: databases
+        run: python3 .github/scripts/release-evidence.py run databases -- bash .github/scripts/test-databases.sh
+      - name: mongo-replica
+        run: python3 .github/scripts/release-evidence.py run mongo-replica -- bash .github/scripts/test-mongodb.sh replica
+      - name: mongo-secure
+        run: python3 .github/scripts/release-evidence.py run mongo-secure -- bash .github/scripts/test-mongodb.sh secure
+      - name: brokers
+        run: python3 .github/scripts/release-evidence.py run brokers -- bash .github/scripts/test-brokers.sh
+      - name: faults
+        run: python3 .github/scripts/release-evidence.py run faults -- bash .github/scripts/test-faults.sh
+      - name: soak
+        run: python3 .github/scripts/release-evidence.py run soak -- env PRODUCTION_SOAK_DURATION=60m bash .github/scripts/test-production.sh
+      - name: Verify complete evidence
+        if: always()
+        env:
+          REVISION: ${{ github.sha }}
+        run: python3 .github/scripts/release-evidence.py verify "$REVISION"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error

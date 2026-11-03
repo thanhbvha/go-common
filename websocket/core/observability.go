@@ -10,14 +10,17 @@ import (
 
 // RuntimeMetrics contains low-cardinality cumulative WebSocket counters.
 type RuntimeMetrics struct {
-	ConnectionsOpened uint64 `json:"connectionsOpened"`
-	ConnectionsClosed uint64 `json:"connectionsClosed"`
-	InboundMessages   uint64 `json:"inboundMessages"`
-	InboundBytes      uint64 `json:"inboundBytes"`
-	OutboundMessages  uint64 `json:"outboundMessages"`
-	OutboundBytes     uint64 `json:"outboundBytes"`
-	OutboundDropped   uint64 `json:"outboundDropped"`
-	SlowConsumers     uint64 `json:"slowConsumers"`
+	ConnectionsDrained uint64 `json:"connectionsDrained"`
+	DrainForced        uint64 `json:"drainForced"`
+	DrainDiscarded     uint64 `json:"drainDiscarded"`
+	ConnectionsOpened  uint64 `json:"connectionsOpened"`
+	ConnectionsClosed  uint64 `json:"connectionsClosed"`
+	InboundMessages    uint64 `json:"inboundMessages"`
+	InboundBytes       uint64 `json:"inboundBytes"`
+	OutboundMessages   uint64 `json:"outboundMessages"`
+	OutboundBytes      uint64 `json:"outboundBytes"`
+	OutboundDropped    uint64 `json:"outboundDropped"`
+	SlowConsumers      uint64 `json:"slowConsumers"`
 }
 
 // Observer receives low-cardinality runtime and event outcomes.
@@ -42,6 +45,11 @@ type SnapshotObserver interface {
 	EventStats() EventStats
 }
 
+// DrainObserver is optional for existing Observer implementations.
+type DrainObserver interface {
+	ConnectionDrained(pending int, forced bool)
+}
+
 type QueueLatencyObserver interface{ ObserveQueueLatency(time.Duration) }
 
 type LatencyObserver interface{ ObserveEventLatency(time.Duration) }
@@ -59,25 +67,37 @@ type LatencyHistogram struct {
 }
 
 type AtomicObserver struct {
-	connectionsOpened atomic.Uint64
-	connectionsClosed atomic.Uint64
-	inboundMessages   atomic.Uint64
-	inboundBytes      atomic.Uint64
-	outboundMessages  atomic.Uint64
-	outboundBytes     atomic.Uint64
-	outboundDropped   atomic.Uint64
-	slowConsumers     atomic.Uint64
-	eventMalformed    atomic.Uint64
-	eventUnknown      atomic.Uint64
-	eventSubmitted    atomic.Uint64
-	eventDropped      atomic.Uint64
-	eventErrors       atomic.Uint64
-	eventTimeouts     atomic.Uint64
-	eventPanics       atomic.Uint64
-	latencyBuckets    [6]atomic.Uint64
-	queueBuckets      [6]atomic.Uint64
+	connectionsDrained atomic.Uint64
+	drainForced        atomic.Uint64
+	drainDiscarded     atomic.Uint64
+	connectionsOpened  atomic.Uint64
+	connectionsClosed  atomic.Uint64
+	inboundMessages    atomic.Uint64
+	inboundBytes       atomic.Uint64
+	outboundMessages   atomic.Uint64
+	outboundBytes      atomic.Uint64
+	outboundDropped    atomic.Uint64
+	slowConsumers      atomic.Uint64
+	eventMalformed     atomic.Uint64
+	eventUnknown       atomic.Uint64
+	eventSubmitted     atomic.Uint64
+	eventDropped       atomic.Uint64
+	eventErrors        atomic.Uint64
+	eventTimeouts      atomic.Uint64
+	eventPanics        atomic.Uint64
+	latencyBuckets     [6]atomic.Uint64
+	queueBuckets       [6]atomic.Uint64
 }
 
+func (o *AtomicObserver) ConnectionDrained(pending int, forced bool) {
+	o.connectionsDrained.Add(1)
+	if forced {
+		o.drainForced.Add(1)
+	}
+	if pending > 0 {
+		o.drainDiscarded.Add(uint64(pending))
+	}
+}
 func (o *AtomicObserver) ConnectionOpened() { o.connectionsOpened.Add(1) }
 func (o *AtomicObserver) ConnectionClosed() { o.connectionsClosed.Add(1) }
 func (o *AtomicObserver) InboundMessage(bytes int) {
@@ -117,6 +137,7 @@ func (o *AtomicObserver) LatencyHistogram() LatencyHistogram {
 
 func (o *AtomicObserver) RuntimeMetrics() RuntimeMetrics {
 	return RuntimeMetrics{
+		ConnectionsDrained: o.connectionsDrained.Load(), DrainForced: o.drainForced.Load(), DrainDiscarded: o.drainDiscarded.Load(),
 		ConnectionsOpened: o.connectionsOpened.Load(), ConnectionsClosed: o.connectionsClosed.Load(),
 		InboundMessages: o.inboundMessages.Load(), InboundBytes: o.inboundBytes.Load(),
 		OutboundMessages: o.outboundMessages.Load(), OutboundBytes: o.outboundBytes.Load(),

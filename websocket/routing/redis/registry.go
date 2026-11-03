@@ -15,9 +15,10 @@ import (
 )
 
 type Registry struct {
-	client      goredis.UniversalClient
-	prefix      string
-	maxSessions int
+	client        goredis.UniversalClient
+	prefix        string
+	maxSessions   int
+	roomNodeIndex bool
 }
 
 func NewRegistry(client goredis.UniversalClient, prefix string, options ...RegistryOption) *Registry {
@@ -49,6 +50,18 @@ func WithMaxSessionsPerUser(n int) RegistryOption {
 			r.maxSessions = n
 		}
 	}
+}
+
+// WithRoomNodeIndex enables O(hosting nodes) room resolution. All writers in
+// this namespace must first support the node index; see the migration guidance.
+// Writers maintain both formats even when reads use the compatibility path.
+func WithRoomNodeIndex() RegistryOption {
+	return func(r *Registry) { r.roomNodeIndex = true }
+}
+
+func (r *Registry) roomKeys(l routing.Location, room string) []string {
+	pair, _ := json.Marshal([2]string{room, l.NodeID})
+	return []string{r.key(l.TenantID, "room", room), r.key(l.TenantID, "room_nodes", room), r.key(l.TenantID, "room_node", string(pair))}
 }
 
 type storedLocation struct {
@@ -191,9 +204,19 @@ func (r *Registry) Remove(ctx context.Context, l routing.Location) error {
 const removeSessionScript = `
 local old = redis.call('HGET', KEYS[1], ARGV[1])
 if old and cjson.decode(old).generation == ARGV[2] then
-    redis.call('HDEL', KEYS[1], ARGV[1])
+ redis.call('HDEL', KEYS[1], ARGV[1])
 end
-for i = 2, #KEYS do redis.call('ZREM', KEYS[i], ARGV[3]) end
+for i = 2, #KEYS, 3 do
+ redis.call('ZREM', KEYS[i], ARGV[3])
+ redis.call('ZREM', KEYS[i+2], ARGV[3])
+ redis.call('ZREMRANGEBYSCORE', KEYS[i+2], '-inf', ARGV[5])
+ local last = redis.call('ZREVRANGE', KEYS[i+2], 0, 0, 'WITHSCORES')
+ if #last == 0 then
+  redis.call('ZREM', KEYS[i+1], ARGV[4])
+ else
+  redis.call('ZADD', KEYS[i+1], last[2], ARGV[4])
+ end
+end
 return 1
 `
 
@@ -206,9 +229,9 @@ func (r *Registry) RemoveSession(ctx context.Context, l routing.Location, rooms 
 		if room == "" {
 			return routing.ErrInvalid
 		}
-		keys = append(keys, r.key(l.TenantID, "room", room))
+		keys = append(keys, r.roomKeys(l, room)...)
 	}
-	return r.client.Eval(ctx, removeSessionScript, keys, l.SessionID, l.Generation, member(l)).Err()
+	return r.client.Eval(ctx, removeSessionScript, keys, l.SessionID, l.Generation, member(l), l.NodeID, time.Now().UnixMilli()).Err()
 }
 
 // Single-session routing inspects and prunes only that field. User-wide routing
@@ -267,12 +290,21 @@ local session = cjson.decode(old)
 if session.generation ~= ARGV[2] or session.lease_until <= tonumber(ARGV[3]) then return 0 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[3])
 redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
-if redis.call('PTTL', KEYS[2]) < tonumber(ARGV[6]) then
-    redis.call('PEXPIRE', KEYS[2], ARGV[6])
+redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', ARGV[3])
+redis.call('ZADD', KEYS[4], ARGV[4], ARGV[5])
+local last = redis.call('ZREVRANGE', KEYS[4], 0, 0, 'WITHSCORES')
+redis.call('ZADD', KEYS[3], last[2], ARGV[7])
+for i=2,4 do
+ if redis.call('PTTL', KEYS[i]) < tonumber(ARGV[6]) then
+  redis.call('PEXPIRE', KEYS[i], ARGV[6])
+ end
 end
 return 1
 `
 
+func (r *Registry) joinKeys(l routing.Location, room string) []string {
+	return append([]string{r.key(l.TenantID, "user", l.UserID)}, r.roomKeys(l, room)...)
+}
 func (r *Registry) JoinRoom(ctx context.Context, l routing.Location, room string, ttl time.Duration) error {
 	if err := valid(l, ttl); err != nil {
 		return err
@@ -280,7 +312,7 @@ func (r *Registry) JoinRoom(ctx context.Context, l routing.Location, room string
 	if room == "" {
 		return routing.ErrInvalid
 	}
-	n, err := r.client.Eval(ctx, joinScript, []string{r.key(l.TenantID, "user", l.UserID), r.key(l.TenantID, "room", room)}, l.SessionID, l.Generation, time.Now().UnixMilli(), time.Now().Add(ttl).UnixMilli(), member(l), ttl.Milliseconds()).Int()
+	n, err := r.client.Eval(ctx, joinScript, r.joinKeys(l, room), l.SessionID, l.Generation, time.Now().UnixMilli(), time.Now().Add(ttl).UnixMilli(), member(l), ttl.Milliseconds(), l.NodeID).Int()
 	if err != nil {
 		return err
 	}
@@ -289,37 +321,55 @@ func (r *Registry) JoinRoom(ctx context.Context, l routing.Location, room string
 	}
 	return nil
 }
+
+const leaveRoomScript = `
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', ARGV[3])
+local last = redis.call('ZREVRANGE', KEYS[3], 0, 0, 'WITHSCORES')
+if #last == 0 then
+ redis.call('ZREM', KEYS[2], ARGV[2])
+else
+ redis.call('ZADD', KEYS[2], last[2], ARGV[2])
+end
+return 1
+`
+
 func (r *Registry) LeaveRoom(ctx context.Context, l routing.Location, room string) error {
 	if !l.Valid() || room == "" {
 		return routing.ErrInvalid
 	}
-	return r.client.ZRem(ctx, r.key(l.TenantID, "room", room), member(l)).Err()
+	return r.client.Eval(ctx, leaveRoomScript, r.roomKeys(l, room), member(l), l.NodeID, time.Now().UnixMilli()).Err()
 }
+
+// Legacy writers do not maintain the node index. Aggregate their members in
+// Redis so compatibility reads transfer/decode only the distinct node IDs.
+const resolveLegacyRoomScript = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local members = redis.call('ZRANGE', KEYS[1], 0, -1)
+local seen = {}
+local nodes = {}
+for _, value in ipairs(members) do
+ local node = cjson.decode(value).Node
+ if type(node) ~= 'string' or node == '' then return redis.error_reply('invalid room member') end
+ if not seen[node] then seen[node] = true; table.insert(nodes,node) end
+end
+return nodes
+`
+const resolveRoomNodesScript = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+return redis.call('ZRANGE', KEYS[1], 0, -1)
+`
+
 func (r *Registry) ResolveRoom(ctx context.Context, tenant, room string) ([]string, error) {
 	if tenant == "" || room == "" {
 		return nil, routing.ErrInvalid
 	}
-	key := r.key(tenant, "room", room)
-	// Removal bounds stale metadata while score filtering enforces individual leases.
-	pipe := r.client.Pipeline()
-	pipe.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprint(time.Now().UnixMilli()))
-	cmd := pipe.ZRange(ctx, key, 0, -1)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, err
+	kind, script := "room", resolveLegacyRoomScript
+	if r.roomNodeIndex {
+		kind, script = "room_nodes", resolveRoomNodesScript
 	}
-	nodes := map[string]bool{}
-	for _, v := range cmd.Val() {
-		var m struct{ Node string }
-		if err := json.Unmarshal([]byte(v), &m); err != nil {
-			return nil, err
-		}
-		nodes[m.Node] = true
-	}
-	result := make([]string, 0, len(nodes))
-	for n := range nodes {
-		result = append(result, n)
-	}
-	return result, nil
+	return r.client.Eval(ctx, script, []string{r.key(tenant, kind, room)}, time.Now().UnixMilli()).StringSlice()
 }
 
 func (r *Registry) RenewRooms(ctx context.Context, rooms []routing.RoomMembership, ttl time.Duration) error {
@@ -335,7 +385,10 @@ func (r *Registry) RenewRooms(ctx context.Context, rooms []routing.RoomMembershi
 			if err := valid(l, ttl); err != nil {
 				return err
 			}
-			cmds = append(cmds, pipe.Eval(ctx, joinScript, []string{r.key(l.TenantID, "user", l.UserID), r.key(l.TenantID, "room", m.RoomID)}, l.SessionID, l.Generation, time.Now().UnixMilli(), time.Now().Add(ttl).UnixMilli(), member(l), ttl.Milliseconds()))
+			if m.RoomID == "" {
+				return routing.ErrInvalid
+			}
+			cmds = append(cmds, pipe.Eval(ctx, joinScript, r.joinKeys(l, m.RoomID), l.SessionID, l.Generation, time.Now().UnixMilli(), time.Now().Add(ttl).UnixMilli(), member(l), ttl.Milliseconds(), l.NodeID))
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
 			return err

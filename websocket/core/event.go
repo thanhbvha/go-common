@@ -117,7 +117,7 @@ type EventMessage struct {
 
 // HandleEvent parses and submits an event to the bounded per-manager executor.
 func HandleEvent(ev *EventMessage) {
-	if ev == nil || ev.Conn == nil {
+	if ev == nil || ev.Conn == nil || ev.Conn.draining.Load() {
 		return
 	}
 

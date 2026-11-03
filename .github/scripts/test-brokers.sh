@@ -90,4 +90,4 @@ export WS_REDIS_INTEGRATION=1 WS_NATS_INTEGRATION=1 WS_KAFKA_INTEGRATION=1
 export WS_KAFKA_BROKERS="$EVENTBUS_KAFKA_BROKERS"
 export WS_REDIS_ADDR="$EVENTBUS_REDIS_ADDR" WS_NATS_URL="nats://127.0.0.1:$nats_port"
 # p=1 prevents topology-changing suites from interfering with adjacent packages.
-go test -race -p 1 -tags=integration -count=1 -timeout=15m ./eventbus/driver/... ./redis ./cache ./cron/... ./auth ./kafka ./nats ./websocket/pubsub/... ./websocket/integration/... ./examples/websocket/cluster
+go test -v -race -p 1 -tags=integration -count=1 -timeout=15m ./eventbus/driver/... ./redis ./cache ./cron/... ./auth ./kafka ./nats ./websocket/pubsub/... ./websocket/integration/... ./examples/websocket/cluster

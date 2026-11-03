@@ -33,6 +33,7 @@ var (
 	nextConnectionID    atomic.Uint64
 	ErrConnectionClosed = errors.New("websocket connection closed")
 	ErrSendQueueFull    = errors.New("websocket send queue full")
+	ErrDrainIncomplete  = errors.New("websocket outbound drain incomplete")
 )
 
 // Conn defines a generic WebSocket connection interface to support multiple HTTP frameworks.
@@ -67,6 +68,12 @@ type Connection struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	closeOnce         sync.Once
+	closeScheduled    atomic.Bool
+	closedDone        chan struct{}
+	drainSignal       chan struct{}
+	draining          atomic.Bool
+	drainRecorded     sync.Once
+	outboundPending   atomic.Int64
 	runOnce           sync.Once
 	unregisterOnce    sync.Once
 	pumps             sync.WaitGroup
@@ -125,6 +132,8 @@ func NewConnection(conn Conn, shard *Shard, userID, shardID, clientIP, nodeID, r
 		ctx:            ctx,
 		cancel:         cancel,
 		writerDone:     make(chan struct{}),
+		closedDone:     make(chan struct{}),
+		drainSignal:    make(chan struct{}),
 		done:           make(chan struct{}),
 	}
 }
@@ -154,6 +163,7 @@ func (c *Connection) removeRoom(roomID string) {
 // not wait for the read/write pumps, so it is safe to call from either pump.
 func (c *Connection) Close(reason string) {
 	c.closeOnce.Do(func() {
+		defer close(c.closedDone)
 		if !c.config.DisableLifecycleLogging {
 			logLifecycle("Closing connection", "reason", reason, "userID", c.userID, "shardID", c.shardID, "clientIP", c.clientIP, "requestID", c.requestID)
 		}
@@ -164,6 +174,51 @@ func (c *Connection) Close(reason string) {
 			_ = c.conn.Close()
 		}
 	})
+}
+
+func (c *Connection) requestClose(reason string) {
+	if c.closeScheduled.CompareAndSwap(false, true) {
+		c.lifecycleMu.Lock()
+		c.cancel()
+		c.lifecycleMu.Unlock()
+		go c.Close(reason)
+	}
+}
+
+func (c *Connection) beginDrain() {
+	c.lifecycleMu.Lock()
+	if c.draining.CompareAndSwap(false, true) {
+		close(c.drainSignal)
+	}
+	c.lifecycleMu.Unlock()
+}
+
+// Drain stops outbound admission, flushes accepted messages in FIFO order and
+// closes the socket. Expiration forces close without waiting on network I/O.
+// It does not acknowledge client receipt or work outside the outbound queue.
+func (c *Connection) Drain(ctx context.Context) (err error) {
+	c.beginDrain()
+	defer func() {
+		pending := int(c.outboundPending.Load())
+		if err == nil && pending > 0 {
+			err = ErrDrainIncomplete
+		}
+		c.drainRecorded.Do(func() {
+			if observer, ok := c.shard.observer().(DrainObserver); ok {
+				observer.ConnectionDrained(pending, err != nil)
+			}
+		})
+	}()
+	// Registration can race shutdown before HandleIdentityConnection calls Run.
+	// Starting the pumps here also flushes messages accepted in that window.
+	c.runOnce.Do(c.start)
+	select {
+	case <-c.writerDone:
+		return nil
+	case <-ctx.Done():
+		c.requestClose("Outbound drain deadline")
+		return ctx.Err()
+	}
 }
 
 // IsClosed reports whether this Connection session has been marked as closed.
@@ -268,6 +323,9 @@ func (c *Connection) readPump() {
 			}
 
 			c.shard.observer().InboundMessage(len(message))
+			if c.draining.Load() {
+				continue
+			}
 			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(message))) {
 				c.inboundDrops.Add(1)
 				continue
@@ -316,16 +374,24 @@ func (c *Connection) writePump() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.drainSignal:
+			for {
+				select {
+				case message := <-c.send:
+					if !c.writeOutbound(message) {
+						return
+					}
+				default:
+					if c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)) == nil {
+						_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "Server draining"))
+					}
+					return
+				}
+			}
 		case message := <-c.send:
-			if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)); err != nil {
-				logger.ErrorAsync("Failed to set WebSocket write deadline", "error", err, "userID", c.userID)
+			if !c.writeOutbound(message) {
 				return
 			}
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				logger.ErrorAsync("Error writing WebSocket message", "error", err, "userID", c.userID)
-				return
-			}
-			c.shard.observer().OutboundMessage(len(message))
 
 		case <-ticker.C:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)); err != nil {
@@ -338,6 +404,19 @@ func (c *Connection) writePump() {
 			}
 		}
 	}
+}
+
+func (c *Connection) writeOutbound(message []byte) bool {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)); err != nil {
+		return false
+	}
+	if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		logger.ErrorAsync("Error writing WebSocket message", "error", err, "userID", c.userID)
+		return false
+	}
+	c.outboundPending.Add(-1)
+	c.shard.observer().OutboundMessage(len(message))
+	return true
 }
 
 func (c *Connection) recoveryMetadata(component string) wsrecovery.Metadata {
@@ -375,23 +454,31 @@ func (c *Connection) sendShared(message []byte) bool { return c.enqueueShared(me
 
 func (c *Connection) enqueueShared(message []byte) error {
 	c.lifecycleMu.RLock()
+	if c.draining.Load() {
+		c.lifecycleMu.RUnlock()
+		return ErrConnectionClosed
+	}
 	select {
 	case <-c.ctx.Done():
 		c.lifecycleMu.RUnlock()
 		return ErrConnectionClosed
 	default:
 	}
+	c.outboundPending.Add(1)
 	select {
 	case c.send <- message:
 		c.consecutiveDrops.Store(0)
 		c.lifecycleMu.RUnlock()
 		return nil
 	default:
+		c.outboundPending.Add(-1)
 		c.lifecycleMu.RUnlock()
 		closeSlow := c.consecutiveDrops.Add(1) >= c.config.SlowConsumerDropThreshold
 		c.shard.observer().OutboundDropped(closeSlow)
 		if closeSlow {
-			c.Close("Outbound queue full")
+			// Mark closed immediately, but never perform network Close from an
+			// enqueue callback. At most one closer goroutine exists per session.
+			c.requestClose("Outbound queue full")
 		}
 		return ErrSendQueueFull
 	}

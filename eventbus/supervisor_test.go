@@ -3,6 +3,7 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -218,4 +219,120 @@ func TestSupervisorJoinsSessionBeforeReconnect(t *testing.T) {
 		e.cancel()
 		<-done
 	})
+}
+
+type supervisorSettlementDelivery struct {
+	workerPoolDelivery
+	settle func(context.Context, transport.Decision) error
+}
+
+func (d *supervisorSettlementDelivery) Settle(ctx context.Context, decision transport.Decision) error {
+	return d.settle(ctx, decision)
+}
+
+func TestSupervisorRestartsAfterUncertainSettlement(t *testing.T) {
+	for _, committed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("committed_%t", committed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				payload, _, err := NewCodec(nil).EncodeTopology(TaskTopology, "supervised", 1, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var sessions, settlements atomic.Int32
+				var cleaned atomic.Bool
+				backend := &supervisorTransport{consume: func(ctx context.Context, sub transport.Subscription, deliver func(transport.Delivery)) error {
+					session := sessions.Add(1)
+					if session > 1 && !cleaned.Load() {
+						t.Error("reconnected before cleanup")
+					}
+					if session == 1 || !committed {
+						deliver(&supervisorSettlementDelivery{
+							workerPoolDelivery: workerPoolDelivery{message: transport.Message{Payload: payload}},
+							settle: func(context.Context, transport.Decision) error {
+								settlements.Add(1)
+								if session == 1 {
+									return context.DeadlineExceeded
+								}
+								return nil
+							},
+						})
+					}
+					<-ctx.Done()
+					sub.WaitForHandlers()
+					cleaned.Store(true)
+					return ctx.Err()
+				}}
+				e, done := startTestSupervisor(t, backend, func(context.Context, Job) error { return nil })
+				synctest.Wait()
+				if sessions.Load() != 1 || settlements.Load() != 1 {
+					t.Fatal("failed settlement retried in the same session")
+				}
+				time.Sleep(150 * time.Millisecond)
+				synctest.Wait()
+				want := int32(2)
+				if committed {
+					want = 1
+				}
+				if sessions.Load() != 2 || settlements.Load() != want {
+					t.Fatalf("sessions=%d settlements=%d", sessions.Load(), settlements.Load())
+				}
+				e.cancel()
+				<-done
+			})
+		})
+	}
+}
+
+func TestSupervisorStopsInfrastructurePanicStorm(t *testing.T) {
+	for _, scope := range []string{"worker", "settlement", "initial_heartbeat", "heartbeat", "late_worker"} {
+		t.Run(scope, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				payload, _, err := NewCodec(nil).EncodeTopology(TaskTopology, "supervised", 1, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var sessions atomic.Int32
+				backend := &supervisorTransport{consume: func(ctx context.Context, _ transport.Subscription, deliver func(transport.Delivery)) error {
+					sessions.Add(1)
+					message := transport.Message{Payload: payload}
+					switch scope {
+					case "worker", "late_worker":
+						deliver(&panickingMessageDelivery{workerPoolDelivery: workerPoolDelivery{message: message, settled: make(chan struct{})}})
+					case "settlement":
+						deliver(&supervisorSettlementDelivery{workerPoolDelivery: workerPoolDelivery{message: message}, settle: func(context.Context, transport.Decision) error { panic("settlement") }})
+					default:
+						panicAt := 1
+						if scope == "heartbeat" {
+							panicAt = 2
+						}
+						deliver(&panickingHeartbeatDelivery{leaseTestDelivery: leaseTestDelivery{metadataDelivery: metadataDelivery{message: message}}, panicAt: panicAt})
+					}
+					if scope == "late_worker" {
+						return nil
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}}
+				e, done := startTestSupervisor(t, backend, func(ctx context.Context, _ Job) error {
+					if scope == "heartbeat" {
+						<-ctx.Done()
+					}
+					return nil
+				})
+				synctest.Wait()
+				time.Sleep(5 * time.Second)
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					e.cancel()
+					<-done
+					t.Fatal("infrastructure panic storm did not stop consumer")
+				}
+				if sessions.Load() != maxConsecutiveConsumerPanics || !e.isDegraded() {
+					t.Fatalf("sessions=%d degraded=%t", sessions.Load(), e.isDegraded())
+				}
+			})
+		})
+	}
 }

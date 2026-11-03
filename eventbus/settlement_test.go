@@ -112,7 +112,7 @@ func TestSettlementPanicIsNotRetriedOrCompleted(t *testing.T) {
 	defer e.workerCancel()
 	base := &panickingSettlementDelivery{}
 	canceled := false
-	delivery := &observedDelivery{Delivery: &sessionDelivery{Delivery: base, cancel: func() { canceled = true }}, ctx: context.Background()}
+	delivery := &observedDelivery{Delivery: &sessionDelivery{Delivery: base, fail: func(error) { canceled = true }}, ctx: context.Background()}
 	e.settleDelivery(delivery, transport.Decision{Kind: transport.DecisionAck}, "task", "panic")
 	if base.calls != 1 {
 		t.Fatalf("settlement calls = %d, want 1", base.calls)

@@ -96,7 +96,7 @@ type observedDelivery struct {
 
 type sessionDelivery struct {
 	transport.Delivery
-	cancel context.CancelFunc
+	fail func(error)
 }
 
 type sessionLeaseDelivery struct {
@@ -108,22 +108,22 @@ func (d *sessionLeaseDelivery) HeartbeatInterval() time.Duration {
 	return d.lease.HeartbeatInterval()
 }
 
-func withSessionCancel(delivery transport.Delivery, cancel context.CancelFunc) transport.Delivery {
-	wrapped := &sessionDelivery{Delivery: delivery, cancel: cancel}
+func withSessionFailure(delivery transport.Delivery, fail func(error)) transport.Delivery {
+	wrapped := &sessionDelivery{Delivery: delivery, fail: fail}
 	if lease, ok := delivery.(transport.LeaseDelivery); ok {
 		return &sessionLeaseDelivery{sessionDelivery: wrapped, lease: lease}
 	}
 	return wrapped
 }
 
-func (d *sessionDelivery) cancelSession() {
-	if d.cancel != nil {
-		d.cancel()
+func (d *sessionDelivery) failSession(err error) {
+	if d.fail != nil {
+		d.fail(err)
 	}
 }
 
 type sessionCanceler interface {
-	cancelSession()
+	failSession(error)
 }
 
 func (d *observedDelivery) Message() transport.Message {
@@ -132,9 +132,9 @@ func (d *observedDelivery) Message() transport.Message {
 	return msg
 }
 
-func (d *observedDelivery) cancelSession() {
+func (d *observedDelivery) failSession(err error) {
 	if canceler, ok := d.Delivery.(sessionCanceler); ok {
-		canceler.cancelSession()
+		canceler.failSession(err)
 	}
 }
 

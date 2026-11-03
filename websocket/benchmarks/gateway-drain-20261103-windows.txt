@@ -1,0 +1,39 @@
+Baseline HEAD e322e85; identical BenchmarkGatewayDelivery; CPU=4; benchtime=500ms; count=3; Go 1.27.3
+goos: windows
+goarch: amd64
+pkg: github.com/thanhbvha/go-common/v2/websocket/routing
+cpu: 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  327952	      1801 ns/op	     896 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  370009	      1746 ns/op	     880 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  327349	      1840 ns/op	     896 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  261637	      2411 ns/op	     933 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  283024	      2391 ns/op	     919 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  281710	      2403 ns/op	     920 B/op	      20 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	     471	   1306312 ns/op	 1030510 B/op	   15026 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	     463	   1342734 ns/op	 1032262 B/op	   15026 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	     452	   1320060 ns/op	 1034747 B/op	   15026 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	     466	   1348375 ns/op	 1031603 B/op	   15026 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	     459	   1327853 ns/op	 1033167 B/op	   15026 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	     447	   1314910 ns/op	 1035920 B/op	   15026 allocs/op
+PASS
+ok  	github.com/thanhbvha/go-common/v2/websocket/routing	9.274s
+
+Current working tree; same benchmark/options; runs sequentially after baseline
+goos: windows
+goarch: amd64
+pkg: github.com/thanhbvha/go-common/v2/websocket/routing
+cpu: 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  342292	      1735 ns/op	     891 B/op	      15 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  388681	      1650 ns/op	     876 B/op	      15 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=false-4         	  386881	      1585 ns/op	     877 B/op	      15 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  167752	      3859 ns/op	    1120 B/op	      16 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  163365	      3753 ns/op	    1123 B/op	      16 allocs/op
+BenchmarkGatewayDelivery/recipients=1/parallel=true-4          	  169368	      3818 ns/op	    1124 B/op	      16 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	    1672	    388453 ns/op	  173649 B/op	      19 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	    1723	    392571 ns/op	  172899 B/op	      19 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=false-4      	    1612	    380409 ns/op	  174591 B/op	      19 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	    3145	    175374 ns/op	  165234 B/op	      18 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	    3314	    172533 ns/op	  165655 B/op	      18 allocs/op
+BenchmarkGatewayDelivery/recipients=1000/parallel=true-4       	    3211	    168985 ns/op	  164957 B/op	      18 allocs/op
+PASS
+ok  	github.com/thanhbvha/go-common/v2/websocket/routing	8.696s

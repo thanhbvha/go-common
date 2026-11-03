@@ -14,12 +14,20 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	contracttest.Run(t, func(t *testing.T) (routing.SessionRegistry, func() routing.DeliveryTransport) {
-		server := miniredis.RunT(t)
-		client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-		t.Cleanup(func() { client.Close() })
-		return driver.NewRegistry(client, "test"), func() routing.DeliveryTransport { return driver.NewTransport(client, "test") }
-	})
+	for _, indexed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("node_index=%t", indexed), func(t *testing.T) {
+			contracttest.Run(t, func(t *testing.T) (routing.SessionRegistry, func() routing.DeliveryTransport) {
+				server := miniredis.RunT(t)
+				client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+				t.Cleanup(func() { client.Close() })
+				var options []driver.RegistryOption
+				if indexed {
+					options = append(options, driver.WithRoomNodeIndex())
+				}
+				return driver.NewRegistry(client, "test", options...), func() routing.DeliveryTransport { return driver.NewTransport(client, "test") }
+			})
+		})
+	}
 }
 func TestLeaseExpiryAndRenewal(t *testing.T) {
 	server := miniredis.RunT(t)

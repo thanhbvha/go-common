@@ -1,5 +1,10 @@
 # WebSocket refactor measurements
 
+The [2026-11-03 gateway coordination and drain comparison](benchmarks/gateway-drain-20261103.md)
+adds regression coverage and a matching before/after gateway benchmark. It records
+room fan-out improvements and the parallel hot-session regression separately,
+including the limits of synthetic enqueue measurements.
+
 The implemented [registry fast paths and fresh A/B comparison](benchmarks/redis-fastpaths-ab-20261030.md)
 cover all 112 lookup/Register/Renew cases before and after optimization. Targeted
 lookup and live-session replacement avoid whole-hash scans; renewal and the Redis

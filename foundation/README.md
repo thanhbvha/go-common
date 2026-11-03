@@ -60,6 +60,9 @@ func main() {
 
 Runnable [examples](../examples/foundation) cover net/http, Fiber, a worker, and
 a service with logging, telemetry, and dependency health.
+The [lifecycle example](../examples/foundation/README.md#dependency-lifecycle-and-timeout-diagnostics)
+also covers explicit dependencies, readiness, graceful shutdown, and seven
+normal/failure scenarios without external services.
 
 ## Lifecycle Contract
 
@@ -74,15 +77,37 @@ once. Registration closes when `Run` begins. Component names must be unique.
 
 | Callback | Execution | Responsibility |
 | --- | --- | --- |
-| `Start(ctx)` | Sequential, registration order | Initialize and return; respect the shared startup deadline |
+| `Start(ctx)` | Sequential, dependency order | Initialize and return; respect the shared startup deadline |
 | `Run(ctx)` | Concurrent, supervised | Block while serving or working; drain when the application context is canceled |
-| `Stop(ctx)` | Sequential, reverse registration order | Release resources within the shared shutdown deadline |
+| `Stop(ctx)` | Sequential, reverse startup order | Release resources within the shared shutdown deadline |
 
-Each component needs at least one callback. Register dependencies first and
-servers last. Shutdown invokes a component's `Stop`, waits for its runner to
+Each component needs at least one callback. Without `DependsOn`, registration
+order is preserved. Declare dependencies by component name to allow registration
+in any order. Among components eligible to start, registration order breaks ties.
+Shutdown invokes a component's `Stop`, waits for its runner to
 finish, and then moves to the preceding dependency. Startup failure rolls back
 components whose initialization completed successfully. A failing `Start` must
 clean up any partial initialization before returning its error.
+
+```go
+component := foundation.Component{
+    Name: "consumer",
+    DependsOn: []string{"database", "broker"},
+    Start: consumer.Connect,
+    Run: consumer.Consume,
+    Stop: consumer.Close,
+}
+// Register component, database, and broker in any order before Run.
+```
+
+`Register` normalizes and copies dependency names and rejects empty, invalid,
+self, or duplicate references. `Run` validates missing references and cycles
+before calling any component, returning `ErrInvalidDependency` with `StateFailed`
+on an invalid graph. Startup rollback follows reverse successful startup order.
+Dependencies guarantee initialization order; they do not wait for a runner's
+readiness. All `Run` callbacks still execute concurrently after startup.
+Adapters return ordinary components; set `DependsOn` on the returned component
+before registering it.
 
 Foundation owns OS signals and shutdown for the application. It handles
 `SIGINT` and `SIGTERM` by default. Use one lifecycle coordinator and let adapters
@@ -224,6 +249,28 @@ component failure. Errors from completed runners and shutdown callbacks are
 joined with the initiating failure. `ComponentError` identifies the component
 and phase (`PhaseStart`, `PhaseRun`, or `PhaseStop`). `PanicError` preserves the
 recovered value and stack. Use `errors.Is` and `errors.As` to inspect failures.
+
+Deadline failures also wrap `*TimeoutError`. It records `Component`, `Phase`,
+`Operation` (start callback, stop callback, runner wait, or a phase boundary),
+`Elapsed` for the entire phase, its configured `Budget`, and `Pending` component
+names in execution order, including the current component. During shutdown these
+are components not confirmed fully stopped; earlier dependencies remain open
+once the shared deadline expires. `errors.Is(err, context.DeadlineExceeded)`
+continues to work. A callback's own deadline error retains that error as well;
+`Budget` is the phase budget, not a per-callback deadline.
+
+```go
+var timeout *foundation.TimeoutError
+if errors.As(err, &timeout) {
+    log.Printf("phase=%s component=%s operation=%s elapsed=%s budget=%s pending=%q",
+        timeout.Phase, timeout.Component, timeout.Operation,
+        timeout.Elapsed, timeout.Budget, timeout.Pending)
+}
+```
+
+Cancellation of the owning `Run` context still requests normal shutdown.
+The waiting deadline passed to `Shutdown` only bounds that caller's wait and
+returns its context error; it does not provide lifecycle timeout diagnostics.
 
 `app.Shutdown(ctx)` requests shutdown and waits for the terminal result. It is
 safe for concurrent callers; each caller has its own waiting deadline. A caller's

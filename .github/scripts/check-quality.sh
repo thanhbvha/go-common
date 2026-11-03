@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+bash .github/scripts/check-boundaries.sh
+go mod verify
+go build ./...
+go test -race -count=1 -timeout=180s ./...
+go vet ./...
+go mod tidy
+git diff --exit-code -- go.mod go.sum

@@ -1,4 +1,16 @@
-# EventBus examples
+# EventBus v2 examples
+
+For a self-contained tour of the v2 API, run:
+
+```powershell
+go run ./examples/eventbus/v2
+```
+
+The [v2 walkthrough](v2/README.md) needs no broker and verifies publication
+identity, dedupe, batch results, scheduling, retry, two subscriber groups,
+DLQ repair/requeue and local pause/drain/resume. Read the
+[module guide](../../eventbus/README.md) for the delivery and lifecycle contracts.
+Continue below for configuration, external brokers and separate processes.
 
 These examples use the current explicit EventBus API and the completed Memory,
 Redis, NATS JetStream, and Kafka transports. Start with the all-in-one program;

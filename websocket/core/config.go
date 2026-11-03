@@ -55,6 +55,8 @@ type ManagerConfig struct {
 	WriteWait                 time.Duration
 	PongWait                  time.Duration
 	PingPeriod                time.Duration
+	// DrainTimeout bounds outbound flush across a manager/shard shutdown.
+	DrainTimeout time.Duration
 }
 
 func DefaultManagerConfig() ManagerConfig {
@@ -80,6 +82,7 @@ func DefaultManagerConfig() ManagerConfig {
 		WriteWait:                 writeWait,
 		PongWait:                  pongWait,
 		PingPeriod:                pingPeriod,
+		DrainTimeout:              5 * time.Second,
 	}
 }
 
@@ -103,6 +106,9 @@ func (config ManagerConfig) ValidateProduction() error {
 
 func normalizeManagerConfig(config ManagerConfig) (ManagerConfig, bool) {
 	defaults := DefaultManagerConfig()
+	if config.DrainTimeout <= 0 {
+		config.DrainTimeout = defaults.DrainTimeout
+	}
 	if config.PubSub == nil {
 		config.PubSub = pubsub.NewNoopManager()
 		config.PubSubOwnership = PubSubOwned

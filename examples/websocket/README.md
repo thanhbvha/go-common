@@ -1,5 +1,12 @@
 # WebSocket Examples
 
+For the current tenant-scoped Gateway/Router APIs, start with the
+[complete WebSocket v2 example](v2/README.md). It includes Redis/NATS targeted
+delivery, trusted server-side identities, an EventBus round trip, an admin
+notification producer and bounded drain/shutdown. The example below demonstrates
+the four adapters and the legacy shard-based pub/sub API; the
+[cluster example](cluster/README.md) separates gateway/worker/router roles.
+
 This directory is a complete runnable reference for the current WebSocket module. It demonstrates explicit manager construction, structured identities, event registration, authorization, room membership, user notifications, cluster fan-out, Redis or NATS routing, protected operational endpoints, graceful shutdown, and a protocol-aware command-line client.
 
 This document is intentionally explicit and structured so developers, automation, and MCP-based tools can identify entry points, commands, event schemas, and expected behavior without inferring hidden setup.
@@ -8,6 +15,8 @@ This document is intentionally explicit and structured so developers, automation
 
 ```text
 examples/websocket/
+├── v2/                  current targeted-routing server, client and tests
+├── cluster/             split gateway/worker/router roles
 ├── main.go              server example for net/http, Gin, Echo, and Fiber
 ├── config.yaml          shared runnable server/client/loadtest configuration
 ├── .env                 equivalent flat dotenv configuration
