@@ -3,7 +3,7 @@ name: websocket
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'v2-production']
   schedule:
     - cron: "0 2 * * 1"
   workflow_dispatch:

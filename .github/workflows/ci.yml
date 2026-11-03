@@ -1,7 +1,7 @@
 name: quality
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main, 'v2-production']
   pull_request:
   workflow_dispatch:
 permissions:

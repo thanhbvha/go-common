@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['cron/**', 'cache/**', 'examples/cron/**', 'go.mod', 'go.sum', '.github/workflows/cron.yml']
   push:
-    branches: [main]
+    branches: [main, 'v2-production']
     paths: ['cron/**', 'cache/**', 'examples/cron/**', 'go.mod', 'go.sum', '.github/workflows/cron.yml']
   workflow_dispatch:
 jobs:
