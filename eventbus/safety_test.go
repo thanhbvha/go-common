@@ -22,7 +22,11 @@ func (panicRetryPolicy) NextBackoff(int) time.Duration { panic("must recover ret
 
 type nilPanicRetryPolicy struct{}
 
-func (nilPanicRetryPolicy) NextBackoff(int) time.Duration { panic(nil) }
+func (nilPanicRetryPolicy) NextBackoff(int) time.Duration {
+	// Intentionally exercise recovery from panic(nil).
+	//noinspection GoPanicNil
+	panic(nil)
+}
 
 type fixedRetryPolicy time.Duration
 

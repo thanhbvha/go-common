@@ -28,7 +28,7 @@ func (l *panicLogger) ErrorAsync(msg string, args ...any) {
 
 type unformattablePanic struct{}
 
-func (unformattablePanic) Error() string { panic("must not format panic value") }
+func (*unformattablePanic) Error() string { panic("must not format panic value") }
 
 // DS-35/20/24: panics use normal retry and final-attempt DLQ classification,
 // regardless of their value. Diagnostic stacks never enter broker metadata.
@@ -40,7 +40,7 @@ func TestPanicRecoveryDefaultsAndAttemptBounds(t *testing.T) {
 		{"string", strings.Repeat("synthetic-sensitive-value", 10000)},
 		{"error", errors.New("synthetic-sensitive-value")},
 		{"nil", nil},
-		{"unformattable", unformattablePanic{}},
+		{"unformattable", &unformattablePanic{}},
 		{"permanent_error_value", MarkPermanent(errors.New("synthetic-sensitive-value"))},
 	} {
 		for _, max := range []int{1, 2} {

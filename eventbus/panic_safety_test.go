@@ -34,6 +34,8 @@ func TestGuardsDetectPanicNilAndCallbackPanic(t *testing.T) {
 		callbackCalls++
 		panic("callback failure")
 	}, func() error {
+		// Intentionally exercise recovery from panic(nil).
+		//noinspection GoPanicNil
 		panic(nil)
 	})
 	if !errors.Is(err, ErrRecoveredPanic) || callbackCalls != 1 {
@@ -41,13 +43,19 @@ func TestGuardsDetectPanicNilAndCallbackPanic(t *testing.T) {
 	}
 
 	value, err := guardValue(panicScopeAdmin, "stats", nil, func() (int, error) {
+		// Intentionally exercise recovery from panic(nil).
+		//noinspection GoPanicNil
 		panic(nil)
 	})
 	if value != 0 || !errors.Is(err, ErrRecoveredPanic) {
 		t.Fatalf("value = %d, error = %v", value, err)
 	}
 
-	if !guardCall(panicScopeTracer, "end span", nil, func() { panic(nil) }) {
+	if !guardCall(panicScopeTracer, "end span", nil, func() {
+		// Intentionally exercise recovery from panic(nil).
+		//noinspection GoPanicNil
+		panic(nil)
+	}) {
 		t.Fatal("guardCall did not report panic(nil)")
 	}
 }
