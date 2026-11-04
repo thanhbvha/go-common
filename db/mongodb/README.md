@@ -233,5 +233,7 @@ and do not establish production throughput, backups, restore or availability gua
 
 See the [outbox and inbox recipe](../OUTBOX.md) for dispatch/replay boundaries.
 The transaction example atomically inserts an outbox record; it supplies no
-universal dispatcher. Do not publish external side effects inside retryable
+universal dispatcher. The [MongoDB messaging driver](../messaging/driver/mongodb/README.md)
+provides the reusable dispatcher store and transactional inbox, with explicit
+provisioning and retention. Do not publish external side effects inside retryable
 transaction callbacks.

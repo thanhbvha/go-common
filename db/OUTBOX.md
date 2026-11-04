@@ -6,6 +6,11 @@ publishing first can expose an event whose business transaction later rolls back
 Producer dedupe narrows retry duplication; it does not make DB writes atomic with
 a broker or handler side effects exactly once.
 
+For PostgreSQL 16–18, MySQL 8.4/InnoDB and transaction-capable MongoDB, use the
+[messaging framework](messaging/README.md)
+and [runnable example](../examples/messaging). The recipes below describe the
+underlying guarantees and the boundary for other database backends.
+
 ## SQL recipe
 
 Use the same ORM Client/transaction for a business write, a unique request record
@@ -67,6 +72,9 @@ and DLQ recovery policy.
 An email, payment gateway or other external service cannot join this transaction.
 Use that service's stable idempotency key and reconcile ambiguous outcomes, or
 write another outbox step. Redis locks and TTL dedupe do not fence irreversible
-business effects. There is no reusable outbox dispatcher/inbox framework in
-this library; the recipes intentionally leave backend claiming and operational
-policy with the application.
+business effects. The reusable [transactional messaging framework](messaging/README.md) now
+implements PostgreSQL, MySQL and MongoDB outbox/inbox, lease-based dispatch,
+quarantine/replay and explicit cleanup. See the [MongoDB driver](messaging/driver/mongodb/README.md)
+for native transaction binding and provisioning, and the
+[MySQL driver](messaging/driver/mysql/README.md) for MySQL 8.4/InnoDB claims. Retention and business
+reconciliation policies remain application decisions.

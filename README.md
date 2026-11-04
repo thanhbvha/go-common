@@ -19,6 +19,7 @@ Start with the [reference backend](./examples/production), [v2 API guide](./docs
 | `nats` | NATS client wrapper — Core Pub/Sub, JetStream streams/consumers, KV Store |
 | `kafka` | Apache Kafka client wrapper (franz-go) — Producer, Consumer, Admin, TLS/SASL |
 | `eventbus` | Transport-neutral, at-least-once task and event delivery over Memory, Redis Streams, NATS JetStream, and Kafka |
+| `db/messaging` | Transactional PostgreSQL/MySQL/MongoDB outbox/inbox, portable dispatcher contracts, EventBus adapter, replay and explicit retention |
 | `websocket` | Clustered, framework-agnostic real-time WebSocket server (net/http / Fiber / Gin / Echo) |
 | `telemetry` | OpenTelemetry integration for distributed tracing and metrics via OTLP |
 | `db` | Database abstraction (GORM & MongoDB) with auto-instrumented telemetry |
@@ -63,6 +64,7 @@ Each module contains its own detailed `README.md` with usage examples and API re
 - [`nats`](./nats/README.md)
 - [`kafka`](./kafka/README.md)
 - [`eventbus`](./eventbus/README.md) — [runnable examples](./examples/eventbus/README.md)
+- [`db/messaging`](./db/messaging/README.md) — [transactional outbox/inbox example](./examples/messaging/README.md)
 - [`websocket`](./websocket/README.md)
 - [`telemetry`](./telemetry/README.md)
 - [`db`](./db/README.md)

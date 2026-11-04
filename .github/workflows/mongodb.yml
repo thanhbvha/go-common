@@ -18,6 +18,6 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Unit tests and race checks
-        run: go test -race -count=10 ./db/mongodb
+        run: go test -race -count=10 ./db/mongodb ./db/messaging/driver/mongodb
       - name: MongoDB integration (${{ matrix.fixture }})
         run: bash .github/scripts/test-mongodb.sh '${{ matrix.fixture }}'

@@ -17,6 +17,7 @@ python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 bash .github/scripts/test-faults.sh
 bash .github/scripts/test-fuzz.sh
 bash .github/scripts/test-databases.sh
+bash .github/scripts/test-messaging.sh
 bash .github/scripts/test-mongodb.sh replica
 bash .github/scripts/test-mongodb.sh secure
 bash .github/scripts/test-brokers.sh
@@ -60,6 +61,73 @@ The live security scan found zero reachable/imported vulnerabilities and one
 module-only finding. Docker broker/database suites and a fresh 60-minute soak
 were not run in this check. This working-tree validation is not release evidence
 for a committed revision; the trusted workflow must still run after commit.
+
+## Transactional messaging verification on 2026-11-04
+
+Local transactional messaging verification on 2026-11-04 (Linux/amd64, Go
+1.26.10) passed the PostgreSQL storage/transaction/fault/migration suite on
+PostgreSQL 16, 17 and 18; the PostgreSQL 18 + Redis/Kafka/NATS matrix; and the
+runnable messaging example. Commit acknowledgement loss, lease recovery,
+concurrent inbox deduplication, tenant wire identity, consumer retry and DLQ
+replay were exercised under `-race`. The repository build, full race suite,
+vet, module integrity, boundary checks and release-evidence verifier tests also
+passed. These are local working-tree checks, not trusted release evidence for
+a committed revision. The messaging CI matrix and release-evidence gate rerun
+these scenarios on the candidate revision.
+
+The example-specific matrix was also run on PostgreSQL 16, 17 and 18 with
+Redis, embedded real NATS JetStream and Kafka (nine combinations). For each
+database version, `MESSAGING_POSTGRES_VERSION=<version> bash
+.github/scripts/test-messaging.sh` passed the storage/broker fault suite,
+`TestMessagingExample/{redis,nats,kafka}` under `-race`, and the actual example
+CLI with `-broker all`, without skipped tests. Each example verified producer
+rollback, atomic commit, expired-claim recovery and lost publication response:
+three claims, two publish calls, one committed order/business effect and a valid
+inbox duplicate replay. The script removed its disposable containers afterward.
+
+MongoDB messaging integration was subsequently verified locally on MongoDB
+8.0.16 using the same storage contract and real-broker fault harness as PostgreSQL.
+`test-mongodb.sh replica` passed three-node primary election/step-down, standalone
+rejection, transaction callback replay, unknown and late commit acknowledgement,
+ambiguous claim recovery, cross-database scope, schema/index validation and
+explicit cleanup. The secure profile passed the same applicable cases over
+TLS/authentication. `test-messaging.sh` passed PostgreSQL and MongoDB with all
+Redis/NATS/Kafka broker cases and the PostgreSQL example. All three fixture runs
+used `-race`, completed without skips/races, and removed their owned containers.
+The full repository race suite, build, vet, module integrity and package-boundary
+checks also passed after adding the MongoDB driver. These remain local working-tree
+results; the updated MongoDB and messaging release gates must run on the candidate
+revision before release.
+
+The runnable messaging example now supports `-driver postgres|mongodb|all`.
+Local verification passed all six database/broker example tests and CLI runs
+with `-driver all -broker all`. The MongoDB example also passed both replica and
+TLS/auth fixture profiles, including standalone rejection in the replica profile.
+It verified business/audit database transactions, immutable message conflicts,
+exact int64 projection, and an independent transaction callback that ran twice
+while committing one projection. The repository race suite and build/vet/boundary
+checks passed after the example update; fixture scripts cleaned up their resources.
+
+The messaging example now reads `config.yaml` through the shared config loader,
+with existing fixture environment overrides and explicit CLI selection overrides.
+Local verification passed the config parsing/precedence/error tests and example
+vet checks. The isolated PostgreSQL 18 + MongoDB 8.0.16 fixture script passed under
+`-race`, including all six database/broker example tests loading connections from
+files without environment overrides, and all six actual CLI runs loading the
+sample YAML with isolated environment endpoints. No test skips or race reports
+were present in this run; owned containers were cleaned up.
+
+MySQL messaging was subsequently verified on an isolated Oracle MySQL 8.4/InnoDB
+fixture using the shared storage contract and Redis/NATS/Kafka fault suite.
+Native commit-response loss preserved `orm.ErrCommitUnknown`; regression tests
+passed for caller REPEATABLE READ snapshots, CLIENT_FOUND_ROWS inbox ownership,
+binary identity comparison, non-UTC DSN/session settings and lease expiry during
+lock waits. Migration Up/Down/reapply, schema/index validation and canceled inbox
+rollback passed. The full fixture script then passed all nine database/broker
+example tests and all nine CLI runs under `-race`, with no skipped tests or race
+reports. Repository-wide race tests, build, integration-code vet, boundaries and
+module verification passed. CI now includes a MySQL 8.4 messaging job and requires
+MySQL messaging evidence; these are local results, not an executed CI run.
 
 ## Evidence collected on 2026-11-03
 

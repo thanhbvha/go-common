@@ -22,6 +22,8 @@ jobs:
         run: python3 .github/scripts/release-evidence.py run fuzz -- bash .github/scripts/test-fuzz.sh
       - name: databases
         run: python3 .github/scripts/release-evidence.py run databases -- bash .github/scripts/test-databases.sh
+      - name: messaging
+        run: python3 .github/scripts/release-evidence.py run messaging -- bash .github/scripts/test-messaging.sh
       - name: mongo-replica
         run: python3 .github/scripts/release-evidence.py run mongo-replica -- bash .github/scripts/test-mongodb.sh replica
       - name: mongo-secure

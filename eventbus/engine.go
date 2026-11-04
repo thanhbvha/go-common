@@ -1212,6 +1212,12 @@ func (e *engine) publish(ctx context.Context, kind TopologyKind, name string, pa
 		}
 		safeTraceInject(injector, ctx, env.Headers)
 	}
+	// Reject metadata the consumer would quarantine before acknowledging a
+	// publication. Transactional outboxes must not mark an undeliverable envelope
+	// published; tracing injection participates in the same bounds.
+	if reason, err := validateEnvelopeRoute(env, kind, name); err != nil {
+		return PublicationResult{}, fmt.Errorf("%w: %s", ErrInvalidOption, reason)
+	}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return PublicationResult{}, err

@@ -19,7 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export MSYS_NO_PATHCONV=1
-unset MONGODB_TEST_FAILOVER MONGODB_TEST_SECURITY
+unset MONGODB_TEST_FAILOVER MONGODB_TEST_SECURITY MONGODB_STANDALONE_URI MESSAGING_BROKERS_REQUIRED
 
 if [[ "$mode" == replica ]]; then
   created_id="$(docker run --rm -d --name "$name" -p 127.0.0.1:27031:27031 -p 127.0.0.1:27032:27032 -p 127.0.0.1:27033:27033 -p 127.0.0.1:27034:27034 "$image" mongod --port 27031 --replSet go_common_ci --bind_ip_all --setParameter enableTestCommands=1)"
@@ -56,6 +56,8 @@ done
 [[ "$ready" == true ]] || { echo "MongoDB startup timed out" >&2; exit 1; }
 if [[ "$mode" == replica ]]; then
   "${shell[@]}" --eval 'rs.initiate({_id:"go_common_ci",members:[{_id:0,host:"localhost:27031"},{_id:1,host:"localhost:27032"},{_id:2,host:"localhost:27033"}]})' >/dev/null
+  # Discover the elected primary rather than assuming the first member wins.
+  shell=(docker exec "$created_id" mongosh --quiet 'mongodb://localhost:27031,localhost:27032,localhost:27033/?replicaSet=go_common_ci&serverSelectionTimeoutMS=60000')
 else
   "${shell[@]}" --eval 'rs.initiate({_id:"go_common_ci",members:[{_id:0,host:"localhost:27041"}]})' >/dev/null
 fi
@@ -77,7 +79,10 @@ else
   export MONGODB_TEST_SECURITY=1
 fi
 export MONGODB_TEST_FAILPOINTS=1
+export MESSAGING_MONGODB_REQUIRED=1
 # Failover changes the entire fixture: serialize packages so it cannot interrupt
 # another package's non-transactional fixture creation.
-go test -v -p 1 -race -tags=integration -count=1 -timeout=180s ./db/mongodb ./examples/db_mongodb
-go vet -tags=integration ./db/mongodb ./examples/db_mongodb
+go test -v -p 1 -race -tags=integration -count=1 -timeout=180s ./db/mongodb ./examples/db_mongodb ./db/messaging/driver/mongodb
+go test -v -race -tags=integration -count=1 -timeout=120s -run '^TestMessagingExampleMongoDB' ./examples/messaging
+go run -race ./examples/messaging -driver mongodb -broker nats
+go vet -tags=integration ./db/mongodb ./examples/db_mongodb ./db/messaging/driver/mongodb ./examples/messaging

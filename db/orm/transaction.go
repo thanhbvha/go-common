@@ -74,8 +74,23 @@ type Transaction struct {
 }
 
 func (tx *Transaction) Context() context.Context { return tx.ctx }
-func (tx *Transaction) baseDB() *gorm.DB         { return tx.db }
-func (tx *Transaction) owner() *Client           { return tx.client }
+
+// ValidateClient lets typed integrations verify callback scope and pool identity
+// before issuing native transaction queries. It does not transfer ownership.
+func (tx *Transaction) ValidateClient(c *Client) error {
+	if tx == nil || c == nil {
+		return ErrInvalidArgument
+	}
+	if !tx.active.Load() {
+		return ErrTransactionClosed
+	}
+	if tx.client != c {
+		return ErrTransactionClientMismatch
+	}
+	return tx.ctx.Err()
+}
+func (tx *Transaction) baseDB() *gorm.DB { return tx.db }
+func (tx *Transaction) owner() *Client   { return tx.client }
 func (tx *Transaction) session(ctx context.Context) (*gorm.DB, context.CancelFunc, error) {
 	if !tx.active.Load() {
 		return nil, nil, ErrTransactionClosed

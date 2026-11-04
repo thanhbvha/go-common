@@ -13,12 +13,23 @@ import re
 import subprocess
 import sys
 
-GATES = ("quality", "security", "fuzz", "databases", "mongo-replica",
+GATES = ("quality", "security", "fuzz", "databases", "messaging", "mongo-replica",
          "mongo-secure", "brokers", "faults", "soak")
 REQUIRED_TESTS = {
     "databases": ("TestPostgresProduction", "TestMySQLContract"),
-    "mongo-replica": ("TestMongoDBProductionIntegration",),
-    "mongo-secure": ("TestMongoDBProductionIntegration",),
+    "messaging": ("TestPostgresContract", "TestPostgresEventBus", "TestCommitUnknownReconciliation",
+                  "TestMongoDBMessagingContract", "TestMongoDBMessagingEventBus", "TestMongoDBMessagingCommitResponseLoss",
+                  "TestMongoDBMessagingAmbiguousClaim", "TestMongoDBMessagingTransactionRetries",
+                  "TestMySQLMessagingContract", "TestMySQLMessagingEventBus", "TestMySQLMessagingCommitUnknown",
+                  "TestMySQLMessagingSnapshotRegression", "TestMySQLMessagingLeaseWaitRegression",
+                  "TestMessagingExample", "TestMessagingExampleMongoDB", "TestMessagingExampleMySQL"),
+    "mongo-replica": ("TestMongoDBProductionIntegration", "TestMongoDBMessagingContract",
+                      "TestMongoDBMessagingCommitResponseLoss", "TestMongoDBMessagingPrimaryStepdown",
+                      "TestMongoDBMessagingAmbiguousClaim", "TestMongoDBMessagingTransactionRetries",
+                      "TestMessagingExampleMongoDB", "TestMessagingExampleMongoDBStandaloneRejected"),
+    "mongo-secure": ("TestMongoDBProductionIntegration", "TestMongoDBMessagingContract",
+                     "TestMongoDBMessagingCommitResponseLoss", "TestMongoDBMessagingAmbiguousClaim",
+                     "TestMongoDBMessagingTransactionRetries", "TestMessagingExampleMongoDB"),
     "brokers": ("TestKafkaSettlementBrokerFaultWindows", "TestRedisSentinelFailoverIntegration"),
     "faults": ("TestPublishResponseLossLeavesAcceptedSource",
                "TestTransferResponseLossIsIdempotent",
@@ -77,7 +88,7 @@ def verify(root, revision):
                 raise ValueError("missing or corrupt vulnerability scan")
             scan(report)
         # Verbose integration tests must not silently downgrade a drill to SKIP.
-        if gate in ("databases", "mongo-replica", "mongo-secure", "brokers", "faults", "soak"):
+        if gate in ("databases", "messaging", "mongo-replica", "mongo-secure", "brokers", "faults", "soak"):
             text = log.read_text(encoding="utf-8")
             if re.search(r"--- SKIP:|\"Action\"\s*:\s*\"skip\"|^\s*SKIP\b", text, re.M):
                 raise ValueError("skipped required test: " + gate)

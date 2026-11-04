@@ -1,0 +1,74 @@
+name: messaging
+on:
+  pull_request:
+  push:
+    branches: [main, 'v2-production']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_DB: messaging_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d messaging_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      ORM_POSTGRES_DSN: 'host=127.0.0.1 port=5432 user=postgres dbname=messaging_test sslmode=disable'
+      MESSAGING_INTEGRATION_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags=integration -count=1 -run 'Test(PostgresContract|TransactionScope|AdminScheduling|CommitUnknown|BusinessConstraint|Migration)' ./db/messaging/driver/postgres
+      - run: go run ./examples/messaging
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: messaging_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      ORM_MYSQL_DSN: 'root@tcp(127.0.0.1:3306)/messaging_test'
+      MESSAGING_MYSQL_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags=integration -count=1 -run 'Test(MySQLMessaging(Contract|TransactionScope|Admin|CommitUnknown|BusinessConstraint|MigrationLifecycle|.*Regression)|MigrationFilesystem)$' ./db/messaging/driver/mysql
+      - run: go test -race -tags=integration -count=1 -run '^TestMessagingExampleMySQL$' ./examples/messaging
+      - run: go run ./examples/messaging -driver mysql -broker nats
+  brokers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: bash .github/scripts/test-messaging.sh

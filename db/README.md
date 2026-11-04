@@ -264,5 +264,6 @@ application-owned telemetry providers.
 
 For atomic DB changes followed by reliable broker publication, follow the
 [SQL/MongoDB outbox and consumer idempotency recipes](OUTBOX.md). The library
-supplies transaction and publication primitives; applications own dispatcher,
-claiming, retention and business reconciliation policies.
+supplies a [PostgreSQL/MySQL/MongoDB transactional messaging framework](messaging/README.md)
+with outbox dispatch and inbox handling. MySQL 8.4 uses InnoDB locking reads;
+applications continue to choose retention and business reconciliation policies.

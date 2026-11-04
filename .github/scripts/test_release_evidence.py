@@ -60,6 +60,23 @@ class EvidenceTests(unittest.TestCase):
             self.fixture(root)
             evidence.verify(root, "a" * 40)
 
+    def test_messaging_requires_mysql_and_no_skips(self):
+        for fault in ("missing-mysql-contract", "skipped-fixture"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "release"
+                root.mkdir()
+                self.fixture(root)
+                log = root / "messaging.txt"
+                text = log.read_text()
+                if fault == "missing-mysql-contract":
+                    text = text.replace("--- PASS: TestMySQLMessagingContract (1.00s)\n", "")
+                else:
+                    text += "--- SKIP: TestMySQLMessagingContract\n"
+                log.write_text(text)
+                self.record(root, "messaging")
+                with self.assertRaises(ValueError):
+                    evidence.verify(root, "a" * 40)
+
     def test_reject_invalid_evidence(self):
         for fault in ("missing", "revision", "failure", "tamper", "skip", "empty", "short-soak", "missing-test", "scan-tamper"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
