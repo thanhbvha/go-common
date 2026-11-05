@@ -68,6 +68,13 @@ func BenchmarkEnqueue(b *testing.B) {
 		b.Fatal(err)
 	}
 	payload := benchmarkPayload{ID: 42, Name: "benchmark", Enabled: true}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := bus.Close(ctx); err != nil {
+			b.Error(err)
+		}
+	})
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -89,7 +96,7 @@ func BenchmarkEngineDispatch(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	completed := make(chan struct{})
+	completed := make(chan struct{}, 1)
 	if err := bus.DeclareTask("benchmark.dispatch"); err != nil {
 		b.Fatal(err)
 	}
@@ -105,6 +112,14 @@ func BenchmarkEngineDispatch(b *testing.B) {
 	if err := bus.Start(ctx); err != nil {
 		b.Fatal(err)
 	}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := bus.Close(ctx); err != nil {
+			b.Error(err)
+		}
+	})
+	deadline := time.After(2 * time.Minute)
 
 	payload := benchmarkPayload{ID: 42, Name: "benchmark", Enabled: true}
 	b.ReportAllocs()
@@ -112,10 +127,11 @@ func BenchmarkEngineDispatch(b *testing.B) {
 		if err := bus.Enqueue(ctx, "benchmark.dispatch", payload); err != nil {
 			b.Fatal(err)
 		}
-		<-completed
-	}
-	if err := bus.Stop(context.Background()); err != nil {
-		b.Fatal(err)
+		select {
+		case <-completed:
+		case <-deadline:
+			b.Fatal("dispatch completion timeout")
+		}
 	}
 }
 
@@ -132,7 +148,10 @@ func BenchmarkMemoryTransportRoundTrip(b *testing.B) {
 	consumeDone := make(chan error, 1)
 	go func() {
 		consumeDone <- t.Consume(ctx, transport.Subscription{Topology: topo}, func(d transport.Delivery) {
-			deliveries <- d
+			select {
+			case deliveries <- d:
+			case <-ctx.Done():
+			}
 		})
 	}()
 
@@ -143,11 +162,17 @@ func BenchmarkMemoryTransportRoundTrip(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(msg.Payload)))
+	deadline := time.After(2 * time.Minute)
 	for b.Loop() {
 		if err := t.Publish(ctx, topo, msg); err != nil {
 			b.Fatal(err)
 		}
-		delivery := <-deliveries
+		var delivery transport.Delivery
+		select {
+		case delivery = <-deliveries:
+		case <-deadline:
+			b.Fatal("delivery timeout")
+		}
 		if err := delivery.Settle(ctx, transport.Decision{Kind: transport.DecisionAck}); err != nil {
 			b.Fatal(err)
 		}

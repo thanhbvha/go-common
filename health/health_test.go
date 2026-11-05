@@ -5,11 +5,42 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/thanhbvha/go-common/v2/health"
 )
+
+func TestSingleCheckCancellationAcrossProbeTypes(t *testing.T) {
+	for _, scope := range []string{"readiness", "liveness", "health"} {
+		t.Run(scope, func(t *testing.T) {
+			checker := health.New().WithVersion("v1").WithErrorDetails(true)
+			var called atomic.Bool
+			check := func(context.Context) error { called.Store(true); return nil }
+			probe := checker.CheckReadiness
+			switch scope {
+			case "liveness":
+				checker.AddLivenessCheck("dependency", check)
+				probe = checker.CheckLiveness
+			case "health":
+				checker.AddReadinessCheck("dependency", check)
+				probe = checker.CheckHealth
+			default:
+				checker.AddReadinessCheck("dependency", check)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			result := probe(ctx)
+			if result.Status != health.StatusDown || result.Version != "v1" || len(result.Checks) != 1 || result.Checks["dependency"].Error != context.Canceled.Error() || called.Load() {
+				t.Fatalf("canceled probe: %+v, callback called=%t", result, called.Load())
+			}
+			if result := probe(t.Context()); result.Status != health.StatusOK || !called.Load() {
+				t.Fatalf("subsequent healthy probe: %+v", result)
+			}
+		})
+	}
+}
 
 func TestHealthChecks(t *testing.T) {
 	c := health.New().WithVersion("v1.0.0")

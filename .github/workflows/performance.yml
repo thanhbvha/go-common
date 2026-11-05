@@ -1,0 +1,94 @@
+name: performance
+on:
+  pull_request:
+  push:
+    branches: [main, 'v2-production']
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Baseline or focused profile'
+        type: choice
+        options: [baseline, profile]
+        default: baseline
+      workload:
+        description: 'Manifest workload ID (required for profile; empty runs all baselines)'
+        type: string
+      profile_kind:
+        type: choice
+        options: [cpu, memory, mutex, block]
+        default: cpu
+permissions:
+  contents: read
+concurrency:
+  group: performance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_performance.py'
+      - run: go test ./internal/perftest ./examples/websocket/loadtest
+      - run: go test -tags=integration -run '^$' ./examples/production ./examples/websocket/cluster ./examples/eventbus/benchmark
+      - run: python3 benchmarks/performance.py run --suite core --mode smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-smoke-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/performance/
+  measurements:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Measure sequentially
+        env:
+          ACTION: ${{ inputs.action }}
+          WORKLOAD: ${{ inputs.workload }}
+          PROFILE_KIND: ${{ inputs.profile_kind }}
+        run: |
+          if [[ "$ACTION" == profile ]]; then
+            [[ -n "$WORKLOAD" ]] || { echo 'Select one workload for profiling'; exit 1; }
+            python3 benchmarks/performance.py profile --suite all --workload "$WORKLOAD" --cpu 4 --profile-kind "$PROFILE_KIND"
+          else
+            # Registry took 24 minutes locally with both CPU settings. Keep
+            # each hosted-runner command within the package's 30-minute budget.
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          manifest = json.loads(Path('benchmarks/manifest.json').read_text())
+          available = [workload['id'] for workload in manifest['workloads']]
+          requested = os.environ.get('WORKLOAD', '').strip()
+          selected = requested.split(',') if requested else available
+          if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(available):
+              raise SystemExit('Select valid, distinct manifest workload IDs')
+          for workload in selected:
+              cpus = ['1', '4'] if workload == 'redis-registry' else ['1,4']
+              for cpu in cpus:
+                  subprocess.run([
+                      sys.executable, 'benchmarks/performance.py', 'run',
+                      '--suite', 'all', '--mode', 'baseline',
+                      '--workload', workload, '--cpu', cpu,
+                  ], check=True)
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/performance/
+          retention-days: 30

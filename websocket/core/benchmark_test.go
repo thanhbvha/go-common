@@ -70,15 +70,31 @@ func BenchmarkShardUnregister(b *testing.B) {
 	coordinator := &benchmarkCoordinator{}
 	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
-	connections := make([]*Connection, b.N)
-	for i := range connections {
-		connections[i] = newBenchmarkConnection(shard, fmt.Sprintf("user-%d", i))
-		shard.Register(connections[i])
-	}
+	// Refill a bounded batch outside the timer. Never retain O(b.N) connections.
+	const batchSize = 128
+	connections := make([]*Connection, batchSize)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for _, conn := range connections {
-		shard.removeConnection(conn, "benchmark")
+	for done := 0; done < b.N; {
+		b.StopTimer()
+		n := min(batchSize, b.N-done)
+		for i := range n {
+			connections[i] = newBenchmarkConnection(shard, fmt.Sprintf("user-%d", i))
+			if !shard.Register(connections[i]) {
+				b.Fatal("register rejected")
+			}
+		}
+		b.StartTimer()
+		for _, conn := range connections[:n] {
+			if !shard.removeConnection(conn, "benchmark") {
+				b.Fatal("unregister rejected")
+			}
+		}
+		done += n
+	}
+	b.StopTimer()
+	if shard.GetConnectionCount() != 0 {
+		b.Fatal("connections remain")
 	}
 }
 
@@ -160,15 +176,24 @@ func BenchmarkEventDispatch(b *testing.B) {
 	var completed atomic.Uint64
 	RegisterHandler(eventType, func(*Connection, IncomingMessage) error { completed.Add(1); return nil })
 	raw := []byte(`{"type":"benchmark-event","data":null}`)
+	deadline := time.After(2 * time.Minute)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		HandleEvent(&EventMessage{Conn: conn, Raw: raw})
 		for conn.pendingHandlers.Load() != 0 {
+			select {
+			case <-deadline:
+				b.Fatal("handler completion timeout")
+			default:
+			}
 			runtime.Gosched()
 		}
 	}
-	_ = coordinator.GetEventExecutor().Shutdown(context.Background())
+	b.StopTimer()
+	if completed.Load() != uint64(b.N) {
+		b.Fatalf("completed %d, want %d", completed.Load(), b.N)
+	}
 }
 
 func BenchmarkDataStructureMemory(b *testing.B) {
@@ -176,7 +201,7 @@ func BenchmarkDataStructureMemory(b *testing.B) {
 	b.Cleanup(func() { _ = coordinator.GetEventExecutor().Shutdown(context.Background()) })
 	shard := NewShard("benchmark", coordinator)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = newBenchmarkConnection(shard, "user")
 	}
 }

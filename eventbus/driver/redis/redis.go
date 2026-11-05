@@ -589,12 +589,12 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		cursors[i] = "0-0"
 	}
 	nextReclaim := time.Time{}
-	preferred := 0
+	reader := streamIntake{client: t.rc, streams: streams, group: group, consumer: consumer, block: min(blockTime, 2*time.Second)}
 	for ctx.Err() == nil {
 		if !time.Now().Before(nextReclaim) {
 			complete := true
 			for offset := range len(streams) {
-				index := (preferred + offset) % len(streams)
+				index := (reader.preferred + offset) % len(streams)
 				if err := acquire(); err != nil {
 					return err
 				}
@@ -623,14 +623,7 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		if err != nil {
 			return err
 		}
-		stream := streams[preferred]
-		res, err := t.rc.XReadGroup(ctx, &goredis.XReadGroupArgs{
-			Group:    group,
-			Consumer: consumer,
-			Streams:  []string{stream, ">"},
-			Count:    int64(reserved),
-			Block:    min(blockTime, 2*time.Second),
-		}).Result()
+		res, err := reader.read(ctx, int64(reserved))
 
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -639,8 +632,7 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 			}
 			if err == goredis.Nil {
 				releaseN(reserved)
-				// Block timeout
-				preferred = (preferred + 1) % len(streams)
+				// Idle timeout or wake-up: retry intake with a fresh budget.
 				continue
 			}
 			releaseN(reserved)
@@ -669,7 +661,6 @@ func (t *redisTransport) Consume(ctx context.Context, sub transport.Subscription
 		if unused := reserved - deliveredCount; unused > 0 {
 			releaseN(unused)
 		}
-		preferred = (preferred + 1) % len(streams)
 	}
 	return ctx.Err()
 }

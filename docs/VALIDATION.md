@@ -150,6 +150,24 @@ infrastructure assertion into a skip. Keep that behavior on release revisions.
 
 ## Performance snapshots
 
+The reproducible [Performance suite](PERFORMANCE.md) now retains versioned workload
+configuration, raw samples, source/environment fingerprints, matching profile
+binaries and checked artifact inventories. The [2026-11-04 evidence](PERFORMANCE_RESULTS.md),
+audited on 2026-11-05, contains 680 core samples, 2,260 infrastructure Go samples
+and 70 timed load scenario results. Its final ten-pair readiness A/B comparison
+reduced median time by 28-30%, bytes from 1,336 to 1,088 B/op and allocations
+from 14 to 10 for one check. This does not establish a service-wide speedup.
+
+The [2026-11-05 WebSocket follow-up](WEBSOCKET_PERFORMANCE.md) uses harness v2
+and ten new alternating pairs: business throughput 300.59 to 999.98 operations/s
+(at the offered-load ceiling), p95 404.33 to 69.36 ms. Broker drain is now measured
+explicitly; v1 WebSocket backlog zeros were defaults. The follow-up documents
+allocation costs, equal-work memory results, low-load median tradeoffs and
+full race/build/vet plus Redis single/cluster integration evidence.
+
+The older snapshots below use their historical harness and are not direct
+before/after comparisons with the new suite.
+
 These short microbenchmarks guide regressions only; they are not capacity claims.
 
 | Operation | Local range |

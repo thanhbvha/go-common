@@ -11,6 +11,8 @@ import (
 // This separate benchmark samples goroutines inside active backend batches.
 // It deliberately adds backend latency and is not comparable to the hot-path benchmarks.
 func BenchmarkDataLoaderGoroutines(b *testing.B) {
+	ctx, cancel := context.WithTimeout(b.Context(), 2*time.Minute)
+	defer cancel()
 	keys := make([]int, 1000)
 	for i := range keys {
 		keys[i] = i
@@ -19,8 +21,8 @@ func BenchmarkDataLoaderGoroutines(b *testing.B) {
 	var peak atomic.Int64
 	peak.Store(baseline)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		l, err := NewDataLoader(context.Background(), func(_ context.Context, ks []int) (map[int]int, error) {
+	for b.Loop() {
+		l, err := NewDataLoader(ctx, func(_ context.Context, ks []int) (map[int]int, error) {
 			n := int64(runtime.NumGoroutine())
 			for old := peak.Load(); n > old; old = peak.Load() {
 				if peak.CompareAndSwap(old, n) {
@@ -33,11 +35,11 @@ func BenchmarkDataLoaderGoroutines(b *testing.B) {
 				out[k] = k
 			}
 			return out, nil
-		}, LoaderConfig{})
+		}, DefaultLoaderConfig())
 		if err != nil {
 			b.Fatal(err)
 		}
-		_, errs := l.LoadAll(context.Background(), keys)
+		_, errs := l.LoadAll(ctx, keys)
 		for _, err := range errs {
 			if err != nil {
 				b.Fatal(err)

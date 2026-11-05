@@ -4,8 +4,6 @@ on:
   pull_request:
   push:
     branches: [main, 'v2-production']
-  schedule:
-    - cron: "0 2 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -17,18 +15,3 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -count=10 ./websocket/core ./websocket/pool ./websocket/pubsub/... ./websocket/adapter/... ./websocket/routing/... ./websocket/integration/...
-
-  benchmark:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: mkdir -p artifacts
-      - run: go test -run '^$' -bench . -benchmem -count=5 ./websocket/core ./websocket/pubsub | tee artifacts/websocket-bench.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: websocket-benchmark
-          path: artifacts/websocket-bench.txt

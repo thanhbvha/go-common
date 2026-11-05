@@ -98,6 +98,7 @@ type delivery struct {
 	sender int
 }
 type runner struct {
+	performance bool
 	o           options
 	metrics     result
 	mu          sync.Mutex
@@ -108,10 +109,11 @@ type runner struct {
 }
 
 type client struct {
-	conn     *websocket.Conn
-	done     chan struct{}
-	replies  chan string
-	stopping atomic.Bool
+	conn                *websocket.Conn
+	done                chan struct{}
+	replies             chan string
+	stopping            atomic.Bool
+	performanceMessages chan performanceMessage
 }
 
 func run(o options) result {
@@ -209,6 +211,9 @@ func (r *runner) connect(id, cycle int) *client {
 	}
 	conn.SetReadLimit(64 * 1024)
 	c := &client{conn: conn, done: make(chan struct{}), replies: make(chan string, 16)}
+	if r.performance {
+		c.performanceMessages = make(chan performanceMessage, 16)
+	}
 	atomic.AddInt64(&r.metrics.Connected, 1)
 	active := atomic.AddInt64(&r.metrics.Active, 1)
 	for peak := atomic.LoadInt64(&r.metrics.PeakActive); active > peak; peak = atomic.LoadInt64(&r.metrics.PeakActive) {
@@ -244,6 +249,15 @@ func (r *runner) read(c *client, id int) {
 			continue
 		}
 		if message.Type == "session.info" {
+			continue
+		}
+		if r.performance {
+			select {
+			case c.performanceMessages <- performanceMessage{message.Type, message.Data}:
+			case <-time.After(time.Second):
+				atomic.AddInt64(&r.metrics.MessageErrors, 1)
+				return
+			}
 			continue
 		}
 		if message.Type == "error" {

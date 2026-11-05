@@ -92,6 +92,12 @@ func (o options) normalized() (options, error) {
 	return o, nil
 }
 func run(ctx context.Context, o options) error {
+	return runWithBus(ctx, o, nil)
+}
+
+// runWithBus exposes startup to the local integration harness without adding
+// an application endpoint or changing the example's public command line.
+func runWithBus(ctx context.Context, o options, started func(bus.Bus)) (runErr error) {
 	var err error
 	o, err = o.normalized()
 	if err != nil {
@@ -172,7 +178,7 @@ func run(ctx context.Context, o options) error {
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = b.Drain(shutdown)
+		runErr = errors.Join(runErr, b.Drain(shutdown))
 	}()
 	var gateway *routing.Gateway
 	if o.role == "gateway" {
@@ -221,6 +227,9 @@ func run(ctx context.Context, o options) error {
 	}
 	if err = b.Start(startup); err != nil {
 		return err
+	}
+	if started != nil {
+		started(b)
 	}
 	switch o.role {
 	case "publish":

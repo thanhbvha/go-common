@@ -1,0 +1,360 @@
+{
+  "schema": 1,
+  "harness": "performance-v2",
+  "benchstat": "golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e",
+  "defaults": {
+    "count": 10,
+    "benchtime": "1s",
+    "cpu": "1,4",
+    "warmup_seconds": 5,
+    "duration_seconds": 30,
+    "drain_seconds": 15
+  },
+  "images": {
+    "postgres": "postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5",
+    "redis": "redis:7.4.7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf",
+    "nats": "nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00",
+    "kafka": "apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed"
+  },
+  "workloads": [
+    {
+      "id": "auth",
+      "suite": "core",
+      "kind": "go",
+      "package": "./auth",
+      "benchmarks": [
+        "BenchmarkManagerValidateToken",
+        "BenchmarkGenericManagerVerifyToken",
+        "BenchmarkEncryptedManagerValidateToken"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "logger",
+      "suite": "core",
+      "kind": "go",
+      "package": "./logger",
+      "benchmarks": [
+        "BenchmarkLogging/sync",
+        "BenchmarkLogging/async"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "health",
+      "suite": "core",
+      "kind": "go",
+      "package": "./health",
+      "benchmarks": [
+        "BenchmarkReadiness"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "graphql",
+      "suite": "core",
+      "kind": "go",
+      "package": "./graphql",
+      "benchmarks": [
+        "BenchmarkDataLoader/keys_1",
+        "BenchmarkDataLoader/keys_100",
+        "BenchmarkDataLoader/keys_1000",
+        "BenchmarkDataLoaderCached",
+        "BenchmarkDataLoaderDuplicateKeys",
+        "BenchmarkDataLoaderParallelRequests",
+        "BenchmarkDataLoaderGoroutines"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "eventbus",
+      "suite": "core",
+      "kind": "go",
+      "package": "./eventbus",
+      "benchmarks": [
+        "BenchmarkGuardNoPanic",
+        "BenchmarkCodecEncode",
+        "BenchmarkCodecDecode",
+        "BenchmarkEnqueue",
+        "BenchmarkEngineDispatch",
+        "BenchmarkMemoryTransportRoundTrip"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "websocket-core",
+      "suite": "core",
+      "kind": "go",
+      "package": "./websocket/core",
+      "benchmarks": [
+        "BenchmarkConnectionSend",
+        "BenchmarkShardRegister",
+        "BenchmarkShardUnregister",
+        "BenchmarkSendToUser",
+        "BenchmarkSendToRoom",
+        "BenchmarkBroadcast100",
+        "BenchmarkBroadcast1000",
+        "BenchmarkBroadcast10000",
+        "BenchmarkEventDispatch",
+        "BenchmarkDataStructureMemory"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "websocket-pubsub",
+      "suite": "core",
+      "kind": "go",
+      "package": "./websocket/pubsub",
+      "benchmarks": [
+        "BenchmarkPubSubDecode"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "websocket-routing",
+      "suite": "core",
+      "kind": "go",
+      "package": "./websocket/routing",
+      "benchmarks": [
+        "BenchmarkGatewayDelivery/recipients=1/parallel=false",
+        "BenchmarkGatewayDelivery/recipients=1/parallel=true",
+        "BenchmarkGatewayDelivery/recipients=1000/parallel=false",
+        "BenchmarkGatewayDelivery/recipients=1000/parallel=true"
+      ],
+      "fixtures": []
+    },
+    {
+      "id": "postgres-cursor",
+      "suite": "integration",
+      "kind": "go",
+      "package": "./db/orm",
+      "benchmarks": [
+        "BenchmarkPostgresCursor"
+      ],
+      "fixtures": [
+        "postgres"
+      ],
+      "config": {
+        "rows": 1000,
+        "page_size": 50,
+        "pool": 2
+      }
+    },
+    {
+      "id": "redis-registry",
+      "suite": "integration",
+      "kind": "go",
+      "package": "./websocket/routing/redis",
+      "benchmarks": [
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveHit",
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveHitParallel",
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveMissParallel",
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveAll",
+        "BenchmarkRegistryHash/sessions=1/expired=0/ResolveAllParallel",
+        "BenchmarkRegistryHash/sessions=1/expired=0/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=1/expired=0/RegisterReplaceParallel",
+        "BenchmarkRegistryHash/sessions=1/expired=0/RegisterNew",
+        "BenchmarkRegistryHash/sessions=1/expired=0/RegisterCapacity",
+        "BenchmarkRegistryHash/sessions=1/expired=0/HGETControl",
+        "BenchmarkRegistryHash/sessions=1/expired=0/HGETControlParallel",
+        "BenchmarkRegistryHash/sessions=1/expired=50/ResolveHit",
+        "BenchmarkRegistryHash/sessions=1/expired=50/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=1/expired=50/ResolveAll",
+        "BenchmarkRegistryHash/sessions=1/expired=50/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=1/expired=50/RegisterNew",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RenewOne",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RenewOneParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RenewAllBatch",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RenewAllBatchParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RenewAllBatchStale10",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RegisterChurn",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RegisterChurnParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1/MixedRegister1Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1/MixedRegister10Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1/MixedRegister50Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1/RegisterWithBatchRenew",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveHit",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveHitParallel",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveMissParallel",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveAll",
+        "BenchmarkRegistryHash/sessions=10/expired=0/ResolveAllParallel",
+        "BenchmarkRegistryHash/sessions=10/expired=0/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=10/expired=0/RegisterReplaceParallel",
+        "BenchmarkRegistryHash/sessions=10/expired=0/RegisterNew",
+        "BenchmarkRegistryHash/sessions=10/expired=0/RegisterCapacity",
+        "BenchmarkRegistryHash/sessions=10/expired=0/HGETControl",
+        "BenchmarkRegistryHash/sessions=10/expired=0/HGETControlParallel",
+        "BenchmarkRegistryHash/sessions=10/expired=50/ResolveHit",
+        "BenchmarkRegistryHash/sessions=10/expired=50/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=10/expired=50/ResolveAll",
+        "BenchmarkRegistryHash/sessions=10/expired=50/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=10/expired=50/RegisterNew",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RenewOne",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RenewOneParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RenewAllBatch",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RenewAllBatchParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RenewAllBatchStale10",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RegisterChurn",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RegisterChurnParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=10/MixedRegister1Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=10/MixedRegister10Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=10/MixedRegister50Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=10/RegisterWithBatchRenew",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveHit",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveHitParallel",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveMissParallel",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveAll",
+        "BenchmarkRegistryHash/sessions=100/expired=0/ResolveAllParallel",
+        "BenchmarkRegistryHash/sessions=100/expired=0/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=100/expired=0/RegisterReplaceParallel",
+        "BenchmarkRegistryHash/sessions=100/expired=0/RegisterNew",
+        "BenchmarkRegistryHash/sessions=100/expired=0/RegisterCapacity",
+        "BenchmarkRegistryHash/sessions=100/expired=0/HGETControl",
+        "BenchmarkRegistryHash/sessions=100/expired=0/HGETControlParallel",
+        "BenchmarkRegistryHash/sessions=100/expired=50/ResolveHit",
+        "BenchmarkRegistryHash/sessions=100/expired=50/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=100/expired=50/ResolveAll",
+        "BenchmarkRegistryHash/sessions=100/expired=50/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=100/expired=50/RegisterNew",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RenewOne",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RenewOneParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RenewAllBatch",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RenewAllBatchParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RenewAllBatchStale10",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RegisterChurn",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RegisterChurnParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=100/MixedRegister1Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=100/MixedRegister10Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=100/MixedRegister50Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=100/RegisterWithBatchRenew",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveHit",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveHitParallel",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveMissParallel",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveAll",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/ResolveAllParallel",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/RegisterReplaceParallel",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/RegisterNew",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/RegisterCapacity",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/HGETControl",
+        "BenchmarkRegistryHash/sessions=1000/expired=0/HGETControlParallel",
+        "BenchmarkRegistryHash/sessions=1000/expired=50/ResolveHit",
+        "BenchmarkRegistryHash/sessions=1000/expired=50/ResolveMiss",
+        "BenchmarkRegistryHash/sessions=1000/expired=50/ResolveAll",
+        "BenchmarkRegistryHash/sessions=1000/expired=50/RegisterReplace",
+        "BenchmarkRegistryHash/sessions=1000/expired=50/RegisterNew",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RenewOne",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RenewOneParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RenewAllBatch",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RenewAllBatchParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RenewAllBatchStale10",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RegisterChurn",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RegisterChurnParallel",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/MixedRegister1Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/MixedRegister10Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/MixedRegister50Percent",
+        "BenchmarkRegistryRegisterRenew/sessions=1000/RegisterWithBatchRenew"
+      ],
+      "benchtime": "1000x",
+      "fixtures": [
+        "redis"
+      ]
+    },
+    {
+      "id": "http",
+      "suite": "integration",
+      "kind": "load",
+      "package": "./examples/production",
+      "test": "TestPerformanceHTTP",
+      "fixtures": [
+        "postgres",
+        "redis"
+      ],
+      "config": {
+        "concurrency": [
+          1,
+          16
+        ],
+        "path": "/v1/me",
+        "quota": 1000000000
+      }
+    },
+    {
+      "id": "websocket",
+      "suite": "integration",
+      "kind": "load",
+      "package": "./examples/websocket/cluster",
+      "test": "TestPerformanceWebSocket",
+      "fixtures": [
+        "redis"
+      ],
+      "config": {
+        "connections": 100,
+        "group_size": 10,
+        "scenarios": [
+          "message",
+          "fanout"
+        ],
+        "message_event": "business",
+        "rate_per_worker": 10,
+        "server_roles": [
+          "gateway",
+          "worker",
+          "router"
+        ]
+      }
+    },
+    {
+      "id": "eventbus-redis",
+      "suite": "integration",
+      "kind": "load",
+      "package": "./examples/eventbus/benchmark",
+      "test": "TestPerformanceEventBus",
+      "fixtures": [
+        "redis"
+      ],
+      "config": {
+        "driver": "redis",
+        "payload_bytes": 1024,
+        "concurrency": 10,
+        "workload": "immediate"
+      }
+    },
+    {
+      "id": "eventbus-nats",
+      "suite": "integration",
+      "kind": "load",
+      "package": "./examples/eventbus/benchmark",
+      "test": "TestPerformanceEventBus",
+      "fixtures": [
+        "nats"
+      ],
+      "config": {
+        "driver": "nats",
+        "payload_bytes": 1024,
+        "concurrency": 10,
+        "workload": "immediate"
+      }
+    },
+    {
+      "id": "eventbus-kafka",
+      "suite": "integration",
+      "kind": "load",
+      "package": "./examples/eventbus/benchmark",
+      "test": "TestPerformanceEventBus",
+      "fixtures": [
+        "kafka"
+      ],
+      "config": {
+        "driver": "kafka",
+        "payload_bytes": 1024,
+        "concurrency": 10,
+        "workload": "immediate"
+      }
+    }
+  ]
+}

@@ -41,6 +41,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if os.Getenv("PERF_RUN") == "1" && os.Getenv("PERF_PHASE_DIR") != "" {
+		if err := runPerformance(o); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	startGoroutines := runtime.NumGoroutine()

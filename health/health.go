@@ -163,6 +163,23 @@ func (c *Checker) run(ctx context.Context, checks []*checkEntry) HealthResponse 
 	if len(checks) == 0 {
 		return HealthResponse{Status: StatusOK, Version: version}
 	}
+	if len(checks) == 1 {
+		// executeCheck already isolates the callback in a bounded goroutine.
+		// A single dependency needs no additional coordinator goroutine/channel.
+		entry := checks[0]
+		checkCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		start := time.Now()
+		err := executeCheck(checkCtx, entry)
+		r := CheckResult{Status: StatusOK, DurationMs: time.Since(start).Milliseconds()}
+		if err != nil {
+			r.Status = StatusDown
+			if includeErrors {
+				r.Error = err.Error()
+			}
+		}
+		return HealthResponse{Status: r.Status, Checks: map[string]CheckResult{entry.name: r}, Version: version}
+	}
 
 	type result struct {
 		name string
