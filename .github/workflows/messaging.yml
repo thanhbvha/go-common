@@ -63,7 +63,10 @@ jobs:
       - run: go test -race -tags=integration -count=1 -run 'Test(MySQLMessaging(Contract|TransactionScope|Admin|CommitUnknown|BusinessConstraint|MigrationLifecycle|.*Regression)|MigrationFilesystem)$' ./db/messaging/driver/mysql
       - run: go test -race -tags=integration -count=1 -run '^TestMessagingExampleMySQL$' ./examples/messaging
       - run: go run ./examples/messaging -driver mysql -broker nats
+  # test-messaging.sh covers all three database drivers against all three brokers.
+  # MongoDB replica/failover and TLS/auth coverage runs separately in mongodb.yml.
   brokers:
+    name: 'Messaging E2E — PostgreSQL/MySQL/MongoDB × Redis/NATS/Kafka'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
