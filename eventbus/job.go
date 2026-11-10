@@ -16,20 +16,20 @@ type Headers map[string]string
 // Envelope represents the internal wire format v3 for all jobs.
 // It uses json.RawMessage for the Payload to preserve large int64 precision (Bug C2).
 type Envelope struct {
-	V           int             `json:"v"`            // version, always 3 for newly encoded messages
-	ID          string          `json:"id"`           // unique job ID
-	Kind        TopologyKind    `json:"kind"`         // task or event topology
-	Type        string          `json:"type"`         // job type name
-	Payload     json.RawMessage `json:"payload"`      // raw json payload
-	Attempt     int             `json:"attempt"`      // current attempt (1-indexed)
-	MaxAttempts int             `json:"max_attempts"` // total permitted handler executions
-	CreatedAt      int64   `json:"created_at"`                // creation time in unix milliseconds
-	RunAt          int64   `json:"run_at"`                    // scheduled run time in unix milliseconds
-	OrderingKey    string  `json:"ordering_key,omitempty"`    // optional broker partition/ordering key
-	ConcurrencyKey string  `json:"concurrency_key,omitempty"` // optional process-local admission key
-	DedupeKey      string  `json:"dedupe_key,omitempty"`      // optional deduplication key
-	DedupeTTL      int64   `json:"dedupe_ttl_ns,omitempty"`   // reservation lifetime in nanoseconds
-	Headers        Headers `json:"headers,omitempty"`         // optional headers (e.g. traceparent)
+	V              int             `json:"v"`                         // version, always 3 for newly encoded messages
+	ID             string          `json:"id"`                        // unique job ID
+	Kind           TopologyKind    `json:"kind"`                      // task or event topology
+	Type           string          `json:"type"`                      // job type name
+	Payload        json.RawMessage `json:"payload"`                   // raw json payload
+	Attempt        int             `json:"attempt"`                   // current attempt (1-indexed)
+	MaxAttempts    int             `json:"max_attempts"`              // total permitted handler executions
+	CreatedAt      int64           `json:"created_at"`                // creation time in unix milliseconds
+	RunAt          int64           `json:"run_at"`                    // scheduled run time in unix milliseconds
+	OrderingKey    string          `json:"ordering_key,omitempty"`    // optional broker partition/ordering key
+	ConcurrencyKey string          `json:"concurrency_key,omitempty"` // optional process-local admission key
+	DedupeKey      string          `json:"dedupe_key,omitempty"`      // optional deduplication key
+	DedupeTTL      int64           `json:"dedupe_ttl_ns,omitempty"`   // reservation lifetime in nanoseconds
+	Headers        Headers         `json:"headers,omitempty"`         // optional headers (e.g. traceparent)
 	legacy         bool
 }
 

@@ -24,6 +24,14 @@ jobs:
           check-latest: true
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - run: bash .github/scripts/check-boundaries.sh
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
       - run: go mod verify
       - run: go build ./...
       - run: go test -race -count=1 -timeout=180s ./...

@@ -60,10 +60,10 @@ func (e ExponentialBackoff) NextBackoff(attempt int) time.Duration {
 		jitter := rand.Float64() * jitterMax
 		res += time.Duration(jitter)
 	}
-	
+
 	if res > e.Max {
 		res = e.Max
 	}
-	
+
 	return res
 }
