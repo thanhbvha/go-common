@@ -63,8 +63,6 @@ type ConnectionLimiter struct {
 	connections map[string]int
 	maxPerKey   int
 	mu          sync.RWMutex
-	cleanupTick time.Duration
-	lastCleanup time.Time
 }
 
 // NewConnectionLimiter creates a new ConnectionLimiter with a limit on concurrent connections per unique key.
@@ -72,8 +70,6 @@ func NewConnectionLimiter(maxPerKey int) *ConnectionLimiter {
 	return &ConnectionLimiter{
 		connections: make(map[string]int),
 		maxPerKey:   maxPerKey,
-		cleanupTick: 5 * time.Minute,
-		lastCleanup: time.Now(),
 	}
 }
 
@@ -138,34 +134,10 @@ func (cl *ConnectionLimiter) GetStats() map[string]interface{} {
 	}
 }
 
-// Cleanup removes stale/empty connection tracking records.
-func (cl *ConnectionLimiter) Cleanup() {
-	cl.mu.Lock()
-	defer cl.mu.Unlock()
-
-	for key, count := range cl.connections {
-		if count <= 0 {
-			delete(cl.connections, key)
-		}
-	}
-
-	cl.lastCleanup = time.Now()
-}
-
 var (
-	globalRateLimiter       *RateLimiter
 	globalConnectionLimiter *ConnectionLimiter
-	rateLimiterOnce         sync.Once
 	connectionLimiterOnce   sync.Once
 )
-
-// GetGlobalRateLimiter returns the default singleton RateLimiter (1000 requests/sec limit, 2000 burst capacity).
-func GetGlobalRateLimiter() *RateLimiter {
-	rateLimiterOnce.Do(func() {
-		globalRateLimiter = NewRateLimiter(1000.0, 2000)
-	})
-	return globalRateLimiter
-}
 
 // GetGlobalConnectionLimiter returns the default singleton ConnectionLimiter (max 100 connections per key).
 func GetGlobalConnectionLimiter() *ConnectionLimiter {

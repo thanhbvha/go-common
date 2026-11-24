@@ -88,6 +88,14 @@ func NewGateway(c GatewayConfig) (*Gateway, error) {
 	return &Gateway{cfg: c, registrySlots: make(chan struct{}, c.RegistryConcurrency), sessions: make(map[string]*localSession), users: make(map[string]map[string]*localSession), rooms: make(map[string]map[string]*localSession), dedupe: newDeliveryCache(c.DedupeCapacity, c.DedupeTTL), ctx: ctx, cancel: cancel, done: make(chan struct{})}, nil
 }
 func (g *Gateway) NodeID() string { return g.cfg.NodeID }
+
+// RequiresAuthentication reports whether the delivery transport authenticates
+// every broker message in both directions. Transports that cannot say are
+// treated as unauthenticated.
+func (g *Gateway) RequiresAuthentication() bool {
+	transport, ok := g.cfg.Transport.(interface{ RequiresAuthentication() bool })
+	return ok && transport.RequiresAuthentication()
+}
 func (g *Gateway) Start(ctx context.Context) error {
 	ctx, finish, err := g.operationContext(ctx)
 	if err != nil {
@@ -576,9 +584,20 @@ func (g *Gateway) snapshotSessions(keys []string) []sessionSnapshot {
 	}
 	return snapshots
 }
+
+// renewBudget bounds one renewal round. A round that starts at T and succeeds
+// extends the local lease to T+LeaseTTL, so it may run for LeaseTTL-RenewInterval
+// and still leave one full interval before expiry. The previous bound was
+// RenewInterval itself, which discarded any round slower than the schedule even
+// though the lease had plenty of time left: a registry that was merely slow cost
+// the node its lease, and so its readiness, with nothing actually wrong.
+func (g *Gateway) renewBudget() time.Duration {
+	return g.cfg.LeaseTTL - g.cfg.RenewInterval
+}
+
 func (g *Gateway) renew() {
 	renewedAt := time.Now()
-	ctx, cancel := context.WithTimeout(g.ctx, g.cfg.RenewInterval)
+	ctx, cancel := context.WithTimeout(g.ctx, g.renewBudget())
 	defer cancel()
 	release, err := g.registryPermit(ctx)
 	if err != nil {

@@ -288,6 +288,12 @@ func TestConnectionQueueFullIsNonBlocking(t *testing.T) {
 	if time.Since(start) > 100*time.Millisecond {
 		t.Fatal("full queue send blocked")
 	}
+	if connection.IsClosed() {
+		t.Fatal("a single dropped message must not disconnect the client")
+	}
+	for i := int32(1); i < connection.config.SlowConsumerDropThreshold; i++ {
+		connection.Send([]byte("overflow"))
+	}
 	if !connection.IsClosed() {
 		t.Fatal("slow consumer was not disconnected")
 	}

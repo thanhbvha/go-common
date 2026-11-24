@@ -9,6 +9,7 @@ import (
 
 func TestManagerReadinessLifecycleAndAccounting(t *testing.T) {
 	manager := NewManager()
+	manager.accountingGrace = 0
 	if readiness := manager.Readiness(); !readiness.Ready {
 		t.Fatalf("running manager not ready: %+v", readiness)
 	}

@@ -58,6 +58,7 @@ export WS_V2_ALICE_PHONE_TOKEN="$(openssl rand -hex 32)"
 export WS_V2_BOB_TOKEN="$(openssl rand -hex 32)"
 export WS_V2_OTHER_TOKEN="$(openssl rand -hex 32)"
 export WS_V2_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export WS_V2_BROKER_KEY="$(openssl rand -hex 32)"
 export WS_V2_TOKEN="$WS_V2_ALICE_TOKEN"
 ```
 
@@ -69,12 +70,19 @@ $env:WS_V2_ALICE_PHONE_TOKEN = [Convert]::ToHexString([Security.Cryptography.Ran
 $env:WS_V2_BOB_TOKEN = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:WS_V2_OTHER_TOKEN = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:WS_V2_ADMIN_TOKEN = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+$env:WS_V2_BROKER_KEY = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:WS_V2_TOKEN = $env:WS_V2_ALICE_TOKEN
 ```
 
 Keep real credentials in your environment/secret manager, not repository files or
 command arguments. At least one client credential and a separate admin credential
 are required. All configured credentials must be unique and at least 32 bytes.
+
+`WS_V2_BROKER_KEY` (at least 32 bytes, identical on every gateway) signs each
+delivery command and result with HMAC-SHA256. A node refuses to start without it,
+and rejects broker messages that are unsigned or signed with another key, so other
+publishers on the same Redis or NATS cannot inject frames into client sockets.
+It is a defence in depth: still give the broker per-service ACLs and TLS.
 
 | Server credential environment | Trusted tenant | User | Stable session |
 |---|---|---|---|

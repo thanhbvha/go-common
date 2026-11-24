@@ -13,6 +13,7 @@ import (
 	"github.com/thanhbvha/go-common/v2/logger"
 	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
 	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/adapter/internal/wshttp"
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/v2/websocket/limiter"
@@ -28,8 +29,9 @@ type Config struct {
 	AuthenticateIdentity func(*http.Request) (core.Identity, error)
 	// Upgrader controls the WebSocket handshake. The default enforces same-origin.
 	Upgrader *websocket.Upgrader
-	// RateLimiter limits connection upgrade attempts.
-	RateLimiter *limiter.RateLimiter
+	// IPRateLimiter limits upgrade attempts per direct peer IP before the
+	// request is authenticated. The default allows wshttp.DefaultIPRate/Burst.
+	IPRateLimiter *limiter.KeyedRateLimiter
 	// ConnectionLimiter limits concurrent connections per direct peer IP.
 	ConnectionLimiter *limiter.ConnectionLimiter
 	// ConnectionKey resolves the key used for concurrent connection limits and
@@ -41,6 +43,7 @@ type Config struct {
 type Handler struct {
 	config  Config
 	manager *core.Manager
+	gate    wshttp.Gate
 }
 
 // NewHandler creates a standard-library WebSocket handler. Cross-origin use
@@ -61,9 +64,6 @@ func NewHandler(customConfig ...Config) *Handler {
 			WriteBufferSize: 1024,
 		}
 	}
-	if config.RateLimiter == nil {
-		config.RateLimiter = limiter.GetGlobalRateLimiter()
-	}
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
@@ -74,14 +74,15 @@ func NewHandler(customConfig ...Config) *Handler {
 	if config.Manager == nil {
 		config.Manager = core.GetGlobalManager()
 	}
-	return &Handler{config: config, manager: config.Manager}
+	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
 }
 
 // HandleUpgrade authenticates, limits, and upgrades an HTTP request before
 // registering the connection with the core manager.
 func (h *Handler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
-	if !h.manager.IsAcceptingConnections() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service draining"})
+	if denial := h.gate.Admit(httpkit.ClientIP(r)); denial != nil {
+		w.Header().Set("Retry-After", denial.RetryAfterHeader())
+		writeJSON(w, denial.Status, map[string]string{"error": denial.Message})
 		return
 	}
 	if !websocket.IsWebSocketUpgrade(r) {
@@ -104,11 +105,6 @@ func (h *Handler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	userID := identity.UserID
 
 	clientIP := h.config.ConnectionKey(r, userID)
-	if !h.config.RateLimiter.Allow() {
-		logger.WarnAsync("Connection upgrade rejected due to rate limiting", "clientIP", clientIP, "userID", userID)
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
-		return
-	}
 	if !h.config.ConnectionLimiter.CanConnect(clientIP) {
 		logger.WarnAsync("Connection upgrade rejected due to key connection limit", "clientIP", clientIP, "userID", userID)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "connection limit exceeded"})
@@ -179,14 +175,28 @@ func (h *Handler) HandleShardManagement(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "shard not found"})
 }
 
-// HandleHealthCheck reports manager and cluster node health metadata.
-func (h *Handler) HandleHealthCheck(w http.ResponseWriter, _ *http.Request) {
-	readiness := h.manager.Readiness()
-	status := http.StatusOK
-	if !readiness.Ready {
-		status = http.StatusServiceUnavailable
-	}
-	writeJSON(w, status, map[string]any{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
+// HandleLive is the liveness probe: 200 whenever the process can answer. It
+// never consults the manager or a broker, so a broker outage or a draining node
+// does not get a healthy process restarted. Mount it at /livez.
+func (h *Handler) HandleLive(w http.ResponseWriter, _ *http.Request) {
+	status, body := wshttp.LiveStatus()
+	writeJSON(w, status, body)
+}
+
+// HandleReady is the readiness probe: 200 only while this node should receive
+// new connections, otherwise 503. Mount it at /readyz. It reveals internal state
+// (broker and executor status), so serve it on an internal listener.
+func (h *Handler) HandleReady(w http.ResponseWriter, _ *http.Request) {
+	status, body := wshttp.ReadyStatus(h.manager.Readiness())
+	writeJSON(w, status, body)
+}
+
+// HandleHealthCheck is HandleReady.
+//
+// Deprecated: a single health endpoint conflates liveness with readiness. Use
+// HandleLive for the liveness probe and HandleReady for readiness.
+func (h *Handler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	h.HandleReady(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

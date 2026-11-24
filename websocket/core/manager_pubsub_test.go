@@ -127,9 +127,10 @@ func TestManagerShutdownReleasesOnlyItsBorrowedPubSubHandlers(t *testing.T) {
 	bus.mu.RLock()
 	before := len(bus.registrations)
 	bus.mu.RUnlock()
-	if before != 16 {
-		t.Fatalf("registrations before shutdown = %d", before)
+	if before == 0 || before%2 != 0 {
+		t.Fatalf("registrations before shutdown = %d, want an even, non-zero count", before)
 	}
+	perManager := before / 2
 	if err := first.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestManagerShutdownReleasesOnlyItsBorrowedPubSubHandlers(t *testing.T) {
 	afterFirst := len(bus.registrations)
 	shutdowns := bus.shutdowns
 	bus.mu.RUnlock()
-	if afterFirst != 8 || shutdowns != 0 {
+	if afterFirst != perManager || shutdowns != 0 {
 		t.Fatalf("registrations=%d shutdowns=%d", afterFirst, shutdowns)
 	}
 	if err := second.Shutdown(context.Background()); err != nil {

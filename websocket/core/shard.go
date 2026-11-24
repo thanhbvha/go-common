@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thanhbvha/go-common/v2/logger"
 	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
@@ -59,6 +60,7 @@ type Shard struct {
 	incomingMessage   chan *EventMessage
 	mu                sync.RWMutex
 	connectionCount   int64
+	admitting         atomic.Int64 // admissions that picked this shard but have not registered yet
 	ctx               context.Context
 	cancel            context.CancelFunc
 	name              string // Shard unique identifier (e.g. "shard_0", "shard_1")
@@ -176,7 +178,15 @@ func (s *Shard) SendToUser(userID string, message []byte) {
 	}
 }
 
-// SendToRoom transmits a message to all users subscribed to a specific room.
+// SendToRoom transmits a message to the members of a room that are connected to
+// this shard on this node.
+//
+// Deprecated: rooms are shard scoped. Adapters choose a connection's shard with
+// hash(userID), so members of one logical room normally live on different shards
+// and on different nodes, and this reaches only some of them. Room names are also
+// raw identifiers with no tenant namespace. Use routing.Router.SendToRoom, which
+// keys rooms by tenant and room and reaches every hosting node. Appropriate only
+// for a single-node deployment that places all members of a room on one shard.
 func (s *Shard) SendToRoom(roomID string, message []byte) {
 	message = bytes.Clone(message)
 	s.mu.RLock()
@@ -211,6 +221,12 @@ func (s *Shard) SendToRoom(roomID string, message []byte) {
 
 // JoinRoom serializes room operations per connection. Registry I/O never holds
 // shard or membership locks; an inactive connection cannot commit a late join.
+//
+// Membership is recorded on this shard, and with a Distributed gateway also in
+// the tenant-scoped routing registry. Only the registry side is visible across
+// shards and nodes, so deliver with routing.Router.SendToRoom in a cluster. The
+// shard-local side backs the deprecated Shard.SendToRoom and GetRoomSize, and
+// still enforces the per-connection room limit.
 func (s *Shard) JoinRoom(ctx context.Context, roomID string, conn *Connection) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -319,7 +335,8 @@ func (s *Shard) removeRoomLocked(roomID string, conn *Connection) {
 	}
 }
 
-// GetRoomSize returns the number of active physical connections in a room.
+// GetRoomSize returns the number of active physical connections in a room on
+// this shard only; members on other shards or nodes are not counted.
 func (s *Shard) GetRoomSize(roomID string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -661,6 +678,10 @@ func (s *Shard) shutdown(ctx context.Context) {
 // broadcastToOtherNodes routes a broadcast payload to cluster nodes using Redis pubsub.
 // It matches signature parameters from the pubsub coordinator.
 func (s *Shard) broadcastToOtherNodes(message []byte) {
+	if !utf8.Valid(message) { // JSON would silently corrupt it; text frames only
+		logger.WarnAsync("Dropped non-UTF-8 cross-node broadcast", "shard", s.name)
+		return
+	}
 	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),
@@ -670,8 +691,16 @@ func (s *Shard) broadcastToOtherNodes(message []byte) {
 	}
 }
 
-// BroadcastUserNotification sends a cross-node message to a specific user.
+// BroadcastUserNotification sends a cross-node message to a specific user over
+// legacy best-effort pub/sub.
+//
+// Deprecated: use routing.Router.SendToUser, which is tenant scoped and reports
+// per-session delivery outcomes.
 func (s *Shard) BroadcastUserNotification(userID string, message []byte) {
+	if !utf8.Valid(message) {
+		logger.WarnAsync("Dropped non-UTF-8 cross-node notification", "shard", s.name)
+		return
+	}
 	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),
@@ -688,8 +717,17 @@ func (s *Shard) BroadcastUserNotification(userID string, message []byte) {
 	}
 }
 
-// BroadcastRoomMessage distributes a message to a specific room across different cluster nodes.
+// BroadcastRoomMessage publishes a room message to peer nodes over legacy
+// best-effort pub/sub. A peer delivers it only to members on its shard named
+// like this one, and this node is not included.
+//
+// Deprecated: use routing.Router.SendToRoom, which reaches every node hosting
+// the room, is tenant scoped and reports per-node delivery outcomes.
 func (s *Shard) BroadcastRoomMessage(roomID string, message []byte) {
+	if !utf8.Valid(message) {
+		logger.WarnAsync("Dropped non-UTF-8 cross-node room message", "shard", s.name)
+		return
+	}
 	pubsubManager := s.coordinator.GetPubSubManager()
 	data := map[string]interface{}{
 		"message": string(message),

@@ -24,6 +24,9 @@ type settings struct {
 	leaseTTL, renewInterval, drainTimeout  time.Duration
 	credentials                            []credential
 	adminToken                             string
+	// brokerKey signs and verifies every delivery command and result so other
+	// publishers on the broker cannot inject frames into client sockets.
+	brokerKey []byte
 }
 
 func defaults() settings {
@@ -47,6 +50,9 @@ func (s settings) validate() error {
 	}
 	if s.registryConcurrency < 1 || s.dedupeCapacity < 1 || s.leaseTTL < time.Millisecond || s.renewInterval <= 0 || s.renewInterval >= s.leaseTTL || s.drainTimeout <= 0 {
 		return errors.New("invalid concurrency, cache or lifecycle settings")
+	}
+	if len(s.brokerKey) < 32 {
+		return errors.New("configure WS_V2_BROKER_KEY with at least 32 bytes; it authenticates broker messages between nodes")
 	}
 	if len(s.credentials) == 0 || len(s.adminToken) < 32 {
 		return errors.New("configure client credentials and a separate admin credential of at least 32 bytes")
@@ -84,6 +90,7 @@ func main() {
 	}
 	s.credentials = environmentCredentials(time.Now().Add(time.Hour))
 	s.adminToken = os.Getenv("WS_V2_ADMIN_TOKEN")
+	s.brokerKey = []byte(os.Getenv("WS_V2_BROKER_KEY"))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, s); err != nil {

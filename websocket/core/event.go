@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/v2/websocket/pool"
@@ -123,14 +124,16 @@ func HandleEvent(ev *EventMessage) {
 
 	var inc IncomingMessage
 	observer := ev.Conn.shard.observer()
-	if !stdjson.Valid(ev.Raw) {
+	if !utf8.Valid(ev.Raw) || !stdjson.Valid(ev.Raw) {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
+		ev.Conn.violation()
 		return
 	}
 	if err := json.Unmarshal(ev.Raw, &inc); err != nil || inc.Type == "" {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
+		ev.Conn.violation()
 		return
 	}
 
@@ -143,17 +146,20 @@ func HandleEvent(ev *EventMessage) {
 	if registration.maxPayloadBytes > 0 && len(inc.Data) > registration.maxPayloadBytes {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
+		ev.Conn.violation()
 		return
 	}
 	if registration.validate != nil && registration.validate(inc.Data) != nil {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
+		ev.Conn.violation()
 		return
 	}
 	if err := ev.Conn.shard.authorizer().CanPublish(ev.Conn.ctx, ev.Conn.identity, inc.Type); err != nil {
 		observer.EventDropped()
 		return
 	}
+	ev.Conn.consecutiveViolations.Store(0) // a fully valid event ends the streak
 	if !ev.Conn.tryAcquireHandler() {
 		observer.EventDropped()
 		return
@@ -191,7 +197,7 @@ func HandleEvent(ev *EventMessage) {
 				panic(recovered)
 			}
 		}()
-		handlerErr = ev.Conn.shard.handlerSupervisor.Run(ctx, func(handlerCtx context.Context) error {
+		handlerErr = ev.Conn.shard.handlerSupervisor.RunScoped(ctx, ev.Conn.handlerScope, func(handlerCtx context.Context) error {
 			if registration.dispatch == Business {
 				publisher := ev.Conn.config.CommandPublisher
 				if publisher == nil {

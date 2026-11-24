@@ -36,6 +36,7 @@ func exampleSettings(t *testing.T, delivery, business string) settings {
 	s := defaults()
 	s.credentials = fixtureCredentials()
 	s.adminToken = strings.Repeat("z", 32)
+	s.brokerKey = []byte(strings.Repeat("k", 32))
 	s.business = business
 	s.delivery = delivery
 	s.namespace = "ws-v2-test-" + routing.NewID()
@@ -281,9 +282,26 @@ func TestV2RejectsInvalidCredentialConfiguration(t *testing.T) {
 		t.Fatal("admin credential may equal a client credential")
 	}
 	s.adminToken = strings.Repeat("z", 32)
+	s.brokerKey = []byte(strings.Repeat("k", 32))
 	s.credentials[0].token = "short"
 	if s.validate() == nil {
 		t.Fatal("weak credential accepted")
+	}
+}
+
+func TestV2RequiresStrongBrokerKey(t *testing.T) {
+	s := defaults()
+	s.credentials = fixtureCredentials()
+	s.adminToken = strings.Repeat("z", 32)
+	for name, key := range map[string][]byte{"missing": nil, "short": []byte("too-short")} {
+		s.brokerKey = key
+		if s.validate() == nil {
+			t.Fatalf("%s broker key accepted", name)
+		}
+	}
+	s.brokerKey = []byte(strings.Repeat("k", 32))
+	if err := s.validate(); err != nil {
+		t.Fatalf("valid settings rejected: %v", err)
 	}
 }
 

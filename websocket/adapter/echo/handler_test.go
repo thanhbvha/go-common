@@ -15,7 +15,6 @@ import (
 func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {
 	handler := NewHandler(Config{
 		Authenticate:      func(echoframework.Context) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: limiter.NewConnectionLimiter(1),
 	})
 	serverEngine := echoframework.New()

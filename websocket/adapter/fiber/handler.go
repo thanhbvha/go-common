@@ -3,6 +3,7 @@ package fiber
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -28,8 +29,9 @@ type Config struct {
 	// CheckOrigin validates the browser Origin before upgrading. The default
 	// allows requests without Origin and same-origin requests only.
 	CheckOrigin func(c *fiber.Ctx) bool
-	// RateLimiter specifies a custom RateLimiter. Falls back to global instance if nil.
-	RateLimiter *limiter.RateLimiter
+	// IPRateLimiter limits upgrade attempts per direct peer IP before the
+	// request is authenticated. The default allows wshttp.DefaultIPRate/Burst.
+	IPRateLimiter *limiter.KeyedRateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
 	// ConnectionKey resolves the key used for concurrent connection limits and
@@ -41,6 +43,7 @@ type Config struct {
 type Handler struct {
 	config  Config
 	manager *core.Manager
+	gate    wshttp.Gate
 }
 
 // NewHandler instantiates a new Fiber adapter Handler with the specified configuration.
@@ -49,9 +52,6 @@ func NewHandler(config Config) *Handler {
 		config.Authenticate = func(*fiber.Ctx) (string, error) {
 			return "", fmt.Errorf("websocket authenticator is required")
 		}
-	}
-	if config.RateLimiter == nil {
-		config.RateLimiter = limiter.GetGlobalRateLimiter()
 	}
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
@@ -68,13 +68,26 @@ func NewHandler(config Config) *Handler {
 	if config.Manager == nil {
 		config.Manager = core.GetGlobalManager()
 	}
-	return &Handler{config: config, manager: config.Manager}
+	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
+}
+
+// peerIP is the direct network peer, never a forwarding header, so it cannot be
+// spoofed to dodge the pre-authentication rate limit.
+func peerIP(c *fiber.Ctx) string {
+	if addr := c.Context().RemoteAddr(); addr != nil {
+		if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+			return host
+		}
+		return addr.String()
+	}
+	return c.IP()
 }
 
 // HandleUpgrade handles the Fiber WebSocket connection upgrade process and registers session wrapper inside the core manager.
 func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
-	if !h.manager.IsAcceptingConnections() {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "service draining"})
+	if denial := h.gate.Admit(peerIP(c)); denial != nil {
+		c.Set(fiber.HeaderRetryAfter, denial.RetryAfterHeader())
+		return c.Status(denial.Status).JSON(fiber.Map{"error": denial.Message})
 	}
 	if !websocket.IsWebSocketUpgrade(c) {
 		logger.WarnAsync("Received non-websocket upgrade HTTP request")
@@ -101,10 +114,6 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
 
-	if !h.config.RateLimiter.Allow() {
-		logger.WarnAsync("Connection upgrade rejected due to rate limiting", "clientIP", clientIP, "userID", userID)
-		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "rate limit exceeded"})
-	}
 	if !h.config.ConnectionLimiter.CanConnect(clientIP) {
 		logger.WarnAsync("Connection upgrade rejected due to key connection limit", "clientIP", clientIP, "userID", userID)
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "connection limit exceeded"})
@@ -177,12 +186,26 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "shard not found"})
 }
 
-// HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
+// HandleLive is the liveness probe: 200 whenever the process can answer. It
+// never consults the manager or a broker, so a broker outage or a draining node
+// does not get a healthy process restarted. Mount it at /livez.
+func (h *Handler) HandleLive(c *fiber.Ctx) error {
+	status, body := wshttp.LiveStatus()
+	return c.Status(status).JSON(body)
+}
+
+// HandleReady is the readiness probe: 200 only while this node should receive
+// new connections, otherwise 503. Mount it at /readyz. It reveals internal state
+// (broker and executor status), so serve it on an internal listener.
+func (h *Handler) HandleReady(c *fiber.Ctx) error {
+	status, body := wshttp.ReadyStatus(h.manager.Readiness())
+	return c.Status(status).JSON(body)
+}
+
+// HandleHealthCheck is HandleReady.
+//
+// Deprecated: a single health endpoint conflates liveness with readiness. Use
+// HandleLive for the liveness probe and HandleReady for readiness.
 func (h *Handler) HandleHealthCheck(c *fiber.Ctx) error {
-	readiness := h.manager.Readiness()
-	status := fiber.StatusOK
-	if !readiness.Ready {
-		status = fiber.StatusServiceUnavailable
-	}
-	return c.Status(status).JSON(fiber.Map{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
+	return h.HandleReady(c)
 }

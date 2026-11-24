@@ -6,6 +6,9 @@ import (
 	"hash/fnv"
 	"sync"
 	"sync/atomic"
+
+	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
+	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
 )
 
 var (
@@ -96,11 +99,10 @@ func (e *PartitionedExecutor) run(queue <-chan executorTask) {
 	for task := range queue {
 		e.inFlight.Add(1)
 		func() {
-			defer func() {
-				if recover() != nil {
-					e.panicked.Add(1)
-				}
-			}()
+			defer panicrecovery.Catch(func(report panicrecovery.Report) {
+				e.panicked.Add(1)
+				wsrecovery.Handler(wsrecovery.Metadata{Component: "pool.partitioned_executor", Operation: "run"})(report)
+			})
 			_ = task.run(task.ctx)
 		}()
 		e.inFlight.Add(-1)

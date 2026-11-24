@@ -56,46 +56,49 @@ type Conn interface {
 
 // Connection represents an active WebSocket client session with thread-safe send channels and metadata.
 type Connection struct {
-	conn              Conn
-	send              chan []byte
-	shard             *Shard
-	userID            string
-	shardID           string
-	clientIP          string
-	lastPing          time.Time
-	mu                sync.RWMutex
-	lifecycleMu       sync.RWMutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	closeOnce         sync.Once
-	closeScheduled    atomic.Bool
-	closedDone        chan struct{}
-	drainSignal       chan struct{}
-	draining          atomic.Bool
-	drainRecorded     sync.Once
-	outboundPending   atomic.Int64
-	runOnce           sync.Once
-	unregisterOnce    sync.Once
-	pumps             sync.WaitGroup
-	writerDone        chan struct{}
-	done              chan struct{}
-	nodeID            string
-	requestID         string
-	connectionID      string
-	config            *ManagerConfig
-	messageLimiter    *limiter.RateLimiter
-	byteLimiter       *limiter.RateLimiter
-	pendingHandlers   atomic.Int32
-	malformedMessages atomic.Uint64
-	inboundDrops      atomic.Uint64
-	consecutiveDrops  atomic.Int32
-	started           atomic.Bool
-	identity          Identity
-	roomOperationMu   sync.Mutex // serializes room I/O for this connection, never shard state
-	roomsMu           sync.Mutex
-	rooms             map[string]struct{}
-	quotaKeys         []quotaKey
-	location          *routing.Location
+	conn                  Conn
+	send                  chan []byte
+	shard                 *Shard
+	userID                string
+	shardID               string
+	clientIP              string
+	lastPing              time.Time
+	mu                    sync.RWMutex
+	lifecycleMu           sync.RWMutex
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	closeOnce             sync.Once
+	closeScheduled        atomic.Bool
+	closedDone            chan struct{}
+	drainSignal           chan struct{}
+	draining              atomic.Bool
+	drainRecorded         sync.Once
+	outboundPending       atomic.Int64
+	runOnce               sync.Once
+	unregisterOnce        sync.Once
+	pumps                 sync.WaitGroup
+	writerDone            chan struct{}
+	done                  chan struct{}
+	nodeID                string
+	requestID             string
+	connectionID          string
+	config                *ManagerConfig
+	messageLimiter        *limiter.RateLimiter
+	byteLimiter           *limiter.RateLimiter
+	pendingHandlers       atomic.Int32
+	handlerScope          *HandlerScope
+	malformedMessages     atomic.Uint64
+	inboundDrops          atomic.Uint64
+	consecutiveDrops      atomic.Int32
+	closeFrame            atomic.Pointer[[]byte] // set by requestClose, sent by the writer
+	consecutiveViolations atomic.Int32
+	started               atomic.Bool
+	identity              Identity
+	roomOperationMu       sync.Mutex // serializes room I/O for this connection, never shard state
+	roomsMu               sync.Mutex
+	rooms                 map[string]struct{}
+	quotaKeys             []quotaKey
+	location              *routing.Location
 }
 
 // NewConnection instantiates a Connection session wrapper.
@@ -124,6 +127,7 @@ func NewConnection(conn Conn, shard *Shard, userID, shardID, clientIP, nodeID, r
 		requestID:      requestID,
 		connectionID:   strconv.FormatUint(nextConnectionID.Add(1), 10),
 		config:         config,
+		handlerScope:   NewHandlerScope(config.MaxLiveHandlersPerConnection),
 		identity:       Identity{UserID: userID},
 		rooms:          make(map[string]struct{}),
 		messageLimiter: limiter.NewRateLimiter(config.MessagesPerSecond, config.MessageBurst),
@@ -176,12 +180,44 @@ func (c *Connection) Close(reason string) {
 	})
 }
 
-func (c *Connection) requestClose(reason string) {
+// requestClose ends the session without blocking the caller. The writer, the
+// only goroutine allowed to write, sends a close frame with code (1008 policy,
+// 1013 overloaded, 1001 going away) before the socket is closed, so the client
+// sees why instead of 1006. If the writer is not running or stuck on a dead
+// peer, the socket is closed after WriteWait regardless.
+//
+// code 0 means the writer is presumed stuck: close at once, send no frame.
+func (c *Connection) requestClose(code int, reason string) {
 	if c.closeScheduled.CompareAndSwap(false, true) {
+		if code == 0 {
+			c.lifecycleMu.Lock()
+			c.cancel()
+			c.lifecycleMu.Unlock()
+			go c.Close(reason)
+			return
+		}
+		frame := websocket.FormatCloseMessage(code, reason)
+		c.closeFrame.Store(&frame)
 		c.lifecycleMu.Lock()
 		c.cancel()
 		c.lifecycleMu.Unlock()
-		go c.Close(reason)
+		go func() {
+			timer := time.NewTimer(c.config.WriteWait)
+			defer timer.Stop()
+			select {
+			case <-c.writerDone:
+			case <-timer.C:
+			}
+			c.Close(reason)
+		}()
+	}
+}
+
+// violation records a client protocol/rate violation and disconnects a client
+// that keeps violating without sending anything valid in between.
+func (c *Connection) violation() {
+	if c.consecutiveViolations.Add(1) >= c.config.MaxViolations {
+		c.requestClose(websocket.ClosePolicyViolation, "Too many protocol violations")
 	}
 }
 
@@ -216,7 +252,7 @@ func (c *Connection) Drain(ctx context.Context) (err error) {
 	case <-c.writerDone:
 		return nil
 	case <-ctx.Done():
-		c.requestClose("Outbound drain deadline")
+		c.requestClose(0, "Outbound drain deadline")
 		return ctx.Err()
 	}
 }
@@ -243,7 +279,12 @@ func (c *Connection) start() {
 	c.pumps.Add(2)
 	go func() {
 		defer c.pumps.Done()
-		defer c.Close("readPump finished")
+		defer func() {
+			// requestClose closes the socket itself after the writer sent its close frame.
+			if !c.closeScheduled.Load() {
+				c.Close("readPump finished")
+			}
+		}()
 		c.readPump()
 	}()
 	go func() {
@@ -328,6 +369,7 @@ func (c *Connection) readPump() {
 			}
 			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(message))) {
 				c.inboundDrops.Add(1)
+				c.violation()
 				continue
 			}
 			ev := &EventMessage{Conn: c, Raw: bytes.Clone(message), queuedAt: time.Now()}
@@ -373,6 +415,9 @@ func (c *Connection) writePump() {
 	for {
 		select {
 		case <-c.ctx.Done():
+			if frame := c.closeFrame.Load(); frame != nil && c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteWait)) == nil {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, *frame)
+			}
 			return
 		case <-c.drainSignal:
 			for {
@@ -478,7 +523,7 @@ func (c *Connection) enqueueShared(message []byte) error {
 		if closeSlow {
 			// Mark closed immediately, but never perform network Close from an
 			// enqueue callback. At most one closer goroutine exists per session.
-			c.requestClose("Outbound queue full")
+			c.requestClose(websocket.CloseTryAgainLater, "Outbound queue full")
 		}
 		return ErrSendQueueFull
 	}

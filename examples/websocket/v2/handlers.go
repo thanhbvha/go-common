@@ -185,7 +185,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func (a *application) handler() http.Handler {
 	mux := http.NewServeMux()
-	h := adapter.NewHandler(adapter.Config{Manager: a.manager, AuthenticateIdentity: a.authenticate, RateLimiter: limiter.NewRateLimiter(100, 200), ConnectionLimiter: limiter.NewConnectionLimiter(50)})
+	h := adapter.NewHandler(adapter.Config{Manager: a.manager, AuthenticateIdentity: a.authenticate, IPRateLimiter: limiter.NewKeyedRateLimiter(100, 200, 0, 0), ConnectionLimiter: limiter.NewConnectionLimiter(50)})
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
 		if a.stopping.Load() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "draining"})

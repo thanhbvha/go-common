@@ -30,6 +30,7 @@ import (
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
 	"github.com/thanhbvha/go-common/v2/websocket/limiter"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 	"github.com/thanhbvha/go-common/v2/websocket/routing"
 	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
 	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
@@ -128,12 +129,18 @@ func runWithBus(ctx context.Context, o options, started func(bus.Bus)) (runErr e
 		}
 		defer nc.Close()
 	}
+	brokerKey := []byte(os.Getenv("WS_EXAMPLE_BROKER_KEY"))
+	authenticator, err := pubsub.NewAuthenticator("example", map[string][]byte{"example": brokerKey}, pubsub.AuthRequired)
+	if err != nil {
+		return errors.New("WS_EXAMPLE_BROKER_KEY must be at least 32 bytes; it authenticates delivery messages between nodes")
+	}
+	signed := routing.WithMessageAuthenticator(authenticator)
 	var delivery routing.DeliveryTransport
 	switch o.deliveryDriver {
 	case "redis":
-		delivery = redisrouting.NewTransport(rc, prefix)
+		delivery = redisrouting.NewTransport(rc, prefix, signed)
 	case "nats":
-		delivery = natsrouting.NewTransport(nc, prefix)
+		delivery = natsrouting.NewTransport(nc, prefix, signed)
 	}
 	var transportDriver transport.Transport
 	var eventOptions []bus.EventOption
@@ -304,10 +311,10 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 	if settings != nil {
 		settings.ApplyManagerLimits(&cfg)
 	}
-	if err := cfg.ValidateProduction(); err != nil {
+	manager, err := core.NewProductionManager(cfg)
+	if err != nil {
 		return err
 	}
-	manager := core.NewManagerWithConfig(cfg)
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -318,7 +325,7 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 		upgradeRate, upgradeBurst, perIP = settings.UpgradeRate, settings.UpgradeBurst, settings.MaxConnectionsPerIP
 	}
 	h := adapter.NewHandler(adapter.Config{Manager: manager,
-		RateLimiter: limiter.NewRateLimiter(upgradeRate, upgradeBurst), ConnectionLimiter: limiter.NewConnectionLimiter(perIP),
+		IPRateLimiter: limiter.NewKeyedRateLimiter(upgradeRate, upgradeBurst, 0, 0), ConnectionLimiter: limiter.NewConnectionLimiter(perIP),
 		AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
 			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
 				return core.Identity{}, core.ErrUnauthorized
@@ -332,11 +339,11 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 		}})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.HandleUpgrade)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if !manager.Readiness().Ready {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	})
+	// Liveness must not depend on brokers or draining, or an outage restarts
+	// healthy nodes. Readiness gates traffic. /health is kept as readiness.
+	mux.HandleFunc("/livez", h.HandleLive)
+	mux.HandleFunc("/readyz", h.HandleReady)
+	mux.HandleFunc("/health", h.HandleReady)
 	// A separate credential is required; client credentials grant no stats access.
 	mux.Handle("/admin/stats", statsHandler(os.Getenv("WS_EXAMPLE_ADMIN_TOKEN"), func() any {
 		stats := manager.GetStats()

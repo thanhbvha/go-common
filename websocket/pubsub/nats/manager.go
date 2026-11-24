@@ -2,7 +2,7 @@ package natspubsub
 
 import (
 	"context"
-	stdjson "encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -37,6 +37,39 @@ type Manager struct {
 	reconnectSuccesses atomic.Uint64
 	reconnectFailures  atomic.Uint64
 	lastReconnectError string
+	auth               *pubsub.Authenticator
+	maxMessageBytes    int
+	rejected           atomic.Uint64
+	dropLog            pubsub.DropLog
+	execPartitions     int
+	execQueueSize      int
+}
+
+// Option customizes a Manager at construction.
+type Option func(*Manager)
+
+// WithAuthenticator signs outbound and verifies inbound broker messages.
+func WithAuthenticator(auth *pubsub.Authenticator) Option {
+	return func(m *Manager) { m.auth = auth }
+}
+
+// WithExecutor sizes the dispatch executor (default 4 partitions x 256 slots).
+// Handlers for the same user, room or shard stay ordered within a partition.
+func WithExecutor(partitions, queueSize int) Option {
+	return func(m *Manager) {
+		if partitions > 0 && queueSize > 0 {
+			m.execPartitions, m.execQueueSize = partitions, queueSize
+		}
+	}
+}
+
+// WithMaxMessageBytes bounds an inbound payload before it is decoded.
+func WithMaxMessageBytes(n int) Option {
+	return func(m *Manager) {
+		if n > 0 {
+			m.maxMessageBytes = n
+		}
+	}
 }
 
 var (
@@ -45,6 +78,9 @@ var (
 )
 
 // GetGlobalManager returns the default singleton Manager initialized with the default NATS client.
+//
+// Deprecated: process-global state couples unrelated services and tests. Build
+// a Manager with NewManagerWithClient and pass it via core.ManagerConfig.PubSub.
 func GetGlobalManager() *Manager {
 	managerOnce.Do(func() {
 		globalManager = NewManager()
@@ -52,57 +88,69 @@ func GetGlobalManager() *Manager {
 	return globalManager
 }
 
-// NewManager instantiates a new Manager. If the default NATS client is not set,
-// it gracefully falls back to standalone loopback mode to support zero-config standalone runs.
+// NewManager instantiates a Manager on the default NATS client. When no default
+// client is registered the manager stays unready and rejects publishes rather
+// than silently running as a single node; use
+// NewManagerWithClientAndPolicy(nil, pubsub.AllowStandalone) to opt in to
+// in-process loopback for development.
+//
+// Deprecated: depends on a process-global client. Prefer NewManagerWithClient.
 func NewManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client, _ := nats.LookupDefault()
 
 	if client == nil {
-		logger.WarnAsync("NATS default client not set. WebSocket PubSub will run in standalone loopback mode.")
+		logger.WarnAsync("NATS default client not set. WebSocket PubSub will stay unready until one is configured.")
 	}
 
 	manager := &Manager{
-		natsClient:    client,
-		nodeID:        pubsub.GenerateNodeID(),
-		subscribers:   make(map[string]*gonats.Subscription),
-		desired:       make(map[string]struct{}),
-		handlers:      make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
-		registrations: make(map[pubsub.HandlerRegistration]string),
-		ctx:           ctx,
-		cancel:        cancel,
-		executor:      pool.NewPartitionedExecutor(4, 256),
-		failurePolicy: pubsub.AllowStandalone,
+		maxMessageBytes: pubsub.DefaultMaxMessageBytes,
+		natsClient:      client,
+		nodeID:          pubsub.GenerateNodeID(),
+		subscribers:     make(map[string]*gonats.Subscription),
+		desired:         make(map[string]struct{}),
+		handlers:        make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
+		registrations:   make(map[pubsub.HandlerRegistration]string),
+		ctx:             ctx,
+		cancel:          cancel,
+		failurePolicy:   pubsub.StayUnready,
 	}
+	manager.startExecutor()
 	manager.supervisorWG.Add(1)
 	go manager.superviseSubscriptions()
 	return manager
 }
 
-// NewManagerWithClient instantiates a new Manager with a custom, user-provided NATS client.
-func NewManagerWithClient(client *nats.Client) *Manager {
-	if client == nil {
-		return NewManagerWithClientAndPolicy(nil, pubsub.AllowStandalone)
-	}
-	return NewManagerWithClientAndPolicy(client, pubsub.StayUnready)
+// NewManagerWithClient instantiates a Manager on a user-provided NATS client.
+// It stays unready while the client is nil or disconnected. A nil client is a
+// misconfiguration in a cluster, so it is not silently treated as standalone;
+// opt in explicitly with NewManagerWithClientAndPolicy and pubsub.AllowStandalone.
+func NewManagerWithClient(client *nats.Client, options ...Option) *Manager {
+	return NewManagerWithClientAndPolicy(client, pubsub.StayUnready, options...)
 }
 
-func NewManagerWithClientAndPolicy(client *nats.Client, policy pubsub.ClusterFailurePolicy) *Manager {
+// NewManagerWithClientAndPolicy is NewManagerWithClient with an explicit
+// behaviour for an unavailable broker.
+func NewManagerWithClientAndPolicy(client *nats.Client, policy pubsub.ClusterFailurePolicy, options ...Option) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &Manager{
-		natsClient:    client,
-		nodeID:        pubsub.GenerateNodeID(),
-		subscribers:   make(map[string]*gonats.Subscription),
-		desired:       make(map[string]struct{}),
-		handlers:      make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
-		registrations: make(map[pubsub.HandlerRegistration]string),
-		ctx:           ctx,
-		cancel:        cancel,
-		executor:      pool.NewPartitionedExecutor(4, 256),
-		failurePolicy: policy,
+		maxMessageBytes: pubsub.DefaultMaxMessageBytes,
+		natsClient:      client,
+		nodeID:          pubsub.GenerateNodeID(),
+		subscribers:     make(map[string]*gonats.Subscription),
+		desired:         make(map[string]struct{}),
+		handlers:        make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
+		registrations:   make(map[pubsub.HandlerRegistration]string),
+		ctx:             ctx,
+		cancel:          cancel,
+		failurePolicy:   policy,
 	}
+	for _, option := range options {
+		option(manager)
+	}
+	manager.startExecutor()
 	manager.supervisorWG.Add(1)
 	go manager.superviseSubscriptions()
 	return manager
@@ -152,22 +200,24 @@ func (psm *Manager) Subscribe(channels ...string) error {
 		return fmt.Errorf("nats client is not connected")
 	}
 
-	psm.mu.Lock()
-	defer psm.mu.Unlock()
-
 	nc := psm.natsClient.Native()
 	if nc == nil {
 		return fmt.Errorf("nats client is not connected")
 	}
 
+	// Broker calls run outside psm.mu so a slow server cannot block
+	// RegisterHandler, GetStats or message dispatch.
+	psm.mu.Lock()
+	missing := make([]string, 0, len(channels))
 	for _, channel := range channels {
 		psm.desired[channel] = struct{}{}
-		if _, exists := psm.subscribers[channel]; exists {
-			continue // Already subscribed
+		if _, exists := psm.subscribers[channel]; !exists {
+			missing = append(missing, channel)
 		}
+	}
+	psm.mu.Unlock()
 
-		// In NATS, we supply a callback for the subscription.
-		// We capture the channel variable to ensure correct closures.
+	for _, channel := range missing {
 		subChan := channel
 		sub, err := nc.Subscribe(subChan, func(msg *gonats.Msg) {
 			defer panicrecovery.Catch(wsrecovery.Handler(wsrecovery.Metadata{
@@ -182,7 +232,16 @@ func (psm *Manager) Subscribe(channels ...string) error {
 			return fmt.Errorf("failed to subscribe to channel: %s, err: %v", channel, err)
 		}
 
+		psm.mu.Lock()
+		_, desired := psm.desired[channel]
+		_, exists := psm.subscribers[channel]
+		if !desired || exists { // unsubscribed or raced by another Subscribe meanwhile
+			psm.mu.Unlock()
+			_ = sub.Unsubscribe()
+			continue
+		}
 		psm.subscribers[channel] = sub
+		psm.mu.Unlock()
 	}
 
 	logger.InfoAsync("Subscribed to NATS channels", "node_id", psm.nodeID, "channels", channels)
@@ -195,22 +254,30 @@ func (psm *Manager) Unsubscribe(channels ...string) error {
 		return nil // No-op in standalone/test mode
 	}
 
+	type detached struct {
+		channel string
+		sub     *gonats.Subscription
+	}
 	psm.mu.Lock()
-	defer psm.mu.Unlock()
-
+	var subs []detached
 	for _, channel := range channels {
 		delete(psm.desired, channel)
-		sub, exists := psm.subscribers[channel]
-		if !exists {
-			continue
+		if sub, exists := psm.subscribers[channel]; exists {
+			delete(psm.subscribers, channel)
+			subs = append(subs, detached{channel, sub})
 		}
+	}
+	psm.mu.Unlock()
 
-		if err := sub.Unsubscribe(); err != nil {
-			logger.ErrorAsync("Failed to unsubscribe from NATS channel", "channel", channel, "error", err)
-			return err
+	var firstErr error
+	for _, d := range subs {
+		if err := d.sub.Unsubscribe(); err != nil {
+			logger.ErrorAsync("Failed to unsubscribe from NATS channel", "channel", d.channel, "error", err)
+			firstErr = errors.Join(firstErr, err)
 		}
-
-		delete(psm.subscribers, channel)
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 
 	logger.InfoAsync("Unsubscribed from NATS channels", "node_id", psm.nodeID, "channels", channels)
@@ -219,14 +286,19 @@ func (psm *Manager) Unsubscribe(channels ...string) error {
 
 // processMessage decodes and directs a single payload to its corresponding handler.
 func (psm *Manager) processMessage(channel string, payload []byte) {
-	if !stdjson.Valid(payload) {
+	raw, err := psm.auth.Open(payload, psm.maxMessageBytes)
+	if err != nil {
+		psm.rejected.Add(1)
+		logger.WarnAsync("Rejected cross-node message", "reason", err.Error(), "channel", channel, "payloadBytes", len(payload))
 		return
 	}
-	var message pubsub.CrossNodeMessage
-	if err := json.Unmarshal(payload, &message); err != nil {
-		logger.ErrorAsync("Failed to unmarshal cross-node message", "error", err, "channel", channel, "payloadBytes", len(payload))
+	decoded, err := pubsub.DecodeCrossNodeMessage(raw, psm.maxMessageBytes)
+	if err != nil {
+		psm.rejected.Add(1)
+		logger.WarnAsync("Rejected cross-node message", "reason", err.Error(), "channel", channel, "payloadBytes", len(payload))
 		return
 	}
+	message := *decoded
 
 	// Skip messages generated by this node
 	if message.NodeID == psm.nodeID {
@@ -248,7 +320,7 @@ func (psm *Manager) processMessage(channel string, payload []byte) {
 			handler(&message)
 			return nil
 		}); err != nil {
-			logger.ErrorAsync("WebSocket pubsub dispatch rejected", "error", err)
+			psm.dropLog.Report(err)
 		}
 	}
 }
@@ -278,7 +350,7 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 				handler(message)
 				return nil
 			}); err != nil {
-				logger.ErrorAsync("WebSocket pubsub dispatch rejected", "error", err)
+				psm.dropLog.Report(err)
 			}
 		}
 		return nil
@@ -290,6 +362,9 @@ func (psm *Manager) Publish(channel string, message *pubsub.CrossNodeMessage) er
 	data, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+	if data, err = psm.auth.Seal(data); err != nil {
+		return fmt.Errorf("failed to seal message: %w", err)
 	}
 
 	nc := psm.natsClient.Native()
@@ -453,6 +528,7 @@ func (psm *Manager) GetStats() map[string]interface{} {
 		"handlers":             handlers,
 		"mode":                 "nats",
 		"dispatch":             psm.executor.Stats(),
+		"rejected_messages":    psm.rejected.Load(),
 		"ready":                psm.readyLocked(),
 		"reconnect_state":      psm.reconnectStateLocked(),
 		"reconnect_attempts":   psm.reconnectAttempts.Load(),
@@ -607,4 +683,11 @@ func messagePartitionKey(message *pubsub.CrossNodeMessage) string {
 		return "room:" + message.RoomID
 	}
 	return "shard:" + message.ShardID
+}
+
+func (psm *Manager) startExecutor() {
+	if psm.execPartitions <= 0 || psm.execQueueSize <= 0 {
+		psm.execPartitions, psm.execQueueSize = 4, 256
+	}
+	psm.executor = pool.NewPartitionedExecutor(psm.execPartitions, psm.execQueueSize)
 }

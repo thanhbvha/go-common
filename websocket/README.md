@@ -145,7 +145,7 @@ func main() {
     manager := core.NewManagerWithConfig(cfg)
     h := wshttp.NewHandler(wshttp.Config{
         Manager: manager,
-        RateLimiter: limiter.NewRateLimiter(50, 100),
+        IPRateLimiter: limiter.NewKeyedRateLimiter(50, 100, 0, 0),
         ConnectionLimiter: limiter.NewConnectionLimiter(20),
         AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
             if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
@@ -220,6 +220,27 @@ Local `Shard.SendToUser` / `SendToRoom` are shard scoped and use raw identifiers
 they are not tenant security boundaries. Namespace/authorize local IDs. Router
 always takes an explicit tenant. Client-supplied identity/role/tenant fields are
 not authentication or permission to select privileged routing targets.
+
+### Legacy shard rooms are single-node only
+
+`Shard.SendToRoom`, `Shard.GetRoomSize` and `Shard.BroadcastRoomMessage` (with the
+Redis/NATS `pubsub` fan-out behind them) are deprecated and unsuitable for rooms
+that span users. Adapters place a connection on the shard `hash(userID)`, so two
+members of one logical room are normally on different shards, and a shard only
+knows its own members:
+
+- `Shard.SendToRoom` reaches only members on that shard.
+- A room message from a peer node is routed by the *sender's* shard name, so it
+  reaches only members on the identically named local shard.
+- Room names are raw strings with no tenant namespace.
+
+These are pinned by `websocket/core/room_scope_test.go`. Do not use them for
+anything that must reach every member. Use `routing.Router.SendToRoom(ctx, tenant,
+room, ...)`, which keys rooms by tenant and room, reaches every hosting node and
+reports per-node outcomes. In a cluster this is enforced: `ValidateProduction`
+rejects a real `PubSub` without `Distributed`. `Shard.JoinRoom` stays the call
+that registers membership, because it also records the session in the registry
+that the Router reads.
 
 ## Distributed setup and sends
 

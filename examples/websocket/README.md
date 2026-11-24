@@ -161,11 +161,19 @@ All four stacks expose the same routes and WebSocket protocol.
 | Route | Authentication | Purpose |
 |---|---|---|
 | `GET /ws` | Configured client bearer token | WebSocket upgrade |
-| `GET /health` | Public in this local example | Manager readiness |
+| `GET /livez` | Public | Liveness: 200 while the process runs. Never depends on brokers or draining |
+| `GET /readyz` | Public in this local example | Readiness: 503 while draining or when the executor/broker is unavailable |
+| `GET /health` | Public in this local example | Alias of `/readyz`, kept for existing scripts |
 | `GET /admin/stats` | Configured admin bearer token | Manager, executor, observer, limiter, and broker statistics |
 | `GET /admin/shard?shard=<id>` | Configured admin bearer token | One shard's connection count |
 
-Production applications should normally protect health topology, stats, and shard metadata on an internal listener or through administrator authorization.
+Point the orchestrator's liveness probe at `/livez` and the load balancer or
+readiness probe at `/readyz`. Using one endpoint for both is a common outage
+amplifier: when Redis or NATS goes down a combined probe fails on every node, and
+an orchestrator restarts healthy processes (dropping every WebSocket) instead of
+just taking them out of rotation.
+
+Production applications should normally protect health topology, stats, and shard metadata on an internal listener or through administrator authorization. `/readyz` reports broker and executor state, so keep it off the public listener.
 
 Probe manually:
 
@@ -383,6 +391,17 @@ shard.BroadcastRoomMessage(roomID, payload)
 ```
 
 `SendToRoom` reaches local room members. `BroadcastRoomMessage` publishes to peer cluster nodes. Publishing alone does not perform local fan-out.
+
+> **Limitation, development only.** This example uses the deprecated legacy room
+> API, which is scoped to a single shard. The adapter puts each user on the shard
+> `hash(user_id)` (up to 64 here), so two users in the same room are almost always
+> on different shards and **do not receive each other's `chat.message`**, even on
+> one node. The `members` count in `room.joined` is likewise per shard. Use it to
+> exercise the protocol with a single user or to see the wire format. For rooms that
+> work across users and nodes, run [`examples/websocket/v2`](v2/README.md) or
+> [`examples/websocket/cluster`](cluster/README.md), which deliver with
+> `routing.Router.SendToRoom`. See "Legacy shard rooms are single-node only" in
+> [`websocket/README.md`](../../websocket/README.md).
 
 This example does not persist chat messages. A production chat service should store the message first, then publish the live update.
 

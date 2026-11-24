@@ -14,8 +14,8 @@ type wire struct {
 	subscriptions atomic.Int32
 }
 
-func NewTransport(client goredis.UniversalClient, prefix string) *routing.RPCTransport {
-	return routing.NewRPCTransport(&wire{client: client}, prefix)
+func NewTransport(client goredis.UniversalClient, prefix string, options ...routing.RPCOption) *routing.RPCTransport {
+	return routing.NewRPCTransport(&wire{client: client}, prefix, options...)
 }
 func (w *wire) Ready() bool { return w.subscriptions.Load() == 2 }
 func (w *wire) Publish(ctx context.Context, channel string, b []byte) error {

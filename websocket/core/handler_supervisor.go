@@ -36,7 +36,50 @@ func NewHandlerSupervisor(capacity int) *HandlerSupervisor {
 	return &HandlerSupervisor{permits: make(chan struct{}, capacity), accepting: true}
 }
 
+// ErrHandlerScopeCapacity reports that one scope (a connection) already has its
+// maximum number of live handler goroutines, which usually means earlier
+// handlers ignored cancellation and are still running.
+var ErrHandlerScopeCapacity = errors.New("websocket handler scope capacity reached")
+
+// HandlerScope bounds the live handler goroutines attributable to one owner,
+// such as a connection. A goroutine that outlives its timeout still counts, so
+// a single owner cannot drain the supervisor's shared capacity with handlers
+// that never observe their context.
+type HandlerScope struct {
+	limit   int32
+	running atomic.Int32
+}
+
+// NewHandlerScope creates a scope allowing at most limit live goroutines.
+func NewHandlerScope(limit int) *HandlerScope {
+	if limit <= 0 {
+		limit = 1
+	}
+	return &HandlerScope{limit: int32(limit)}
+}
+
+func (h *HandlerScope) acquire() bool {
+	for {
+		current := h.running.Load()
+		if current >= h.limit {
+			return false
+		}
+		if h.running.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+// Running reports the live goroutines currently held by the scope.
+func (h *HandlerScope) Running() int { return int(h.running.Load()) }
+
 func (s *HandlerSupervisor) Run(ctx context.Context, run func(context.Context) error) error {
+	return s.RunScoped(ctx, nil, run)
+}
+
+// RunScoped is Run with an additional per-owner goroutine bound. A nil scope
+// applies only the shared capacity.
+func (s *HandlerSupervisor) RunScoped(ctx context.Context, scope *HandlerScope, run func(context.Context) error) error {
 	if run == nil {
 		return nil
 	}
@@ -49,12 +92,20 @@ func (s *HandlerSupervisor) Run(ctx context.Context, run func(context.Context) e
 		s.rejected.Add(1)
 		return ErrSupervisorStopped
 	}
+	if scope != nil && !scope.acquire() {
+		s.mu.RUnlock()
+		s.rejected.Add(1)
+		return ErrHandlerScopeCapacity
+	}
 	select {
 	case s.permits <- struct{}{}:
 		s.running.Add(1)
 		s.mu.RUnlock()
 	default:
 		s.mu.RUnlock()
+		if scope != nil {
+			scope.running.Add(-1)
+		}
 		s.rejected.Add(1)
 		return ErrHandlerCapacity
 	}
@@ -82,6 +133,9 @@ func (s *HandlerSupervisor) Run(ctx context.Context, run func(context.Context) e
 			state.Unlock()
 			s.running.Add(-1)
 			<-s.permits
+			if scope != nil {
+				scope.running.Add(-1)
+			}
 			result <- outcome
 		}()
 		outcome.err = run(ctx)

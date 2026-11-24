@@ -237,6 +237,7 @@ Run in separate terminals (replace `-broker redis` with `-broker nats` for NATS)
 
 ```bash
 export WS_EXAMPLE_CLIENT_TOKEN=local-demo-token
+export WS_EXAMPLE_BROKER_KEY="$(openssl rand -hex 32)"   # >= 32 bytes, identical for every role
 
 go run ./examples/websocket/cluster -broker redis -role gateway -addr 127.0.0.1:8080
 go run ./examples/websocket/cluster -broker redis -role gateway -addr 127.0.0.1:8081
@@ -250,6 +251,7 @@ Run these commands in separate terminals, with Kafka, Redis and NATS Core runnin
 
 ```bash
 export WS_EXAMPLE_CLIENT_TOKEN=local-demo-token
+export WS_EXAMPLE_BROKER_KEY="$(openssl rand -hex 32)"   # >= 32 bytes, identical for every role
 
 go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role gateway -addr 127.0.0.1:8080
 go run ./examples/websocket/cluster -eventbus-driver kafka -delivery-driver nats -kafka 127.0.0.1:9092 -namespace kafka-demo -role gateway -addr 127.0.0.1:8081

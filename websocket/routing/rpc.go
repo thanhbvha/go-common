@@ -22,7 +22,27 @@ type rpcEnvelope struct {
 	CorrelationID string           `json:"correlation_id,omitempty"`
 	Result        DeliveryResult   `json:"result"`
 }
+
+// MessageAuthenticator signs outbound and verifies inbound broker payloads.
+// *pubsub.Authenticator implements it. A nil value disables authentication.
+type MessageAuthenticator interface {
+	Seal(payload []byte) ([]byte, error)
+	Open(wire []byte, maxBytes int) ([]byte, error)
+}
+
+// RPCOption customizes an RPCTransport.
+type RPCOption func(*RPCTransport)
+
+// WithMessageAuthenticator authenticates every delivery command and result.
+// Without it, anyone able to publish to the broker channel can inject payloads.
+func WithMessageAuthenticator(a MessageAuthenticator) RPCOption {
+	return func(t *RPCTransport) { t.auth = a }
+}
+
+const maxRPCBytes = 2 << 20
+
 type RPCTransport struct {
+	auth            MessageAuthenticator
 	wire            Wire
 	prefix          string
 	startMu         sync.Mutex
@@ -38,11 +58,29 @@ type RPCTransport struct {
 	callbacks       operationGroup
 }
 
-func NewRPCTransport(w Wire, prefix string) *RPCTransport {
+func NewRPCTransport(w Wire, prefix string, options ...RPCOption) *RPCTransport {
 	if prefix == "" {
 		prefix = "websocket"
 	}
-	return &RPCTransport{wire: w, prefix: prefix, pending: make(map[string]chan DeliveryResult), closeDone: make(chan struct{})}
+	t := &RPCTransport{wire: w, prefix: prefix, pending: make(map[string]chan DeliveryResult), closeDone: make(chan struct{})}
+	for _, option := range options {
+		option(t)
+	}
+	return t
+}
+
+func (t *RPCTransport) seal(b []byte) ([]byte, error) {
+	if t.auth == nil {
+		return b, nil
+	}
+	return t.auth.Seal(b)
+}
+
+func (t *RPCTransport) open(b []byte) ([]byte, error) {
+	if t.auth == nil {
+		return b, nil
+	}
+	return t.auth.Open(b, maxRPCBytes)
 }
 func (t *RPCTransport) channel(kind, node string) string {
 	h := sha256.Sum256([]byte(node))
@@ -85,6 +123,15 @@ func (t *RPCTransport) Start(ctx context.Context, node string, h DeliveryHandler
 	t.mu.Unlock()
 	return nil
 }
+
+// RequiresAuthentication reports whether the transport signs outbound messages
+// and rejects unsigned or wrongly signed inbound ones. Production validation
+// uses it to refuse a cluster that would act on forged broker messages.
+func (t *RPCTransport) RequiresAuthentication() bool {
+	strict, ok := t.auth.(interface{ Strict() bool })
+	return ok && strict.Strict()
+}
+
 func (t *RPCTransport) Ready() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -95,7 +142,11 @@ func (t *RPCTransport) receive(b []byte) {
 		return
 	}
 	defer t.callbacks.end()
-	if len(b) > 2<<20 {
+	if len(b) > maxRPCBytes+1024 {
+		return
+	}
+	b, err := t.open(b)
+	if err != nil || len(b) > maxRPCBytes {
 		return
 	}
 	var e rpcEnvelope
@@ -129,6 +180,9 @@ func (t *RPCTransport) receive(b []byte) {
 		return h(ctx, *e.Command)
 	}()
 	reply, _ := json.Marshal(rpcEnvelope{CorrelationID: e.Command.CorrelationID, Result: result})
+	if reply, err = t.seal(reply); err != nil {
+		return
+	}
 	publishCtx, cancel := context.WithDeadline(ctx, e.Command.ExpiresAt)
 	defer cancel()
 	_ = t.wire.Publish(publishCtx, t.channel("result", e.Reply), reply)
@@ -156,8 +210,11 @@ func (t *RPCTransport) Deliver(ctx context.Context, node string, c DeliveryComma
 	if err != nil {
 		return DeliveryResult{}, err
 	}
-	if len(b) > 2<<20 {
+	if len(b) > maxRPCBytes {
 		return DeliveryResult{}, ErrInvalid
+	}
+	if b, err = t.seal(b); err != nil {
+		return DeliveryResult{}, err
 	}
 	if err = t.wire.Publish(ctx, t.channel("delivery", node), b); err != nil {
 		return DeliveryResult{}, err

@@ -43,7 +43,6 @@ func TestDefaultAuthenticationRejectsUpgrade(t *testing.T) {
 func TestDefaultOriginPolicy(t *testing.T) {
 	handler := NewHandler(Config{
 		Authenticate:      func(*http.Request) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: limiter.NewConnectionLimiter(2),
 	})
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleUpgrade))
@@ -65,7 +64,6 @@ func TestUpgradeConnectsAndReleasesLimit(t *testing.T) {
 	connectionLimiter := limiter.NewConnectionLimiter(1)
 	handler := NewHandler(Config{
 		Authenticate:      func(*http.Request) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: connectionLimiter,
 	})
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleUpgrade))
@@ -90,7 +88,6 @@ func TestConnectionKeyControlsLimiterKey(t *testing.T) {
 	connectionLimiter := limiter.NewConnectionLimiter(1)
 	handler := NewHandler(Config{
 		Authenticate:      func(*http.Request) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: connectionLimiter,
 		ConnectionKey:     func(*http.Request, string) string { return "account:user" },
 	})

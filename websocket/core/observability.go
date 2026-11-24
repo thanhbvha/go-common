@@ -164,8 +164,34 @@ type Readiness struct {
 	AccountingValid   bool         `json:"accountingValid"`
 }
 
+// defaultAccountingGrace is how long the manager-level and shard-level
+// connection counters may disagree before readiness fails. They are updated at
+// different moments during connect/disconnect, so brief skew is normal.
+const defaultAccountingGrace = 5 * time.Second
+
+// accountingConsistent reports whether the counters agree, or have disagreed
+// for no longer than the grace period. It never takes the accounting mutex.
+func (m *Manager) accountingConsistent() bool {
+	m.shardMutex.RLock()
+	var shardConnections int64
+	for _, shard := range m.shards {
+		shardConnections += shard.GetConnectionCount()
+	}
+	m.shardMutex.RUnlock()
+	if atomic.LoadInt64(&m.totalConnections) == shardConnections {
+		m.accountingSkewSince.Store(0)
+		return true
+	}
+	now := time.Now().UnixNano()
+	since := m.accountingSkewSince.Load()
+	if since == 0 {
+		m.accountingSkewSince.CompareAndSwap(0, now)
+		since = now
+	}
+	return time.Duration(now-since) < m.accountingGrace
+}
+
 func (m *Manager) Readiness() Readiness {
-	stats := m.GetStats()
 	executorReady := m.eventExecutor.Stats().Accepting
 	brokerReady := m.subscriptionErrors.Load() == 0
 	if m.config.Distributed != nil {
@@ -177,7 +203,7 @@ func (m *Manager) Readiness() Readiness {
 			brokerReady = brokerReady && m.config.Distributed.Ready()
 		}
 	}
-	accountingValid := stats["totalConnections"] == stats["shardConnections"]
+	accountingValid := m.accountingConsistent()
 	state := m.State()
 	return Readiness{Ready: state == StateRunning && executorReady && brokerReady && accountingValid, State: state, ExecutorAccepting: executorReady, BrokerReady: brokerReady, AccountingValid: accountingValid}
 }

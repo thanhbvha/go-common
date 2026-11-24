@@ -14,7 +14,6 @@ import (
 
 	"errors"
 	"github.com/cespare/xxhash/v2"
-	"github.com/goccy/go-json"
 	"github.com/thanhbvha/go-common/v2/logger"
 	"github.com/thanhbvha/go-common/v2/websocket/pool"
 	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
@@ -46,6 +45,8 @@ type Manager struct {
 	executorOwned       bool
 	pubsubRegistrations []pubsub.HandlerRegistration
 	subscriptionErrors  atomic.Uint64
+	accountingSkewSince atomic.Int64
+	accountingGrace     time.Duration
 	state               atomic.Int32
 	shutdownOnce        sync.Once
 	shutdownCtx         context.Context
@@ -106,6 +107,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		handlerSupervisor: NewHandlerSupervisor(config.MaxHandlerGoroutines),
 		config:            config,
 		executorOwned:     executorOwned,
+		accountingGrace:   defaultAccountingGrace,
 		done:              make(chan struct{}),
 	}
 	if config.Distributed != nil {
@@ -156,21 +158,40 @@ func (m *Manager) GetConfig() ManagerConfig {
 
 // setupPubSubHandlers configures event callbacks for node configuration changes.
 func (m *Manager) setupPubSubHandlers() {
-	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeNotification, func(msg *pubsub.CrossNodeMessage) {
-		if shard, ok := m.GetShard(msg.ShardID); ok && msg.UserID != "" {
-			shard.SendToUser(msg.UserID, crossNodePayload(msg))
+	// Senders already deliver to their local clients; Redis/NATS drop self-published
+	// messages, but the standalone loopback does not, so skip them here.
+	remote := func(h func(*pubsub.CrossNodeMessage)) func(*pubsub.CrossNodeMessage) {
+		return func(msg *pubsub.CrossNodeMessage) {
+			if msg != nil && msg.NodeID == m.nodeID {
+				return
+			}
+			h(msg)
 		}
-	}))
-	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeChatRoom, func(msg *pubsub.CrossNodeMessage) {
-		if shard, ok := m.GetShard(msg.ShardID); ok && msg.RoomID != "" {
-			shard.SendToRoom(msg.RoomID, crossNodePayload(msg))
+	}
+	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeNotification, remote(func(msg *pubsub.CrossNodeMessage) {
+		payload := crossNodePayload(msg)
+		if shard, ok := m.GetShard(msg.ShardID); ok && msg.UserID != "" && payload != nil {
+			shard.SendToUser(msg.UserID, payload)
 		}
-	}))
-	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeBroadcast, func(msg *pubsub.CrossNodeMessage) {
-		if shard, ok := m.GetShard(msg.ShardID); ok {
-			shard.Broadcast(crossNodePayload(msg))
+	})))
+	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeChatRoom, remote(func(msg *pubsub.CrossNodeMessage) {
+		payload := crossNodePayload(msg)
+		if shard, ok := m.GetShard(msg.ShardID); ok && msg.RoomID != "" && payload != nil {
+			shard.SendToRoom(msg.RoomID, payload)
 		}
-	}))
+	})))
+	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeBroadcast, remote(func(msg *pubsub.CrossNodeMessage) {
+		payload := crossNodePayload(msg)
+		if shard, ok := m.GetShard(msg.ShardID); ok && payload != nil {
+			shard.Broadcast(payload)
+		}
+	})))
+	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeChat, remote(func(msg *pubsub.CrossNodeMessage) {
+		payload := crossNodePayload(msg)
+		if shard, ok := m.GetShard(msg.ShardID); ok && msg.UserID != "" && payload != nil {
+			shard.SendToUser(msg.UserID, payload)
+		}
+	})))
 	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeUserJoin, func(msg *pubsub.CrossNodeMessage) {
 		logger.InfoAsync("User joined on peer cluster node", "shardID", msg.ShardID, "nodeID", msg.NodeID)
 	}))
@@ -194,15 +215,8 @@ func crossNodePayload(msg *pubsub.CrossNodeMessage) []byte {
 	if msg == nil {
 		return nil
 	}
-	data, ok := msg.Data["message"]
-	if !ok {
-		return nil
-	}
-	if text, ok := data.(string); ok {
-		return []byte(text)
-	}
-	encoded, _ := json.Marshal(data)
-	return encoded
+	payload, _ := msg.Payload()
+	return payload
 }
 
 // sendNodeStatus publishes current node metrics to the clustered coordination system.
@@ -456,6 +470,26 @@ func (m *Manager) GetOrCreateShard(shardID string) *Shard {
 	return m.AddShard(shardID)
 }
 
+// acquireShard resolves a shard and marks an admission in flight so that
+// cleanupEmptyShards cannot retire it before the connection registers.
+// The caller must decrement shard.admitting.
+func (m *Manager) acquireShard(shardID string) *Shard {
+	for range 3 {
+		shard := m.GetOrCreateShard(shardID)
+		if shard == nil {
+			return nil
+		}
+		m.shardMutex.RLock()
+		if m.shards[shard.name] == shard {
+			shard.admitting.Add(1)
+			m.shardMutex.RUnlock()
+			return shard
+		}
+		m.shardMutex.RUnlock()
+	}
+	return nil
+}
+
 // BroadcastMessage transmits a message to a specific Shard locally and routing globally.
 func (m *Manager) BroadcastMessage(shardID string, message []byte) {
 	if shard, exists := m.GetShard(shardID); exists {
@@ -506,11 +540,12 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 		shardID = defaultShardName
 	}
 
-	shard := m.GetOrCreateShard(shardID)
+	shard := m.acquireShard(shardID)
 	if shard == nil {
 		_ = conn.Close()
 		return fmt.Errorf("manager stopped or shard capacity reached")
 	}
+	defer shard.admitting.Add(-1)
 
 	shardID = shard.name
 	connection := NewConnection(conn, shard, userID, shardID, clientIP, m.nodeID, requestID)
@@ -610,7 +645,7 @@ func (m *Manager) cleanupEmptyShards() {
 	var emptyShards []*Shard
 
 	for shardID, shard := range m.shards {
-		if shardID != defaultShardName && shard.GetConnectionCount() == 0 {
+		if shardID != defaultShardName && shard.GetConnectionCount() == 0 && shard.admitting.Load() == 0 {
 			emptyShards = append(emptyShards, shard)
 			delete(m.shards, shardID)
 		}
@@ -618,6 +653,7 @@ func (m *Manager) cleanupEmptyShards() {
 	m.shardMutex.Unlock()
 
 	for _, shard := range emptyShards {
+		_ = m.pubsubManager.Unsubscribe("shard:" + shard.name)
 		_ = shard.Shutdown(context.Background())
 		logger.InfoAsync("Cleaned up idle Shard", "shardID", shard.name)
 	}

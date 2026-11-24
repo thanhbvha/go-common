@@ -15,7 +15,6 @@ import (
 func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {
 	handler := NewHandler(Config{
 		Authenticate:      func(*fiberframework.Ctx) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: limiter.NewConnectionLimiter(1),
 	})
 	app := fiberframework.New()

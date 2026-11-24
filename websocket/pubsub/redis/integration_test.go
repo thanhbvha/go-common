@@ -46,9 +46,11 @@ func TestRedisIntegrationPublishSubscribe(t *testing.T) {
 	receiver := NewManagerWithClientAndPolicy(client, pubsub.StayUnready)
 	sender := NewManagerWithClientAndPolicy(client, pubsub.StayUnready)
 	t.Cleanup(func() { _ = receiver.Shutdown(); _ = sender.Shutdown() })
+	const shardID = "integration-shard"
 	done := make(chan struct{}, 1)
 	receiver.RegisterHandler(pubsub.MessageTypeNotification, func(message *pubsub.CrossNodeMessage) {
-		if message.UserID == "integration-user" {
+		payload, ok := message.Payload()
+		if message.UserID == "integration-user" && message.ShardID == shardID && ok && string(payload) == "hello" {
 			done <- struct{}{}
 		}
 	})
@@ -56,7 +58,10 @@ func TestRedisIntegrationPublishSubscribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if err := sender.Publish("integration:redis", &pubsub.CrossNodeMessage{Type: pubsub.MessageTypeNotification, UserID: "integration-user"}); err != nil {
+	if err := sender.Publish("integration:redis", &pubsub.CrossNodeMessage{
+		Type: pubsub.MessageTypeNotification, UserID: "integration-user", ShardID: shardID,
+		Data: map[string]interface{}{"message": "hello"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	select {

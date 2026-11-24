@@ -15,6 +15,7 @@ import (
 	"github.com/thanhbvha/go-common/v2/eventbus/transport"
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	bridge "github.com/thanhbvha/go-common/v2/websocket/integration/eventbus"
+	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 	"github.com/thanhbvha/go-common/v2/websocket/routing"
 	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
 	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
@@ -64,15 +65,22 @@ func newApplication(ctx context.Context, s settings) (a *application, result err
 		registryOptions = append(registryOptions, redisrouting.WithRoomNodeIndex())
 	}
 	registry := redisrouting.NewRegistry(a.redis, s.namespace, registryOptions...)
+	// AuthRequired: a rolling upgrade of a live cluster steps through
+	// AuthPassive and AuthOptional first (see pubsub.AuthMode).
+	authenticator, err := pubsub.NewAuthenticator("v2", map[string][]byte{"v2": s.brokerKey}, pubsub.AuthRequired)
+	if err != nil {
+		return a, errors.New("invalid WS_V2_BROKER_KEY")
+	}
+	signed := routing.WithMessageAuthenticator(authenticator)
 	switch s.delivery {
 	case "redis":
-		a.delivery = redisrouting.NewTransport(a.redis, s.namespace)
+		a.delivery = redisrouting.NewTransport(a.redis, s.namespace, signed)
 	case "nats":
 		a.nats, err = gonats.Connect(s.natsURL, gonats.Timeout(3*time.Second), gonats.Name("websocket-v2-example"))
 		if err != nil {
 			return a, errors.New("NATS startup check failed")
 		}
-		a.delivery = natsrouting.NewTransport(a.nats, s.namespace)
+		a.delivery = natsrouting.NewTransport(a.nats, s.namespace, signed)
 	}
 	a.gateway, err = routing.NewGateway(routing.GatewayConfig{Registry: registry, Transport: a.delivery, RegistryConcurrency: s.registryConcurrency, LeaseTTL: s.leaseTTL, RenewInterval: s.renewInterval, DedupeCapacity: s.dedupeCapacity, MaxPayloadBytes: 16 << 10})
 	if err != nil {
@@ -144,10 +152,9 @@ func newApplication(ctx context.Context, s settings) (a *application, result err
 	config.SlowConsumerDropThreshold = 2
 	config.DrainTimeout = s.drainTimeout
 	config.DisableLifecycleLogging = true
-	if err = config.ValidateProduction(); err != nil {
+	if a.manager, err = core.NewProductionManager(config); err != nil {
 		return a, err
 	}
-	a.manager = core.NewManagerWithConfig(config)
 	return a, nil
 }
 

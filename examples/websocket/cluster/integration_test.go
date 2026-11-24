@@ -37,6 +37,7 @@ func TestClusterExampleEndToEnd(t *testing.T) {
 		t.Skip("redis-server not installed")
 	}
 	t.Setenv("WS_EXAMPLE_CLIENT_TOKEN", "integration-token")
+	t.Setenv("WS_EXAMPLE_BROKER_KEY", "integration-broker-key-0123456789ab")
 	for _, tc := range []struct{ name, eventbus, delivery, legacy string }{
 		{name: "legacy-redis", legacy: "redis"}, {name: "legacy-nats", legacy: "nats"},
 		{name: "redis-nats", eventbus: "redis", delivery: "nats"}, {name: "nats-redis", eventbus: "nats", delivery: "redis"},

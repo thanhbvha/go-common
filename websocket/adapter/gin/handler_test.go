@@ -16,7 +16,6 @@ func TestDefaultOriginPolicyRejectsCrossOrigin(t *testing.T) {
 	ginframework.SetMode(ginframework.TestMode)
 	handler := NewHandler(Config{
 		Authenticate:      func(*ginframework.Context) (string, error) { return "user", nil },
-		RateLimiter:       limiter.NewRateLimiter(100, 100),
 		ConnectionLimiter: limiter.NewConnectionLimiter(1),
 	})
 	router := ginframework.New()

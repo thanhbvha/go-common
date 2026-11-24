@@ -106,23 +106,32 @@ type Manager interface {
 }
 
 var (
+	globalMu      sync.Mutex
 	globalManager Manager
-	managerOnce   sync.Once
 )
 
-// SetGlobalManager allows setting a custom PubSub manager (e.g., Redis or NATS) before starting the server.
+// SetGlobalManager replaces the process-wide pub/sub manager used by
+// core.NewManager. It is safe for concurrent use and takes effect for managers
+// created afterwards.
+//
+// Deprecated: process-global state couples unrelated services and tests. Pass
+// the manager explicitly through core.ManagerConfig.PubSub.
 func SetGlobalManager(m Manager) {
+	globalMu.Lock()
 	globalManager = m
+	globalMu.Unlock()
 }
 
-// GetGlobalManager returns the singleton instance of the pubsub manager.
-// If it hasn't been initialized via SetGlobalManager, it returns a NoopManager to allow single-node operation without external dependencies.
+// GetGlobalManager returns the process-wide pub/sub manager, creating a
+// NoopManager (single-node, no external dependencies) when none was set.
+//
+// Deprecated: pass the manager explicitly through core.ManagerConfig.PubSub.
 func GetGlobalManager() Manager {
-	managerOnce.Do(func() {
-		if globalManager == nil {
-			globalManager = NewNoopManager()
-		}
-	})
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if globalManager == nil {
+		globalManager = NewNoopManager()
+	}
 	return globalManager
 }
 

@@ -120,6 +120,9 @@ func (b *Bridge) PublishCommand(ctx context.Context, c routing.BusinessCommand) 
 	if c.MessageID == "" {
 		c.MessageID = routing.NewID()
 	}
+	if len(c.Payload) == 0 {
+		c.Payload = []byte("{}") // an event without data is valid
+	}
 	if c.Type == "" || c.UserID == "" || c.TenantID == "" || c.SessionID == "" || !json.Valid(c.Payload) {
 		return routing.ErrInvalid
 	}
@@ -169,7 +172,9 @@ func (b *Bridge) route(ctx context.Context, n Notification) error {
 	if err != nil {
 		return err
 	}
-	if res.Retryable() {
+	// Router already re-resolved Stale/NotFound sessions; those are gone, so retrying
+	// the whole message would only repeat deliveries that succeeded.
+	if res.Count(routing.QueueFull)+res.Count(routing.Unavailable)+res.Count(routing.Unknown) > 0 {
 		return fmt.Errorf("websocket delivery incomplete: %w", routing.ErrUnavailable)
 	}
 	return nil

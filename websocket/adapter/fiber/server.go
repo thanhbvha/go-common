@@ -86,14 +86,21 @@ func NewServer(port int, handler *Handler, customConfig ...fiber.Config) *Server
 	}
 }
 
-// SetupRoutes binds only the public upgrade and health routes. Operational
-// routes are intentionally left to the application so it can enforce its own
-// administrator authentication policy.
+// SetupRoutes binds the public upgrade route and the two probe routes.
+// Operational routes (stats, shard management) are intentionally left to the
+// application so it can enforce its own administrator authentication policy.
+//
+// /livez always answers 200 while the process runs. /readyz reports whether the
+// node should receive connections and exposes broker status, so on a public
+// listener prefer mounting it only on an internal one. /health is kept as an
+// alias of /readyz.
 func (s *Server) SetupRoutes() {
 	// WebSocket gateway upgrade endpoint
 	s.app.Get("/ws", s.handler.HandleUpgrade)
 
-	s.app.Get("/health", s.handler.HandleHealthCheck)
+	s.app.Get("/livez", s.handler.HandleLive)
+	s.app.Get("/readyz", s.handler.HandleReady)
+	s.app.Get("/health", s.handler.HandleReady)
 }
 
 // Start launches the Fiber listener loop on a separate goroutine and reports startup health.

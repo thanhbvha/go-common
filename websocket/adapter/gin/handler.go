@@ -8,9 +8,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/thanhbvha/go-common/v2/internal/httpkit"
 	"github.com/thanhbvha/go-common/v2/logger"
 	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
 	"github.com/thanhbvha/go-common/v2/utils/ctxkey"
+	"github.com/thanhbvha/go-common/v2/websocket/adapter/internal/wshttp"
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
 	"github.com/thanhbvha/go-common/v2/websocket/limiter"
@@ -27,12 +29,14 @@ type Config struct {
 	AuthenticateIdentity func(c *gin.Context) (core.Identity, error)
 	// Upgrader defines the websocket Upgrade configuration. If nil, standard Upgrader is used.
 	Upgrader *websocket.Upgrader
-	// RateLimiter specifies a custom RateLimiter. Falls back to global instance if nil.
-	RateLimiter *limiter.RateLimiter
+	// IPRateLimiter limits upgrade attempts per direct peer IP before the
+	// request is authenticated. The default allows wshttp.DefaultIPRate/Burst.
+	IPRateLimiter *limiter.KeyedRateLimiter
 	// ConnectionLimiter specifies a custom ConnectionLimiter. Falls back to global instance if nil.
 	ConnectionLimiter *limiter.ConnectionLimiter
 	// ConnectionKey resolves the key used for concurrent connection limits and
-	// connection metadata. It may return a trusted client IP or account key.
+	// connection metadata. The default is the direct network peer IP and never
+	// trusts forwarding headers; behind a trusted proxy, return a verified client IP.
 	ConnectionKey func(c *gin.Context, userID string) string
 }
 
@@ -40,6 +44,7 @@ type Config struct {
 type Handler struct {
 	config  Config
 	manager *core.Manager
+	gate    wshttp.Gate
 }
 
 // NewHandler instantiates a new Gin adapter Handler. It accepts optional variadic Config options,
@@ -61,26 +66,24 @@ func NewHandler(customConfig ...Config) *Handler {
 			WriteBufferSize: 1024,
 		}
 	}
-	if config.RateLimiter == nil {
-		config.RateLimiter = limiter.GetGlobalRateLimiter()
-	}
 	if config.ConnectionLimiter == nil {
 		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
 	}
 	if config.ConnectionKey == nil {
-		config.ConnectionKey = func(c *gin.Context, _ string) string { return c.ClientIP() }
+		config.ConnectionKey = func(c *gin.Context, _ string) string { return httpkit.ClientIP(c.Request) }
 	}
 
 	if config.Manager == nil {
 		config.Manager = core.GetGlobalManager()
 	}
-	return &Handler{config: config, manager: config.Manager}
+	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
 }
 
 // HandleUpgrade handles the Gin WebSocket connection upgrade process and registers session inside the core manager.
 func (h *Handler) HandleUpgrade(c *gin.Context) {
-	if !h.manager.IsAcceptingConnections() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "service draining"})
+	if denial := h.gate.Admit(httpkit.ClientIP(c.Request)); denial != nil {
+		c.Header("Retry-After", denial.RetryAfterHeader())
+		c.JSON(denial.Status, gin.H{"error": denial.Message})
 		return
 	}
 	if !websocket.IsWebSocketUpgrade(c.Request) {
@@ -104,13 +107,6 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
-
-	// Apply Rate Limiters
-	if !h.config.RateLimiter.Allow() {
-		logger.WarnAsync("Connection upgrade rejected due to rate limiting", "clientIP", clientIP, "userID", userID)
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
-		return
-	}
 
 	if !h.config.ConnectionLimiter.CanConnect(clientIP) {
 		logger.WarnAsync("Connection upgrade rejected due to key connection limit", "clientIP", clientIP, "userID", userID)
@@ -190,12 +186,26 @@ func (h *Handler) HandleShardManagement(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "shard not found"})
 }
 
-// HandleHealthCheck reports overall health status of the connection Manager and cluster node configuration.
+// HandleLive is the liveness probe: 200 whenever the process can answer. It
+// never consults the manager or a broker, so a broker outage or a draining node
+// does not get a healthy process restarted. Mount it at /livez.
+func (h *Handler) HandleLive(c *gin.Context) {
+	status, body := wshttp.LiveStatus()
+	c.JSON(status, body)
+}
+
+// HandleReady is the readiness probe: 200 only while this node should receive
+// new connections, otherwise 503. Mount it at /readyz. It reveals internal state
+// (broker and executor status), so serve it on an internal listener.
+func (h *Handler) HandleReady(c *gin.Context) {
+	status, body := wshttp.ReadyStatus(h.manager.Readiness())
+	c.JSON(status, body)
+}
+
+// HandleHealthCheck is HandleReady.
+//
+// Deprecated: a single health endpoint conflates liveness with readiness. Use
+// HandleLive for the liveness probe and HandleReady for readiness.
 func (h *Handler) HandleHealthCheck(c *gin.Context) {
-	readiness := h.manager.Readiness()
-	status := http.StatusOK
-	if !readiness.Ready {
-		status = http.StatusServiceUnavailable
-	}
-	c.JSON(status, gin.H{"status": map[bool]string{true: "ready", false: "not_ready"}[readiness.Ready], "checks": readiness})
+	h.HandleReady(c)
 }

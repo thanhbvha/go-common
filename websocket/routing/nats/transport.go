@@ -11,8 +11,8 @@ import (
 
 type wire struct{ client *gonats.Conn }
 
-func NewTransport(client *gonats.Conn, prefix string) *routing.RPCTransport {
-	return routing.NewRPCTransport(&wire{client}, prefix)
+func NewTransport(client *gonats.Conn, prefix string, options ...routing.RPCOption) *routing.RPCTransport {
+	return routing.NewRPCTransport(&wire{client}, prefix, options...)
 }
 func (w *wire) Ready() bool { return w.client != nil && w.client.IsConnected() }
 func (w *wire) Publish(ctx context.Context, subject string, b []byte) error {

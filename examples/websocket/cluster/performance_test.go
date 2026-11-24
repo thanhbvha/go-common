@@ -24,6 +24,7 @@ func TestPerformanceWebSocket(t *testing.T) {
 		t.Fatal("dedicated Redis required")
 	}
 	t.Setenv("WS_EXAMPLE_CLIENT_TOKEN", "performance-token")
+	t.Setenv("WS_EXAMPLE_BROKER_KEY", "performance-broker-key-0123456789ab")
 	address := freeAddress(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

@@ -184,8 +184,17 @@ func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, a
 	limits.ApplyManagerLimits(&config)
 	app.limits = limits
 
-	if err := config.ValidateProduction(); err != nil {
-		return nil, err
+	if broker == "standalone" {
+		if err := config.ValidateProduction(); err != nil {
+			return nil, err
+		}
+	} else {
+		// Legacy Shard/pub-sub fan-out is best-effort and single-node/dev only;
+		// production clusters use Distributed (see examples/websocket/cluster).
+		if err := config.Validate(); err != nil {
+			return nil, err
+		}
+		logger.WarnAsync("legacy broker fan-out is for development only; use routing.Gateway for clusters", "broker", broker)
 	}
 	app.manager = core.NewManagerWithConfig(config)
 	if readiness, ok := bus.(pubsub.WaitReadyProvider); ok {
@@ -291,6 +300,9 @@ func registerHandlers(registry *core.EventRegistry) {
 		if err != nil {
 			return err
 		}
+		// Development only: legacy rooms are scoped to one shard and users are
+		// spread across shards by hash(user_id), so this does not reach every
+		// member. Clusters deliver with routing.Router.SendToRoom (see ./v2).
 		conn.GetShard().SendToRoom(payload.RoomID, outgoing)
 		conn.GetShard().BroadcastRoomMessage(payload.RoomID, outgoing)
 		return nil
@@ -443,18 +455,18 @@ func (a *application) adminAuthorized(authorization string) bool {
 	return validBearerToken(authorization, a.adminToken)
 }
 
-func (a *application) adapterLimiters() (*limiter.RateLimiter, *limiter.ConnectionLimiter) {
+func (a *application) adapterLimiters() (*limiter.KeyedRateLimiter, *limiter.ConnectionLimiter) {
 	limits := a.limits
 	if limits.MaxConnectionsPerIP == 0 {
 		limits = exampleconfig.Default()
 	}
-	return limiter.NewRateLimiter(limits.UpgradeRate, limits.UpgradeBurst), limiter.NewConnectionLimiter(limits.MaxConnectionsPerIP)
+	return limiter.NewKeyedRateLimiter(limits.UpgradeRate, limits.UpgradeBurst, 0, 0), limiter.NewConnectionLimiter(limits.MaxConnectionsPerIP)
 }
 
 func (a *application) runNetHTTP(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsNetHTTP.NewHandler(wsNetHTTP.Config{
-		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
 		AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
 			query := r.URL.Query()
 			return a.authenticate(query.Get("user_id"), query.Get("tenant_id"), query.Get("account_id"), query.Get("session_id"), r.Header.Get("Authorization"))
@@ -463,7 +475,9 @@ func (a *application) runNetHTTP(address string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handler.HandleUpgrade)
-	mux.HandleFunc("/health", handler.HandleHealthCheck)
+	mux.HandleFunc("/livez", handler.HandleLive)
+	mux.HandleFunc("/readyz", handler.HandleReady)
+	mux.HandleFunc("/health", handler.HandleReady) // Kept for existing probes and scripts.
 	mux.HandleFunc("/admin/stats", a.netHTTPAdmin(handler.HandleStats))
 	mux.HandleFunc("/admin/shard", a.netHTTPAdmin(handler.HandleShardManagement))
 	server := &http.Server{Addr: address, Handler: nethttpmw.Recover(mux), ReadHeaderTimeout: 5 * time.Second}
@@ -483,7 +497,7 @@ func (a *application) netHTTPAdmin(next http.HandlerFunc) http.HandlerFunc {
 func (a *application) runGin(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsGin.NewHandler(wsGin.Config{
-		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
 		AuthenticateIdentity: func(c *gin.Context) (core.Identity, error) {
 			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.GetHeader("Authorization"))
 		},
@@ -492,7 +506,9 @@ func (a *application) runGin(address string) error {
 	router := gin.New()
 	router.Use(ginmw.Recover())
 	router.GET("/ws", handler.HandleUpgrade)
-	router.GET("/health", handler.HandleHealthCheck)
+	router.GET("/livez", handler.HandleLive)
+	router.GET("/readyz", handler.HandleReady)
+	router.GET("/health", handler.HandleReady) // Kept for existing probes and scripts.
 	admin := router.Group("/admin", func(c *gin.Context) {
 		if !a.adminAuthorized(c.GetHeader("Authorization")) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -506,7 +522,7 @@ func (a *application) runGin(address string) error {
 func (a *application) runEcho(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsEcho.NewHandler(wsEcho.Config{
-		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
 		AuthenticateIdentity: func(c echo.Context) (core.Identity, error) {
 			return a.authenticate(c.QueryParam("user_id"), c.QueryParam("tenant_id"), c.QueryParam("account_id"), c.QueryParam("session_id"), c.Request().Header.Get("Authorization"))
 		},
@@ -515,7 +531,9 @@ func (a *application) runEcho(address string) error {
 	e.HideBanner, e.HidePort = true, true
 	e.Use(echomw.Recover())
 	e.GET("/ws", handler.HandleUpgrade)
-	e.GET("/health", handler.HandleHealthCheck)
+	e.GET("/livez", handler.HandleLive)
+	e.GET("/readyz", handler.HandleReady)
+	e.GET("/health", handler.HandleReady) // Kept for existing probes and scripts.
 	admin := e.Group("/admin", func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			if !a.adminAuthorized(c.Request().Header.Get("Authorization")) {
@@ -534,7 +552,7 @@ func (a *application) runEcho(address string) error {
 func (a *application) runFiber(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsFiber.NewHandler(wsFiber.Config{
-		Manager: a.manager, RateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
 		AuthenticateIdentity: func(c *fiber.Ctx) (core.Identity, error) {
 			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.Get("Authorization"))
 		},
@@ -542,7 +560,9 @@ func (a *application) runFiber(address string) error {
 	app := fiber.New(fiber.Config{ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second})
 	app.Use(fibermw.Recover())
 	app.Get("/ws", handler.HandleUpgrade)
-	app.Get("/health", handler.HandleHealthCheck)
+	app.Get("/livez", handler.HandleLive)
+	app.Get("/readyz", handler.HandleReady)
+	app.Get("/health", handler.HandleReady) // Kept for existing probes and scripts.
 	admin := app.Group("/admin", func(c *fiber.Ctx) error {
 		if !a.adminAuthorized(c.Get("Authorization")) {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})

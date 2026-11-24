@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoopbackHandlerContinuesAfterPanic(t *testing.T) {
-	manager := NewManagerWithClient(nil)
+	manager := NewManagerWithClientAndPolicy(nil, pubsub.AllowStandalone)
 	t.Cleanup(func() { _ = manager.Shutdown() })
 
 	var calls atomic.Int32
