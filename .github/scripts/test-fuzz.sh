@@ -13,4 +13,7 @@ done <<'CASES'
 ./websocket/core FuzzIncomingEnvelope
 ./websocket/core FuzzConnectionLifecycle
 ./websocket/pubsub FuzzCrossNodeMessageDecode
+./websocket/pubsub/redis FuzzProcessMessage
+./websocket/pubsub/nats FuzzProcessMessage
+./websocket/routing FuzzRPCReceive
 CASES

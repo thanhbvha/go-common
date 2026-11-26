@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"os/signal"
 	"sort"
 	"strings"
@@ -348,7 +349,11 @@ func serve(ctx context.Context, gateway *routing.Gateway, publisher routing.Comm
 	mux.Handle("/admin/stats", statsHandler(os.Getenv("WS_EXAMPLE_ADMIN_TOKEN"), func() any {
 		stats := manager.GetStats()
 		delete(stats, "shardStats")
-		return map[string]any{"manager": stats, "gateway": gateway.Stats(), "router": router.Stats()}
+		runtime.GC() // measure live heap, not allocation between GC cycles; admin-only, soak diagnostics
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		return map[string]any{"manager": stats, "gateway": gateway.Stats(), "router": router.Stats(),
+			"process": map[string]any{"goroutines": runtime.NumGoroutine(), "heapAllocBytes": mem.HeapAlloc, "sysBytes": mem.Sys}}
 	}))
 	server := &http.Server{Addr: o.addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	done := make(chan error, 1)

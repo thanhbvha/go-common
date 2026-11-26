@@ -1,0 +1,9 @@
+# Gateway limits for the soak fixture. Every client arrives through the proxy,
+# so per-IP limits are sized for one peer. No capacity guarantee.
+upgrade_rate: 5000
+upgrade_burst: 20000
+max_connections_per_ip: 30000
+max_connections: 20000
+max_connections_per_user: 5
+max_connections_per_account: 100000
+max_connections_per_tenant: 100000

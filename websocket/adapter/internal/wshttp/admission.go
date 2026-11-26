@@ -1,6 +1,7 @@
 package wshttp
 
 import (
+	"errors"
 	"strconv"
 	"time"
 
@@ -73,6 +74,10 @@ func (g Gate) AdmitIdentity(identity core.Identity) *Denial {
 	err := g.Manager.CheckAdmission(identity, g.Manager.GetShardID(identity.UserID))
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, core.ErrIdentityExpired) {
+		// The credential is the problem, not capacity: retrying will not help.
+		return &Denial{Status: 401, Message: "unauthorized", RetryAfter: 0}
 	}
 	return &Denial{Status: 503, Message: err.Error(), RetryAfter: 5 * time.Second}
 }

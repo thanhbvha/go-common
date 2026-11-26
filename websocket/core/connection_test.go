@@ -133,6 +133,13 @@ func (c *lifecycleCoordinator) GetEventExecutor() *pool.PartitionedExecutor {
 }
 func (c *lifecycleCoordinator) DecrTotalConnections() { c.decrements.Add(1) }
 
+// stopExecutor releases the executor a test coordinator created lazily.
+func (c *lifecycleCoordinator) stopExecutor() {
+	if c.executor != nil {
+		_ = c.executor.Shutdown(context.Background())
+	}
+}
+
 func newRunningTestConnection(t *testing.T, transport *mockConn) (*Connection, *Shard, *lifecycleCoordinator) {
 	t.Helper()
 	coordinator := &lifecycleCoordinator{executor: pool.NewPartitionedExecutor(2, 32)}

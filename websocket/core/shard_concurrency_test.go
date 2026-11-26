@@ -127,6 +127,7 @@ func TestShardUnregisterOnlyTouchesJoinedRooms(t *testing.T) {
 
 func TestShardJoinRoomRejectsInactiveConnection(t *testing.T) {
 	coordinator := &lifecycleCoordinator{}
+	t.Cleanup(coordinator.stopExecutor)
 	shard := NewShard("test-shard", coordinator)
 	connection := NewConnection(newMockConn(), shard, "user-1", shard.name, "127.0.0.1", "node-1", "request-1")
 	if err := shard.JoinRoom(context.Background(), "room-1", connection); err != ErrConnectionInactive {

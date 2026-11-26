@@ -1,0 +1,60 @@
+# Linux/TLS soak fixture for the WebSocket cluster example. Local use only:
+# fixed throwaway credentials, ports bound to loopback, certificates generated
+# per run by run.py. Not a production deployment.
+x-app: &app
+  image: alpine:3
+  volumes:
+    - ./.work/bin:/opt:ro
+    - ./soak.yaml:/etc/soak.yaml:ro
+  environment: &env
+    WS_EXAMPLE_CLIENT_TOKEN: soak-client-token
+    WS_EXAMPLE_ADMIN_TOKEN: soak-admin-token-0123456789abcdef
+    WS_EXAMPLE_BROKER_KEY: soak-broker-key-0123456789abcdef-0123
+  ulimits: { nofile: { soft: 65536, hard: 65536 } }
+  depends_on:
+    redis: { condition: service_healthy }
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, "yes", --appendfsync, everysec, --maxclients, "20000"]
+    ports: ["127.0.0.1:26379:6379"]
+    healthcheck: { test: [CMD, redis-cli, ping], interval: 1s, timeout: 1s, retries: 30 }
+
+  worker:
+    <<: *app
+    command: [/opt/cluster, -role, worker, -broker, redis, -namespace, soak, -redis, "redis:6379"]
+  router:
+    <<: *app
+    command: [/opt/cluster, -role, router, -broker, redis, -namespace, soak, -redis, "redis:6379"]
+  gw1:
+    <<: *app
+    command: [/opt/cluster, -role, gateway, -broker, redis, -namespace, soak, -redis, "redis:6379", -addr, ":8080", -config, /etc/soak.yaml]
+    ports: ["127.0.0.1:18081:8080"]
+  gw2:
+    <<: *app
+    command: [/opt/cluster, -role, gateway, -broker, redis, -namespace, soak, -redis, "redis:6379", -addr, ":8080", -config, /etc/soak.yaml]
+    ports: ["127.0.0.1:18082:8080"]
+
+  # TLS terminates here, as behind a production load balancer.
+  proxy:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./.work/certs:/certs:ro
+    ports: ["127.0.0.1:18443:8443"]
+    ulimits: { nofile: { soft: 131072, hard: 131072 } }
+    depends_on: [gw1, gw2]
+
+  loadgen:
+    <<: *app
+    profiles: [load]
+    environment:
+      <<: *env
+      SSL_CERT_FILE: /certs/cert.pem
+    volumes:
+      - ./.work/bin:/opt:ro
+      - ./.work/certs:/certs:ro
+      - ./.work/out:/out
+      - ./soak.yaml:/etc/soak.yaml:ro
+    depends_on: [proxy]

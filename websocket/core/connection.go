@@ -211,6 +211,7 @@ func (c *Connection) requestClose(code int, reason string) {
 			defer timer.Stop()
 			select {
 			case <-c.writerDone:
+			case <-c.closedDone: // closed by another path; do not linger for WriteWait
 			case <-timer.C:
 			}
 			c.Close(reason)

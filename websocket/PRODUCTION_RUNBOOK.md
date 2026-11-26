@@ -14,7 +14,7 @@ Numbers below marked *(estimate)* are reasoning from the code, not measurements;
 | Item | Guidance |
 |---|---|
 | File descriptors | One per connection plus broker/DB sockets. Set `ulimit -n` (or systemd `LimitNOFILE`) to at least 4x the connection target; 65536 for a 5k node. |
-| Memory *(estimate)* | About 15–20 KB per idle connection (4 goroutines, 256-slot send queue, two rate limiters). Plan 32 KB/conn and replace with the soak figure. |
+| Memory | Measured about 17.5 KB heap and 4.4 goroutines per idle connection (10,000 connections, TLS proxy). Plan 32 KB/conn for traffic and queues. |
 | Goroutines | About 4 per connection. Alert on growth without a matching connection count. |
 | Message limits | Chat: `MaxMessageBytes` 4096, `MessagesPerSecond` 10, `MessageBurst` 20. Defaults are 1 KB and 100/s; tune deliberately. |
 | Handler capacity | `MaxHandlerGoroutines` defaults to `NumCPU*4`, shared by the node. Handlers must honour their `ctx`: a handler that ignores it keeps its permit and is counted as quarantined. |
@@ -91,4 +91,4 @@ The Fiber `Server.Start` returns only after the port is bound, so a supervisor c
 | Every event gets `ErrHandlerCapacity` | blocked handlers hold permits | `handlers.quarantined`, handler timeouts |
 | Stats endpoint 401 | `AdminToken` not set (closed by default) | adapter `Config` |
 
-Known limits: not yet soak-tested on Linux/TLS; `MaxViolations`/`SlowConsumerDropThreshold` values are untuned; broker outage message loss is unmeasured.
+Measured on Linux/TLS (see [benchmarks/soak-20261126.md](benchmarks/soak-20261126.md)): about 17.5 KB heap and 4.4 goroutines per idle connection; 30 min soak with no loss, flat goroutines and no readiness flaps; Redis down 30 s and 5 min recovered in 1.6 s and 10.8 s without restarts or dropped sockets. Known limits: fan-out p99 was 277–587 ms on one shared host (target 150 ms); message loss during an outage, node kill -9, NATS outage and 24 h soak are unmeasured; `MaxViolations`/`SlowConsumerDropThreshold` are untuned. Replace the memory estimate in section 2 with these figures.

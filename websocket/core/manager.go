@@ -304,6 +304,9 @@ func (m *Manager) CheckAdmission(identity Identity, shardID string) error {
 	if !m.IsAcceptingConnections() {
 		return ErrAdmissionDraining
 	}
+	if !identity.ExpiresAt.IsZero() && !time.Now().Before(identity.ExpiresAt) {
+		return ErrIdentityExpired
+	}
 	m.accountingMutex.Lock()
 	_, ok := m.quotaKeysLocked(identity)
 	m.accountingMutex.Unlock()
@@ -525,6 +528,10 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	userID := identity.UserID
 	if conn == nil {
 		return fmt.Errorf("connection is nil")
+	}
+	if !identity.ExpiresAt.IsZero() && !time.Now().Before(identity.ExpiresAt) {
+		m.closeRaw(conn, websocket.ClosePolicyViolation, "Authentication expired")
+		return ErrIdentityExpired
 	}
 	reservation := m.reserveIdentityConnection(identity)
 	if reservation == nil {

@@ -78,7 +78,12 @@ Theo thứ tự ưu tiên đề xuất:
 > - **O4:** `fiber.Server.Start()` bind cổng đồng bộ (`net.Listen`) rồi mới trả nil, thay cho `time.After(500ms)`; CORS không còn bật mặc định (`MiddlewareManager.AllowOrigins`, rỗng = không có CORS). Điều phối thứ tự với `Manager.Shutdown` chỉ ghi trong runbook (dùng `foundation/adapter/fiber.Component`), **chưa có helper mới**.
 > - **O6:** `websocket/PRODUCTION_RUNBOOK.md` (sizing, LB/proxy, endpoint, alert, rollout/drain, ma trận durability, troubleshooting); các con số bộ nhớ là ước lượng.
 > - Test mới: `metrics/otel_test.go`, `wshttp.TestAdminAllowed`, `TestAdminEndpointsRequireToken` (4 adapter), `TestReadyBodyDoesNotExposeTopology`, `fiber.TestStartReportsBusyPortAndServesWhenBound`. `go vet` và `go test -race -count=1 ./websocket/... ./examples/websocket/...` xanh.
-8. **Sau đó sang Phase 4** (soak 1k–5k, chaos broker, goleak).
+8. 🟡 **Phase 4 (2026-11-26), một phần, chờ review.** Kết quả đầy đủ: `websocket/benchmarks/soak-20261126.md`.
+> - **goleak** ở `core`, `pubsub`, `routing`. Tìm ra rò thật: `requestClose` trên connection chưa chạy pump chờ `WriteWait` một writer không bao giờ có (nay thoát khi `closedDone`); 6 test không dọn executor/connection đã sửa.
+> - **Fuzz mới:** `routing.FuzzRPCReceive`, `FuzzProcessMessage` (Redis, NATS), đã nối vào `test-fuzz.sh`; mỗi cái 30 s, 2–3 triệu lần, không panic. `crossNodePayload` chỉ bọc `Payload()` đã được fuzz `DecodeCrossNodeMessage` phủ.
+> - **Bảo mật:** test e2e token hết hạn khi đang kết nối (đóng 1008), identity hết hạn lúc upgrade, quota per-user dưới upgrade đồng thời. **Sửa lỗi thật:** identity đã hết hạn trước đây vẫn được đăng ký; nay `CheckAdmission` trả `ErrIdentityExpired` (401 trước Upgrade) và `HandleIdentityConnection` đóng 1008.
+> - **Linux/TLS (Docker, 2 gateway + nginx TLS + Redis):** 10.000 kết nối idle, 0 lỗi, ~17,5 KB/conn; soak 30 phút 9.000.000/9.000.000 tin, goroutine phẳng, 0 readiness chập chờn; Redis dừng 30 s và 5 phút: không rớt socket, hết outage ready lại sau 1,6 s và 10,8 s, không restart node. Harness: `examples/websocket/soak/run.py`.
+> - **Chưa đạt/chưa làm:** p99 fan-out 277–587 ms so với mục tiêu 150 ms (chưa tách nguyên nhân, máy dùng chung); chưa đo số tin mất trong lúc broker chết; chưa kill -9 node, reconnect storm 100%, NATS outage, soak 24 h, 5.000 kết nối có tải. Vì vậy **chưa nâng `docs/PRODUCTION.md` lên Production**.
 
 **Rủi ro mở:** ngưỡng `MaxViolations=20` và `SlowConsumerDropThreshold=3` là số chọn theo suy luận, chưa đo với client thật; cần chỉnh sau soak.
 

@@ -120,6 +120,7 @@ func TestShardAtCapacityRejectsWithTryAgainLater(t *testing.T) {
 func TestViolationSendsRateLimitedErrorEnvelope(t *testing.T) {
 	transport := newMockConn()
 	connection, _, _ := newRunningTestConnection(t, transport)
+	t.Cleanup(func() { connection.Close("test complete"); waitConnection(t, connection) })
 	bad := &EventMessage{Conn: connection, Raw: []byte("not json"), queuedAt: time.Now()}
 	for range 5 {
 		HandleEvent(bad)

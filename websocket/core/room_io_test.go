@@ -55,6 +55,7 @@ func TestRoomRegistryIODoesNotHoldShardLock(t *testing.T) {
 				}
 				defer gateway.Close(context.Background())
 				coordinator := &lifecycleCoordinator{}
+				defer coordinator.stopExecutor()
 				shard := NewShard("room-io", coordinator)
 				shard.config.Distributed = gateway
 				conn := NewConnection(newMockConn(), shard, "u", "room-io", "", "", "")
@@ -114,7 +115,9 @@ func TestUnregisterDuringRoomJoinCannotRestoreMembership(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer gateway.Close(context.Background())
-	shard := NewShard("unregister-join", &lifecycleCoordinator{})
+	coordinator := &lifecycleCoordinator{}
+	defer coordinator.stopExecutor()
+	shard := NewShard("unregister-join", coordinator)
 	shard.config.Distributed = gateway
 	conn := NewConnection(newMockConn(), shard, "u", shard.name, "", "", "")
 	conn.setIdentity(Identity{TenantID: "t", UserID: "u", SessionID: "s"})

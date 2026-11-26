@@ -11,6 +11,8 @@ var (
 	ErrPayloadTooLarge = errors.New("websocket event payload too large")
 	ErrInvalidPayload  = errors.New("websocket event payload invalid")
 	ErrRoomLimit       = errors.New("websocket room limit reached")
+	// ErrIdentityExpired means the identity's ExpiresAt has already passed.
+	ErrIdentityExpired = errors.New("websocket identity expired")
 )
 
 // Identity is the authenticated principal attached to a physical connection.

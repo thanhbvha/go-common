@@ -72,7 +72,8 @@ func TestHandlerScopeReleasedWhenSharedCapacityRejects(t *testing.T) {
 }
 
 func TestConnectionsGetIndependentHandlerScopes(t *testing.T) {
-	_, shard, _ := newRunningTestConnection(t, newMockConn())
+	running, shard, _ := newRunningTestConnection(t, newMockConn())
+	t.Cleanup(func() { running.Close("test complete"); waitConnection(t, running) })
 	a := NewConnection(newMockConn(), shard, "a", "s", "", "", "")
 	b := NewConnection(newMockConn(), shard, "b", "s", "", "", "")
 	if a.handlerScope == nil || a.handlerScope == b.handlerScope {
