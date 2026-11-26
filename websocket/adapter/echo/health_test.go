@@ -35,3 +35,30 @@ func TestProbesSeparateLivenessFromReadiness(t *testing.T) {
 		t.Fatalf("a stopped node must not be ready, got %d", ready)
 	}
 }
+
+func TestAdminEndpointsRequireToken(t *testing.T) {
+	manager := core.NewManagerWithConfig(core.DefaultManagerConfig())
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	do := func(token, header, path string) int {
+		h := NewHandler(Config{Manager: manager, AdminToken: token})
+		engine := echoframework.New()
+		engine.GET("/stats", h.HandleStats)
+		engine.GET("/shard", h.HandleShardManagement)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", header)
+		engine.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, path := range []string{"/stats", "/shard?shard=x"} {
+		if got := do("", "Bearer ", path); got != http.StatusUnauthorized {
+			t.Fatalf("%s no token configured: %d", path, got)
+		}
+		if got := do("s3cret", "Bearer wrong", path); got != http.StatusUnauthorized {
+			t.Fatalf("%s wrong token: %d", path, got)
+		}
+	}
+	if got := do("s3cret", "Bearer s3cret", "/stats"); got != http.StatusOK {
+		t.Fatalf("valid token: %d", got)
+	}
+}

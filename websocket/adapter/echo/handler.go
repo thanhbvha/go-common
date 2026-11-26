@@ -29,6 +29,10 @@ type Config struct {
 	AuthenticateIdentity func(c echo.Context) (core.Identity, error)
 	// Upgrader defines the websocket Upgrade configuration. If nil, standard Upgrader is used.
 	Upgrader *websocket.Upgrader
+	// AdminToken guards HandleStats and HandleShardManagement with
+	// "Authorization: Bearer <token>". Empty means those endpoints always answer
+	// 401, so they are closed until the application opts in.
+	AdminToken string
 	// IPRateLimiter limits upgrade attempts per direct peer IP before the
 	// request is authenticated. The default allows wshttp.DefaultIPRate/Burst.
 	IPRateLimiter *limiter.KeyedRateLimiter
@@ -161,6 +165,9 @@ func getRequestID(c echo.Context) string {
 
 // HandleStats returns JSON-formatted metrics of the Manager, PubSub, and limiters.
 func (h *Handler) HandleStats(c echo.Context) error {
+	if !h.adminAllowed(c) {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
@@ -171,6 +178,9 @@ func (h *Handler) HandleStats(c echo.Context) error {
 
 // HandleShardManagement retrieves statistics or checks status of a specific Shard.
 func (h *Handler) HandleShardManagement(c echo.Context) error {
+	if !h.adminAllowed(c) {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
 	shardID := c.QueryParam("shard")
 	if shardID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "shard ID required"})
@@ -185,6 +195,10 @@ func (h *Handler) HandleShardManagement(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusNotFound, map[string]string{"error": "shard not found"})
+}
+
+func (h *Handler) adminAllowed(c echo.Context) bool {
+	return wshttp.AdminAllowed(c.Request().Header.Get("Authorization"), h.config.AdminToken)
 }
 
 // HandleLive is the liveness probe: 200 whenever the process can answer. It

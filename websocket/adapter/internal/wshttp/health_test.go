@@ -45,3 +45,22 @@ func TestStoppedManagerIsNotReadyButStillLive(t *testing.T) {
 		t.Fatalf("live = %d, ready = %d; want 200 and 503", live, ready)
 	}
 }
+
+func TestAdminAllowed(t *testing.T) {
+	cases := []struct {
+		header, token string
+		want          bool
+	}{
+		{"Bearer s3cret", "s3cret", true},
+		{"Bearer wrong", "s3cret", false},
+		{"s3cret", "s3cret", false},
+		{"", "s3cret", false},
+		{"Bearer ", "", false}, // no token configured: closed
+		{"", "", false},
+	}
+	for _, c := range cases {
+		if got := AdminAllowed(c.header, c.token); got != c.want {
+			t.Errorf("AdminAllowed(%q, %q) = %v, want %v", c.header, c.token, got, c.want)
+		}
+	}
+}

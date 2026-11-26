@@ -440,7 +440,9 @@ an injected executor/driver that ignores cancellation.
 Manager.Readiness checks lifecycle, executor, broker and accounting. GetStats
 exposes connections, event/executor/supervisor counters, inbound/outbound outcomes
 and event/queue latency buckets. Protect stats and management endpoints with
-application admin authorization; adapters do not supply that authorization.
+application admin authorization; adapters guard `HandleStats` and `HandleShardManagement` with `Config.AdminToken` (closed by default). `/readyz` returns only the verdict.
+
+`websocket/metrics.Register` exports OpenTelemetry metrics; see [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) for sizing, proxy settings, alerts and rollout order.
 
 AtomicObserver implements optional DrainObserver and exposes connectionsDrained,
 drainForced and drainDiscarded (messages unwritten at cutoff). Gateway reports

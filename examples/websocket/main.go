@@ -466,7 +466,7 @@ func (a *application) adapterLimiters() (*limiter.KeyedRateLimiter, *limiter.Con
 func (a *application) runNetHTTP(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsNetHTTP.NewHandler(wsNetHTTP.Config{
-		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter, AdminToken: a.adminToken,
 		AuthenticateIdentity: func(r *http.Request) (core.Identity, error) {
 			query := r.URL.Query()
 			return a.authenticate(query.Get("user_id"), query.Get("tenant_id"), query.Get("account_id"), query.Get("session_id"), r.Header.Get("Authorization"))
@@ -497,7 +497,7 @@ func (a *application) netHTTPAdmin(next http.HandlerFunc) http.HandlerFunc {
 func (a *application) runGin(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsGin.NewHandler(wsGin.Config{
-		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter, AdminToken: a.adminToken,
 		AuthenticateIdentity: func(c *gin.Context) (core.Identity, error) {
 			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.GetHeader("Authorization"))
 		},
@@ -522,7 +522,7 @@ func (a *application) runGin(address string) error {
 func (a *application) runEcho(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsEcho.NewHandler(wsEcho.Config{
-		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter, AdminToken: a.adminToken,
 		AuthenticateIdentity: func(c echo.Context) (core.Identity, error) {
 			return a.authenticate(c.QueryParam("user_id"), c.QueryParam("tenant_id"), c.QueryParam("account_id"), c.QueryParam("session_id"), c.Request().Header.Get("Authorization"))
 		},
@@ -552,7 +552,7 @@ func (a *application) runEcho(address string) error {
 func (a *application) runFiber(address string) error {
 	rateLimiter, connectionLimiter := a.adapterLimiters()
 	handler := wsFiber.NewHandler(wsFiber.Config{
-		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter,
+		Manager: a.manager, IPRateLimiter: rateLimiter, ConnectionLimiter: connectionLimiter, AdminToken: a.adminToken,
 		AuthenticateIdentity: func(c *fiber.Ctx) (core.Identity, error) {
 			return a.authenticate(c.Query("user_id"), c.Query("tenant_id"), c.Query("account_id"), c.Query("session_id"), c.Get("Authorization"))
 		},

@@ -7,6 +7,7 @@ package fiber
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -103,24 +104,22 @@ func (s *Server) SetupRoutes() {
 	s.app.Get("/health", s.handler.HandleReady)
 }
 
-// Start launches the Fiber listener loop on a separate goroutine and reports startup health.
+// Start binds the port synchronously, so a busy or forbidden port is returned
+// as an error instead of being guessed from a timer, then serves on a goroutine.
+// Once it returns nil the listener accepts connections.
 func (s *Server) Start() error {
 	logger.InfoAsync("Starting Fiber WebSocket server...", "port", s.port)
-
-	errChan := make(chan error, 1)
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(s.port))
+	if err != nil {
+		return fmt.Errorf("fiber app failed to start: %w", err)
+	}
 	go func() {
-		if err := s.app.Listen(":" + strconv.Itoa(s.port)); err != nil {
-			errChan <- fmt.Errorf("fiber app failed to start: %w", err)
+		if err := s.app.Listener(listener); err != nil {
+			logger.ErrorAsync("Fiber WebSocket server stopped unexpectedly", "error", err)
 		}
 	}()
-
-	select {
-	case err := <-errChan:
-		return err
-	case <-time.After(500 * time.Millisecond):
-		logger.InfoAsync("WebSocket Fiber server started successfully", "port", s.port)
-		return nil
-	}
+	logger.InfoAsync("WebSocket Fiber server started successfully", "port", s.port)
+	return nil
 }
 
 // Shutdown gracefully stops the underlying Fiber server instance.

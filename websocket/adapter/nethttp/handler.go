@@ -29,6 +29,10 @@ type Config struct {
 	AuthenticateIdentity func(*http.Request) (core.Identity, error)
 	// Upgrader controls the WebSocket handshake. The default enforces same-origin.
 	Upgrader *websocket.Upgrader
+	// AdminToken guards HandleStats and HandleShardManagement with
+	// "Authorization: Bearer <token>". Empty means those endpoints always answer
+	// 401, so they are closed until the application opts in.
+	AdminToken string
 	// IPRateLimiter limits upgrade attempts per direct peer IP before the
 	// request is authenticated. The default allows wshttp.DefaultIPRate/Burst.
 	IPRateLimiter *limiter.KeyedRateLimiter
@@ -156,7 +160,11 @@ func (h *Handler) handleConnection(conn core.Conn, identity core.Identity, clien
 }
 
 // HandleStats returns manager, limiter, and pubsub runtime statistics.
-func (h *Handler) HandleStats(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
+	if !h.adminAllowed(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
@@ -167,6 +175,10 @@ func (h *Handler) HandleStats(w http.ResponseWriter, _ *http.Request) {
 
 // HandleShardManagement returns statistics for a requested shard.
 func (h *Handler) HandleShardManagement(w http.ResponseWriter, r *http.Request) {
+	if !h.adminAllowed(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	shardID := r.URL.Query().Get("shard")
 	if shardID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "shard ID required"})
@@ -195,6 +207,10 @@ func (h *Handler) HandleLive(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) HandleReady(w http.ResponseWriter, _ *http.Request) {
 	status, body := wshttp.ReadyStatus(h.manager.Readiness())
 	writeJSON(w, status, body)
+}
+
+func (h *Handler) adminAllowed(r *http.Request) bool {
+	return wshttp.AdminAllowed(r.Header.Get("Authorization"), h.config.AdminToken)
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

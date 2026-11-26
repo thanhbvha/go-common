@@ -36,3 +36,37 @@ func TestProbesSeparateLivenessFromReadiness(t *testing.T) {
 		t.Fatalf("a stopped node must not be ready, got %d", ready)
 	}
 }
+
+func TestAdminEndpointsRequireToken(t *testing.T) {
+	manager := core.NewManagerWithConfig(core.DefaultManagerConfig())
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	do := func(token, header string) int {
+		h := NewHandler(Config{Manager: manager, AdminToken: token})
+		ginframework.SetMode(ginframework.TestMode)
+		router := ginframework.New()
+		router.GET("/stats", h.HandleStats)
+		router.GET("/shard", h.HandleShardManagement)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+		req.Header.Set("Authorization", header)
+		router.ServeHTTP(rec, req)
+		first := rec.Code
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/shard?shard=x", nil)
+		req.Header.Set("Authorization", header)
+		router.ServeHTTP(rec, req)
+		if first == http.StatusUnauthorized && rec.Code != http.StatusUnauthorized {
+			t.Fatalf("shard endpoint not guarded: %d", rec.Code)
+		}
+		return first
+	}
+	if got := do("", "Bearer "); got != http.StatusUnauthorized {
+		t.Fatalf("no token configured: %d", got)
+	}
+	if got := do("s3cret", "Bearer wrong"); got != http.StatusUnauthorized {
+		t.Fatalf("wrong token: %d", got)
+	}
+	if got := do("s3cret", "Bearer s3cret"); got != http.StatusOK {
+		t.Fatalf("valid token: %d", got)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thanhbvha/go-common/v2/websocket/pool"
 	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
 )
 
@@ -206,6 +207,33 @@ func (m *Manager) Readiness() Readiness {
 	accountingValid := m.accountingConsistent()
 	state := m.State()
 	return Readiness{Ready: state == StateRunning && executorReady && brokerReady && accountingValid, State: state, ExecutorAccepting: executorReady, BrokerReady: brokerReady, AccountingValid: accountingValid}
+}
+
+// Snapshot is a typed, allocation-light view for metric exporters. Unlike
+// GetStats it builds no per-shard map and never takes the accounting mutex.
+type Snapshot struct {
+	Readiness          Readiness
+	Connections        int64
+	Shards             int
+	SubscriptionErrors uint64
+	Executor           pool.ExecutorStats
+	Handlers           HandlerSupervisorStats
+	Events             EventStats
+	Runtime            RuntimeMetrics
+	EventLatency       LatencyHistogram
+	QueueLatency       LatencyHistogram
+}
+
+func (m *Manager) Snapshot() Snapshot {
+	m.shardMutex.RLock()
+	shards := len(m.shards)
+	m.shardMutex.RUnlock()
+	return Snapshot{
+		Readiness: m.Readiness(), Connections: atomic.LoadInt64(&m.totalConnections), Shards: shards,
+		SubscriptionErrors: m.subscriptionErrors.Load(), Executor: m.eventExecutor.Stats(),
+		Handlers: m.handlerSupervisor.Stats(), Events: m.eventStats(), Runtime: m.runtimeMetrics(),
+		EventLatency: m.eventLatency(), QueueLatency: m.queueLatency(),
+	}
 }
 
 // ObserveQueueLatency measures inbound plus executor waiting, before handler work.

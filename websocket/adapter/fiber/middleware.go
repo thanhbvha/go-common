@@ -18,6 +18,10 @@ type MiddlewareManager struct {
 	app               *fiber.App
 	rateLimitMax      int
 	rateLimitDuration time.Duration
+	// AllowOrigins enables CORS for the listed origins (comma separated). Empty,
+	// the default, installs no CORS middleware. WebSocket upgrades are not
+	// governed by CORS; their origin policy is the upgrader's CheckOrigin.
+	AllowOrigins string
 }
 
 // NewMiddlewareManager instantiates a MiddlewareManager for the specified Fiber app with custom limit thresholds.
@@ -48,13 +52,15 @@ func (m *MiddlewareManager) SetupMiddlewares() {
 
 	m.app.Use(helmet.New())
 
-	m.app.Use(cors.New(cors.Config{
-		AllowOrigins:     "*",
-		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With",
-		AllowCredentials: false,
-		MaxAge:           86400,
-	}))
+	if m.AllowOrigins != "" {
+		m.app.Use(cors.New(cors.Config{
+			AllowOrigins:     m.AllowOrigins,
+			AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+			AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With",
+			AllowCredentials: false,
+			MaxAge:           86400,
+		}))
+	}
 
 	m.app.Use(fibermw.Recover())
 	m.app.Use(logger.New())

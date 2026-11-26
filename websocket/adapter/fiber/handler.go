@@ -19,6 +19,10 @@ import (
 
 // Config holds the configuration options for the Fiber WebSocket adapter.
 type Config struct {
+	// AdminToken guards HandleStats and HandleShardManagement with
+	// "Authorization: Bearer <token>". Empty means those endpoints always answer
+	// 401, so they are closed until the application opts in.
+	AdminToken string
 	// Manager is the core manager used by this adapter.
 	Manager *core.Manager
 	// Authenticate resolves user identifiers from the Fiber context.
@@ -165,6 +169,9 @@ func getRequestID(c *fiber.Ctx) string {
 
 // HandleStats returns JSON-formatted runtime metrics of the Manager, pubsub system, and limiters.
 func (h *Handler) HandleStats(c *fiber.Ctx) error {
+	if !h.adminAllowed(c) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
 	return c.JSON(fiber.Map{
 		"manager":     h.manager.GetStats(),
 		"rateLimiter": h.config.ConnectionLimiter.GetStats(),
@@ -175,6 +182,9 @@ func (h *Handler) HandleStats(c *fiber.Ctx) error {
 
 // HandleShardManagement retrieves statistics or checks status of a specific Shard.
 func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
+	if !h.adminAllowed(c) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
 	shardID := c.Query("shard")
 	if shardID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "shard ID required"})
@@ -189,6 +199,10 @@ func (h *Handler) HandleShardManagement(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "shard not found"})
+}
+
+func (h *Handler) adminAllowed(c *fiber.Ctx) bool {
+	return wshttp.AdminAllowed(c.Get("Authorization"), h.config.AdminToken)
 }
 
 // HandleLive is the liveness probe: 200 whenever the process can answer. It
