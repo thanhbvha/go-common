@@ -1,9 +1,15 @@
 # Shared local configuration for the server, protocol client, and load generator.
 # OS environment variables prefixed with WS_EXAMPLE_ override these values.
 server_stack: nethttp
-server_broker: standalone
+# Redis always holds the session registry; server_broker picks the targeted
+# delivery transport between nodes: redis or nats.
+server_broker: redis
 server_addr: ":8080"
+# host:port, or a URL: redis://default:password@host:6379/0 (rediss:// for TLS).
+# Prefer the separate fields below (or env) so the password stays out of the URL.
 server_redis: "127.0.0.1:6379"
+server_redis_username: ""
+server_redis_password: ""
 server_nats: "nats://127.0.0.1:4222"
 server_tenant: demo
 
@@ -24,6 +30,8 @@ max_connections_per_ip: 20
 # Demonstration credentials only. Do not use these values in production.
 client_token: local-demo-token
 admin_token: local-admin-token
+# Signs delivery messages between nodes (>= 32 bytes, identical on every node).
+broker_key: local-demo-broker-key-0123456789abcdef
 
 client_url: "ws://127.0.0.1:8080/ws"
 client_user: alice

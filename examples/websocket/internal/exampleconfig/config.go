@@ -33,9 +33,12 @@ type Config struct {
 	ServerAddr               string        `mapstructure:"server_addr"`
 	ServerRedis              string        `mapstructure:"server_redis"`
 	ServerNATS               string        `mapstructure:"server_nats"`
+	ServerRedisUsername      string        `mapstructure:"server_redis_username"`
+	ServerRedisPassword      string        `mapstructure:"server_redis_password"`
 	ServerTenant             string        `mapstructure:"server_tenant"`
 	ClientToken              string        `mapstructure:"client_token"`
 	AdminToken               string        `mapstructure:"admin_token"`
+	BrokerKey                string        `mapstructure:"broker_key"`
 	ClientURL                string        `mapstructure:"client_url"`
 	ClientUser               string        `mapstructure:"client_user"`
 	ClientTenant             string        `mapstructure:"client_tenant"`
@@ -76,7 +79,7 @@ func Default() Config {
 		LoadRate:                 1,
 		LoadAccounts:             1,
 		ServerStack:              "nethttp",
-		ServerBroker:             "standalone",
+		ServerBroker:             "redis",
 		ServerAddr:               ":8080",
 		ServerRedis:              "127.0.0.1:6379",
 		ServerNATS:               "nats://127.0.0.1:4222",

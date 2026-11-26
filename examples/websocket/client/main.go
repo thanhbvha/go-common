@@ -79,7 +79,7 @@ func parseFlags() (clientConfig, error) {
 	serverURL := flag.String("url", loaded.ClientURL, "WebSocket URL")
 	userID := flag.String("user", loaded.ClientUser, "Identity user ID")
 	tenantID := flag.String("tenant", loaded.ClientTenant, "Identity tenant ID")
-	accountID := flag.String("account", loaded.ClientAccount, "Identity account ID; use admin for cluster.broadcast")
+	accountID := flag.String("account", loaded.ClientAccount, "Identity account ID")
 	sessionID := flag.String("session", loaded.ClientSession, "Identity session ID; generated when omitted")
 	token := flag.String("token", loaded.ClientToken, "Client bearer token")
 	adminToken := flag.String("admin-token", loaded.AdminToken, "Admin bearer token for /admin endpoints")
@@ -210,13 +210,6 @@ func (c *demoClient) runScript() error {
 		{"chat.send", map[string]any{"room_id": c.config.roomID, "text": c.config.message}, 500 * time.Millisecond},
 		{"user.notify", map[string]any{"user_id": c.config.targetUser, "text": "direct notification from " + c.config.userID}, 500 * time.Millisecond},
 	}
-	if c.config.accountID == "admin" {
-		steps = append(steps, struct {
-			eventType string
-			data      any
-			wait      time.Duration
-		}{"cluster.broadcast", map[string]any{"text": "cluster broadcast from " + c.config.userID}, 500 * time.Millisecond})
-	}
 	steps = append(steps, struct {
 		eventType string
 		data      any
@@ -307,11 +300,6 @@ func (c *demoClient) handleCommand(line string) (bool, error) {
 			return false, errors.New("usage: /notify <user> <text>")
 		}
 		return false, c.send("user.notify", map[string]any{"user_id": userID, "text": strings.TrimSpace(text)})
-	case "/broadcast":
-		if arguments == "" {
-			return false, errors.New("usage: /broadcast <text>; account must be admin")
-		}
-		return false, c.send("cluster.broadcast", map[string]any{"text": arguments})
 	case "/raw":
 		var envelope outgoingEnvelope
 		if err := json.Unmarshal([]byte(arguments), &envelope); err != nil {
@@ -332,7 +320,6 @@ func printHelp() {
   /leave <tenant:room>               leave a room
   /chat <tenant:room> <text>         fan out a room message
   /notify <user> <text>              notify all local/cluster sessions for a user
-  /broadcast <text>                  shard-wide cluster broadcast; account=admin required
   /raw {"type":"...","data":{}}     send an arbitrary envelope
   /help                              print this help
   /quit                              close the session

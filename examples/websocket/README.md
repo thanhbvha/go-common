@@ -4,7 +4,7 @@ For the current tenant-scoped Gateway/Router APIs, start with the
 [complete WebSocket v2 example](v2/README.md). It includes Redis/NATS targeted
 delivery, trusted server-side identities, an EventBus round trip, an admin
 notification producer and bounded drain/shutdown. The example below demonstrates
-the four adapters and the legacy shard-based pub/sub API; the
+the four adapters on the same Gateway/Router topology; the
 [cluster example](cluster/README.md) separates gateway/worker/router roles.
 
 This directory is a complete runnable reference for the current WebSocket module. It demonstrates explicit manager construction, structured identities, event registration, authorization, room membership, user notifications, cluster fan-out, Redis or NATS routing, protected operational endpoints, graceful shutdown, and a protocol-aware command-line client.
@@ -109,7 +109,7 @@ export WS_EXAMPLE_CLIENT_TOKEN=replacement-token
 
 ## Quick Start
 
-The default YAML already selects standalone net/http, scripted client mode, matching tokens, and matching URLs. Start the server:
+The default YAML selects net/http, Redis delivery, scripted client mode, matching tokens, and matching URLs. The server needs a reachable Redis (the session registry); `broker_key` (>= 32 bytes, identical on every node) signs delivery messages between nodes. Start the server:
 
 ```bash
 go run ./examples/websocket
@@ -130,9 +130,8 @@ The scripted client performs:
 5. `room.join`.
 6. `chat.send`.
 7. `user.notify`.
-8. `cluster.broadcast` when `-account=admin`.
-9. `room.leave`.
-10. A normal WebSocket close.
+8. `room.leave`.
+9. A normal WebSocket close.
 
 ## Server Flags
 
@@ -140,16 +139,16 @@ The scripted client performs:
 |---|---|---|
 | `-config` | `examples/websocket/config.yaml` | YAML or `.env` configuration file |
 | `-stack` | Config `server_stack` | HTTP adapter: `nethttp`, `fiber`, `gin`, or `echo` |
-| `-broker` | Config `server_broker` | Message router: `standalone`, `redis`, or `nats` |
+| `-broker` | Config `server_broker` | Targeted delivery between nodes: `redis` or `nats` (Redis always holds the session registry) |
 | `-addr` | Config `server_addr` | HTTP listen address |
-| `-redis` | Config `server_redis` | Redis address for `-broker=redis` |
+| `-redis` | Config `server_redis` | Redis address (registry, and delivery for `-broker=redis`) |
 | `-nats` | Config `server_nats` | NATS URL for `-broker=nats` |
 | `-tenant` | Config `server_tenant` | Tenant used when a client omits `tenant_id` |
 
 Examples:
 
 ```bash
-go run ./examples/websocket -stack=gin -broker=standalone -addr=:8080
+go run ./examples/websocket -stack=gin -broker=redis -addr=:8080
 go run ./examples/websocket -stack=echo -broker=redis -redis=127.0.0.1:6379 -addr=:8080
 go run ./examples/websocket -stack=fiber -broker=nats -nats=nats://127.0.0.1:4222 -addr=:8080
 ```
@@ -235,7 +234,6 @@ The room ID must begin with:
 Event policy:
 
 - Every event requires non-empty `UserID` and `TenantID`.
-- `cluster.broadcast` additionally requires `AccountID == "admin"`.
 
 The authorizer runs before the business handler. Unauthorized events are dropped and counted by the observer. Room authorization errors are returned as an `error` event by the room handler.
 
@@ -363,7 +361,7 @@ Leaving is idempotent.
 
 ### `chat.send`
 
-Purpose: fan out a chat-style message to local room members and peer nodes.
+Purpose: fan out a chat-style message to every member of a room, on any node.
 
 Request:
 
@@ -383,31 +381,13 @@ Received event type:
 chat.message
 ```
 
-The handler calls both:
-
-```go
-shard.SendToRoom(roomID, payload)
-shard.BroadcastRoomMessage(roomID, payload)
-```
-
-`SendToRoom` reaches local room members. `BroadcastRoomMessage` publishes to peer cluster nodes. Publishing alone does not perform local fan-out.
-
-> **Limitation, development only.** This example uses the deprecated legacy room
-> API, which is scoped to a single shard. The adapter puts each user on the shard
-> `hash(user_id)` (up to 64 here), so two users in the same room are almost always
-> on different shards and **do not receive each other's `chat.message`**, even on
-> one node. The `members` count in `room.joined` is likewise per shard. Use it to
-> exercise the protocol with a single user or to see the wire format. For rooms that
-> work across users and nodes, run [`examples/websocket/v2`](v2/README.md) or
-> [`examples/websocket/cluster`](cluster/README.md), which deliver with
-> `routing.Router.SendToRoom`. See "Legacy shard rooms are single-node only" in
-> [`websocket/README.md`](../../websocket/README.md).
+The handler checks room access, then calls `routing.Router.SendToRoom` with the tenant from the verified identity. Delivery works across users, shards and nodes; the sender also receives its own message because it is a room member.
 
 This example does not persist chat messages. A production chat service should store the message first, then publish the live update.
 
 ### `user.notify`
 
-Purpose: send a notification to all active sessions for one user locally and across peer nodes.
+Purpose: send a notification to all active sessions of one user in the sender's tenant, on any node.
 
 Request:
 
@@ -427,41 +407,7 @@ Received event type:
 user.notification
 ```
 
-The example invokes local and cross-node paths:
-
-```go
-shard.SendToUser(userID, payload)
-shard.BroadcastUserNotification(userID, payload)
-```
-
-### `cluster.broadcast`
-
-Purpose: broadcast to every connection in the sender's shard locally and on peer nodes.
-
-Authorization requirement:
-
-```text
-AccountID == "admin"
-```
-
-Request:
-
-```json
-{
-  "type": "cluster.broadcast",
-  "data": {
-    "text": "maintenance starts soon"
-  }
-}
-```
-
-Received event type:
-
-```text
-cluster.broadcast
-```
-
-The example calls `Shard.BroadcastGlobal`, which performs local broadcast and broker publication.
+The example calls `routing.Router.SendToUser` with the sender's tenant; the payload never selects the tenant.
 
 ### `error`
 
@@ -499,7 +445,7 @@ as dropped events and do not automatically generate this response.
 | `-url` | Config `client_url` | WebSocket endpoint |
 | `-user` | Config `client_user` | Identity `UserID` |
 | `-tenant` | Config `client_tenant` | Identity `TenantID` |
-| `-account` | Config `client_account` | Identity `AccountID`; use `admin` for cluster broadcast |
+| `-account` | Config `client_account` | Identity `AccountID` |
 | `-session` | Config or generated | Identity `SessionID` |
 | `-token` | Config `client_token` | Client bearer token |
 | `-admin-token` | Config `admin_token` or client token | Admin probe token |
@@ -568,7 +514,7 @@ Scripted mode is suitable for smoke tests and MCP-driven verification because it
 Terminal 1, start server:
 
 ```bash
-go run ./examples/websocket -stack=nethttp -broker=standalone
+go run ./examples/websocket -stack=nethttp -broker=redis
 ```
 
 Terminal 2, Bob joins the room:
@@ -807,10 +753,7 @@ then sends `chat.send` at the requested per-connection rate:
 go run ./examples/websocket/loadtest -config=examples/websocket/config.loadtest.yaml -scenario=fanout -output=fanout.json
 ```
 
-Start the cluster gateway with `-config=examples/websocket/config.loadtest.yaml`
-and provide matching client/admin credentials through the environment. The legacy
-server above scopes room delivery by shard; use the cluster's targeted room router
-for groups spanning users on different shards.
+Start the server with `-config=examples/websocket/config.loadtest.yaml`. Room delivery uses `routing.Router`, so groups may span users on different shards.
 
 `group-size` counts all recipients including the sender (both examples echo to the
 sender). Connections must be divisible by group size. With 1,000 connections,

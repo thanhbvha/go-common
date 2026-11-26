@@ -1,115 +1,15 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"github.com/thanhbvha/go-common/v2/xerrors"
 )
-
-func TestConfiguredLimitsAndShutdownError(t *testing.T) {
-	settings := exampleconfig.Default()
-	settings.ExecutorPartitions = 2
-	settings.MaxConnectionsPerIP = 2
-	app, err := newApplication("standalone", "", "", "demo", "test", "admin", settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer app.close()
-	_, connections := app.adapterLimiters()
-	for attempt := 1; attempt <= settings.MaxConnectionsPerIP; attempt++ {
-		if !connections.AddConnection("peer") {
-			t.Fatalf("connection %d of %d was rejected", attempt, settings.MaxConnectionsPerIP)
-		}
-	}
-	if connections.AddConnection("peer") {
-		t.Fatalf("connection above configured per-IP limit %d was accepted", settings.MaxConnectionsPerIP)
-	}
-	if got := connections.GetConnectionCount("peer"); got != settings.MaxConnectionsPerIP {
-		t.Fatalf("connection count = %d, want %d", got, settings.MaxConnectionsPerIP)
-	}
-	connections.RemoveConnection("peer")
-	if !connections.AddConnection("peer") {
-		t.Fatal("released per-IP connection slot was not reusable")
-	}
-	if app.manager.GetConfig().ExecutorPartitions != 2 {
-		t.Fatal("configured executor partitions not applied")
-	}
-	err = app.shutdown(func(ctx context.Context) error {
-		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) <= 0 {
-			t.Fatal("missing HTTP shutdown budget")
-		}
-		return context.DeadlineExceeded
-	})
-	if !errors.Is(err, context.DeadlineExceeded) || app.manager.State() != core.StateStopped {
-		t.Fatalf("shutdown error=%v state=%v", err, app.manager.State())
-	}
-}
-
-func TestAuthenticateDemo(t *testing.T) {
-	tests := []struct {
-		name          string
-		expectedToken string
-		userID        string
-		authorization string
-		wantUserID    string
-		wantErr       bool
-	}{
-		{
-			name:          "missing configured token",
-			userID:        "user-1",
-			authorization: "Bearer secret",
-			wantErr:       true,
-		},
-		{
-			name:          "missing bearer token",
-			expectedToken: "secret",
-			userID:        "user-1",
-			wantErr:       true,
-		},
-		{
-			name:          "invalid bearer token",
-			expectedToken: "secret",
-			userID:        "user-1",
-			authorization: "Bearer wrong",
-			wantErr:       true,
-		},
-		{
-			name:          "missing user id",
-			expectedToken: "secret",
-			authorization: "Bearer secret",
-			wantErr:       true,
-		},
-		{
-			name:          "valid credentials",
-			expectedToken: "secret",
-			userID:        "user-1",
-			authorization: "bearer secret",
-			wantUserID:    "user-1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("WS_DEMO_TOKEN", tt.expectedToken)
-
-			userID, err := authenticateDemo(tt.userID, tt.authorization)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("authenticateDemo() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if userID != tt.wantUserID {
-				t.Fatalf("authenticateDemo() userID = %q, want %q", userID, tt.wantUserID)
-			}
-		})
-	}
-}
 
 type capturedErrorSender struct {
 	encoded []byte
@@ -191,5 +91,23 @@ func TestDecodePayloadUsesPublicValidationMessages(t *testing.T) {
 		if public.Code == "INTERNAL_ERROR" || public.Message == err.Error() {
 			t.Fatalf("validation policy missing: error=%v public=%+v", err, public)
 		}
+	}
+}
+
+func TestRedisOptions(t *testing.T) {
+	o, err := redisOptions("127.0.0.1:6379", "", "")
+	if err != nil || o.Addr != "127.0.0.1:6379" || o.Password != "" {
+		t.Fatalf("plain address: %+v %v", o, err)
+	}
+	o, err = redisOptions("redis://default:s3cret@10.0.0.5:6380/2", "", "")
+	if err != nil || o.Addr != "10.0.0.5:6380" || o.Username != "default" || o.Password != "s3cret" || o.DB != 2 {
+		t.Fatalf("url: %+v %v", o, err)
+	}
+	o, err = redisOptions("10.0.0.5:6379", "app", "pw")
+	if err != nil || o.Username != "app" || o.Password != "pw" {
+		t.Fatalf("separate credentials: %+v %v", o, err)
+	}
+	if _, err = redisOptions("redis://bad host:1", "", ""); err == nil || strings.Contains(err.Error(), "bad host") {
+		t.Fatalf("invalid URL must fail without echoing it: %v", err)
 	}
 }

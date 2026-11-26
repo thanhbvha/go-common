@@ -12,17 +12,18 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofiber/fiber/v2"
 	"github.com/labstack/echo/v4"
+	gonats "github.com/nats-io/nats.go"
+	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/thanhbvha/go-common/v2/examples/websocket/internal/exampleconfig"
 	"github.com/thanhbvha/go-common/v2/logger"
-	commonnats "github.com/thanhbvha/go-common/v2/nats"
-	commonredis "github.com/thanhbvha/go-common/v2/redis"
 	echomw "github.com/thanhbvha/go-common/v2/web/middleware/echo"
 	fibermw "github.com/thanhbvha/go-common/v2/web/middleware/fiber"
 	ginmw "github.com/thanhbvha/go-common/v2/web/middleware/gin"
@@ -35,29 +36,35 @@ import (
 	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
-	natspubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/nats"
-	redispubsub "github.com/thanhbvha/go-common/v2/websocket/pubsub/redis"
+	"github.com/thanhbvha/go-common/v2/websocket/routing"
+	natsrouting "github.com/thanhbvha/go-common/v2/websocket/routing/nats"
+	redisrouting "github.com/thanhbvha/go-common/v2/websocket/routing/redis"
 	"github.com/thanhbvha/go-common/v2/xerrors"
 )
 
 const (
-	eventSessionInfo      = "session.info"
-	eventSystemPing       = "system.ping"
-	eventRoomJoin         = "room.join"
-	eventRoomLeave        = "room.leave"
-	eventChatSend         = "chat.send"
-	eventUserNotify       = "user.notify"
-	eventClusterBroadcast = "cluster.broadcast"
+	eventSessionInfo = "session.info"
+	eventSystemPing  = "system.ping"
+	eventRoomJoin    = "room.join"
+	eventRoomLeave   = "room.leave"
+	eventChatSend    = "chat.send"
+	eventUserNotify  = "user.notify"
 )
 
+// application wires the v2 topology: Redis is the session registry, Redis or
+// NATS carries targeted delivery, and every fan-out goes through routing.Router.
 type application struct {
 	limits        exampleconfig.Config
 	manager       *core.Manager
-	redisClient   *commonredis.Client
-	natsClient    *commonnats.Client
+	gateway       *routing.Gateway
+	router        *routing.Router
+	redis         *goredis.Client
+	nats          *gonats.Conn
 	clientToken   string
 	adminToken    string
 	defaultTenant string
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 type roomPayload struct {
@@ -74,10 +81,6 @@ type userNotificationPayload struct {
 	Text   string `json:"text"`
 }
 
-type broadcastPayload struct {
-	Text string `json:"text"`
-}
-
 type demoAuthorizer struct{}
 
 func (demoAuthorizer) CanSubscribe(_ context.Context, identity core.Identity, roomID string) error {
@@ -89,9 +92,6 @@ func (demoAuthorizer) CanSubscribe(_ context.Context, identity core.Identity, ro
 
 func (demoAuthorizer) CanPublish(_ context.Context, identity core.Identity, eventType string) error {
 	if identity.UserID == "" || identity.TenantID == "" {
-		return core.ErrUnauthorized
-	}
-	if eventType == eventClusterBroadcast && identity.AccountID != "admin" {
 		return core.ErrUnauthorized
 	}
 	return nil
@@ -106,7 +106,7 @@ func main() {
 	}
 	configFile := flag.String("config", configPath, "YAML or .env configuration file")
 	stack := flag.String("stack", loaded.ServerStack, "HTTP stack: nethttp, fiber, gin, or echo")
-	broker := flag.String("broker", loaded.ServerBroker, "Broker: standalone, redis, or nats")
+	broker := flag.String("broker", loaded.ServerBroker, "Targeted delivery transport between nodes: redis or nats (Redis always holds the session registry)")
 	address := flag.String("addr", loaded.ServerAddr, "HTTP listen address")
 	redisAddress := flag.String("redis", loaded.ServerRedis, "Redis host:port")
 	natsURL := flag.String("nats", loaded.ServerNATS, "NATS URL")
@@ -114,7 +114,9 @@ func main() {
 	flag.Parse()
 	_ = configFile
 
-	app, err := newApplication(*broker, *redisAddress, *natsURL, *defaultTenant, loaded.ClientToken, loaded.AdminToken, loaded)
+	startup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	app, err := newApplication(startup, *broker, *redisAddress, *natsURL, *defaultTenant, loaded)
+	cancel()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -142,30 +144,72 @@ func main() {
 	}
 }
 
-func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, adminToken string, limits exampleconfig.Config) (*application, error) {
-	if clientToken == "" {
+func newApplication(ctx context.Context, broker, redisAddress, natsURL, defaultTenant string, limits exampleconfig.Config) (a *application, result error) {
+	if limits.ClientToken == "" {
 		return nil, errors.New("client_token is required in config or WS_EXAMPLE_CLIENT_TOKEN")
 	}
+	adminToken := limits.AdminToken
 	if adminToken == "" {
-		adminToken = clientToken
+		adminToken = limits.ClientToken
+	}
+	if broker != "redis" && broker != "nats" {
+		return nil, fmt.Errorf("invalid broker %q; use redis or nats", broker)
 	}
 
 	l := logger.New(logger.Options{Level: slog.LevelInfo, StdOut: true})
 	logger.SetDefault(l)
 
-	app := &application{clientToken: clientToken, adminToken: adminToken, defaultTenant: defaultTenant}
-	bus, ownership, err := app.newPubSub(broker, redisAddress, natsURL)
+	a = &application{limits: limits, clientToken: limits.ClientToken, adminToken: adminToken, defaultTenant: defaultTenant}
+	defer func() {
+		if result != nil {
+			_ = a.close()
+			a = nil
+		}
+	}()
+
+	// Delivery messages between nodes are signed; cluster-grade validation
+	// (ValidateProduction) refuses a gateway whose transport is unauthenticated.
+	authenticator, err := pubsub.NewAuthenticator("example", map[string][]byte{"example": []byte(limits.BrokerKey)}, pubsub.AuthRequired)
 	if err != nil {
-		return nil, err
+		return a, errors.New("broker_key (WS_EXAMPLE_BROKER_KEY) must be at least 32 bytes; it authenticates delivery messages between nodes")
+	}
+	signed := routing.WithMessageAuthenticator(authenticator)
+
+	redisOptions, err := redisOptions(redisAddress, limits.ServerRedisUsername, limits.ServerRedisPassword)
+	if err != nil {
+		return a, err
+	}
+	a.redis = goredis.NewClient(redisOptions)
+	if err = a.redis.Ping(ctx).Err(); err != nil {
+		// Never echo the address: it may embed a password.
+		return a, fmt.Errorf("connect Redis: %w", err)
+	}
+	const namespace = "ws-example"
+	registry := redisrouting.NewRegistry(a.redis, namespace)
+
+	var delivery routing.DeliveryTransport
+	if broker == "nats" {
+		if a.nats, err = gonats.Connect(natsURL, gonats.Timeout(5*time.Second), gonats.Name("websocket-example")); err != nil {
+			return a, fmt.Errorf("connect NATS %s: %w", natsURL, err)
+		}
+		delivery = natsrouting.NewTransport(a.nats, namespace, signed)
+	} else {
+		delivery = redisrouting.NewTransport(a.redis, namespace, signed)
 	}
 
-	registry := core.NewEventRegistry()
-	registerHandlers(registry)
+	if a.gateway, err = routing.NewGateway(routing.GatewayConfig{Registry: registry, Transport: delivery}); err != nil {
+		return a, err
+	}
+	if err = a.gateway.Start(ctx); err != nil {
+		return a, fmt.Errorf("start gateway: %w", err)
+	}
+	if a.router, err = routing.NewRouter(routing.RouterConfig{Registry: registry, Transport: delivery}); err != nil {
+		return a, err
+	}
 
 	config := core.DefaultManagerConfig()
-	config.PubSub = bus
-	config.PubSubOwnership = ownership
-	config.EventRegistry = registry
+	config.Distributed = a.gateway // Borrowed; closed after the manager drains.
+	config.EventRegistry = a.events()
 	config.Authorizer = demoAuthorizer{}
 	config.Observer = &core.AtomicObserver{}
 	config.MaxShards = 64
@@ -182,86 +226,60 @@ func newApplication(broker, redisAddress, natsURL, defaultTenant, clientToken, a
 	config.PongWait = 60 * time.Second
 	config.PingPeriod = 50 * time.Second
 	limits.ApplyManagerLimits(&config)
-	app.limits = limits
-
-	if broker == "standalone" {
-		if err := config.ValidateProduction(); err != nil {
-			return nil, err
-		}
-	} else {
-		// Legacy Shard/pub-sub fan-out is best-effort and single-node/dev only;
-		// production clusters use Distributed (see examples/websocket/cluster).
-		if err := config.Validate(); err != nil {
-			return nil, err
-		}
-		logger.WarnAsync("legacy broker fan-out is for development only; use routing.Gateway for clusters", "broker", broker)
+	if a.manager, err = core.NewProductionManager(config); err != nil {
+		return a, err
 	}
-	app.manager = core.NewManagerWithConfig(config)
-	if readiness, ok := bus.(pubsub.WaitReadyProvider); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := readiness.WaitReady(ctx)
-		cancel()
-		if err != nil {
-			app.close()
-			return nil, fmt.Errorf("wait for %s broker readiness: %w", broker, err)
-		}
-	}
-	return app, nil
+	return a, nil
 }
 
-func (a *application) newPubSub(broker, redisAddress, natsURL string) (pubsub.Manager, core.PubSubOwnership, error) {
-	switch broker {
-	case "standalone":
-		return pubsub.NewNoopManager(), core.PubSubOwned, nil
-	case "redis":
-		host, port, ok := strings.Cut(redisAddress, ":")
-		if !ok || host == "" || port == "" {
-			return nil, core.PubSubBorrowed, fmt.Errorf("invalid Redis address %q", redisAddress)
+// redisOptions accepts a plain host:port or a URL (redis://user:pass@host:6379/0,
+// rediss:// for TLS). Credentials may also come from the separate username and
+// password settings, which override the URL so secrets can live in the environment.
+func redisOptions(address, username, password string) (*goredis.Options, error) {
+	options := &goredis.Options{Addr: address}
+	if strings.Contains(address, "://") {
+		var err error
+		if options, err = goredis.ParseURL(address); err != nil {
+			return nil, errors.New("invalid server_redis URL")
 		}
-		redisConfig := commonredis.DefaultConfig()
-		redisConfig.Host = host
-		if _, err := fmt.Sscanf(port, "%d", &redisConfig.Port); err != nil {
-			return nil, core.PubSubBorrowed, fmt.Errorf("invalid Redis port in %q: %w", redisAddress, err)
-		}
-		redisConfig.Logger = logger.Default()
-		a.redisClient = commonredis.New(redisConfig)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := a.redisClient.Connect(ctx); err != nil {
-			return nil, core.PubSubBorrowed, fmt.Errorf("connect Redis: %w", err)
-		}
-		return redispubsub.NewManagerWithClientAndPolicy(a.redisClient, pubsub.FailStartup), core.PubSubOwned, nil
-	case "nats":
-		natsConfig := commonnats.DefaultConfig()
-		natsConfig.URLs = []string{natsURL}
-		natsConfig.Logger = logger.Default()
-		a.natsClient = commonnats.New(natsConfig)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := a.natsClient.Connect(ctx); err != nil {
-			return nil, core.PubSubBorrowed, fmt.Errorf("connect NATS: %w", err)
-		}
-		return natspubsub.NewManagerWithClientAndPolicy(a.natsClient, pubsub.FailStartup), core.PubSubOwned, nil
-	default:
-		return nil, core.PubSubBorrowed, fmt.Errorf("invalid -broker %q; use standalone, redis, or nats", broker)
 	}
+	if username != "" {
+		options.Username = username
+	}
+	if password != "" {
+		options.Password = password
+	}
+	return options, nil
 }
 
-func registerHandlers(registry *core.EventRegistry) {
-	registry.Register(eventSessionInfo, handlerConfig(2*time.Second, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
+// events registers the demo protocol. All fan-out goes through routing.Router,
+// so rooms and user notifications work across shards and across nodes.
+func (a *application) events() *core.EventRegistry {
+	registry := core.NewEventRegistry()
+	authz := demoAuthorizer{}
+	register := func(event string, maxPayload int, handler core.ContextJobHandler) {
+		registry.Register(event, core.HandlerConfig{Timeout: 3 * time.Second, MaxPayloadBytes: maxPayload, Handler: handler})
+	}
+	// deliver maps a Router outcome to an error so the client sees one failure shape.
+	deliver := func(result routing.DeliveryResult, err error) error {
+		if err == nil && result.Retryable() {
+			err = routing.ErrUnavailable
+		}
+		return err
+	}
+
+	register(eventSessionInfo, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
 		return sendEvent(conn, "session.info.result", map[string]any{
 			"identity":    conn.Identity(),
 			"shard_id":    conn.GetShardID(),
 			"request_id":  conn.GetRequestID(),
 			"server_time": time.Now().UTC(),
 		})
-	}))
-
-	registry.Register(eventSystemPing, handlerConfig(time.Second, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
+	})
+	register(eventSystemPing, 1024, func(_ context.Context, conn *core.Connection, _ core.IncomingMessage) error {
 		return sendEvent(conn, "system.pong", map[string]any{"server_time": time.Now().UTC()})
-	}))
-
-	registry.Register(eventRoomJoin, handlerConfig(2*time.Second, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
+	})
+	register(eventRoomJoin, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
 		var payload roomPayload
 		if err := decodePayload(message.Data, &payload); err != nil {
 			return sendError(conn, eventRoomJoin, err)
@@ -269,10 +287,9 @@ func registerHandlers(registry *core.EventRegistry) {
 		if err := conn.GetShard().JoinRoom(ctx, payload.RoomID, conn); err != nil {
 			return sendError(conn, eventRoomJoin, err)
 		}
-		return sendEvent(conn, "room.joined", map[string]any{"room_id": payload.RoomID, "members": conn.GetShard().GetRoomSize(payload.RoomID)})
-	}))
-
-	registry.Register(eventRoomLeave, handlerConfig(2*time.Second, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
+		return sendEvent(conn, "room.joined", map[string]any{"room_id": payload.RoomID})
+	})
+	register(eventRoomLeave, 4*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
 		var payload roomPayload
 		if err := decodePayload(message.Data, &payload); err != nil {
 			return sendError(conn, eventRoomLeave, err)
@@ -281,9 +298,8 @@ func registerHandlers(registry *core.EventRegistry) {
 			return sendError(conn, eventRoomLeave, err)
 		}
 		return sendEvent(conn, "room.left", map[string]any{"room_id": payload.RoomID})
-	}))
-
-	registry.Register(eventChatSend, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
+	})
+	register(eventChatSend, 8*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
 		var payload chatPayload
 		if err := decodePayload(message.Data, &payload); err != nil {
 			return sendError(conn, eventChatSend, err)
@@ -291,27 +307,31 @@ func registerHandlers(registry *core.EventRegistry) {
 		if payload.Text == "" {
 			return sendError(conn, eventChatSend, xerrors.New("TEXT_REQUIRED", "Text is required", http.StatusBadRequest))
 		}
+		identity := conn.Identity()
+		if err := authz.CanSubscribe(ctx, identity, payload.RoomID); err != nil {
+			return sendError(conn, eventChatSend, err)
+		}
 		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "chat.message", RequestID: conn.GetRequestID(), Data: map[string]any{
 			"room_id": payload.RoomID,
 			"text":    payload.Text,
-			"sender":  conn.Identity(),
+			"sender":  identity,
 			"sent_at": time.Now().UTC(),
 		}})
 		if err != nil {
 			return err
 		}
-		// Development only: legacy rooms are scoped to one shard and users are
-		// spread across shards by hash(user_id), so this does not reach every
-		// member. Clusters deliver with routing.Router.SendToRoom (see ./v2).
-		conn.GetShard().SendToRoom(payload.RoomID, outgoing)
-		conn.GetShard().BroadcastRoomMessage(payload.RoomID, outgoing)
+		if err = deliver(a.router.SendToRoom(ctx, identity.TenantID, payload.RoomID, outgoing, routing.NewID())); err != nil {
+			return sendError(conn, eventChatSend, err)
+		}
 		return nil
-	}))
-
-	registry.Register(eventUserNotify, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
+	})
+	register(eventUserNotify, 8*1024, func(ctx context.Context, conn *core.Connection, message core.IncomingMessage) error {
 		var payload userNotificationPayload
 		if err := decodePayload(message.Data, &payload); err != nil {
 			return sendError(conn, eventUserNotify, err)
+		}
+		if payload.UserID == "" {
+			return sendError(conn, eventUserNotify, xerrors.New("USER_REQUIRED", "user_id is required", http.StatusBadRequest))
 		}
 		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "user.notification", RequestID: conn.GetRequestID(), Data: map[string]any{
 			"text":    payload.Text,
@@ -321,31 +341,13 @@ func registerHandlers(registry *core.EventRegistry) {
 		if err != nil {
 			return err
 		}
-		conn.GetShard().SendToUser(payload.UserID, outgoing)
-		conn.GetShard().BroadcastUserNotification(payload.UserID, outgoing)
-		return nil
-	}))
-
-	registry.Register(eventClusterBroadcast, handlerConfig(2*time.Second, 8*1024, func(_ context.Context, conn *core.Connection, message core.IncomingMessage) error {
-		var payload broadcastPayload
-		if err := decodePayload(message.Data, &payload); err != nil {
-			return sendError(conn, eventClusterBroadcast, err)
+		// The tenant always comes from the verified identity, never the payload.
+		if err = deliver(a.router.SendToUser(ctx, conn.Identity().TenantID, payload.UserID, outgoing, routing.NewID())); err != nil {
+			return sendError(conn, eventUserNotify, err)
 		}
-		outgoing, err := json.Marshal(core.OutgoingMessage{Type: "cluster.broadcast", RequestID: conn.GetRequestID(), Data: map[string]any{
-			"text":    payload.Text,
-			"sender":  conn.GetUserID(),
-			"sent_at": time.Now().UTC(),
-		}})
-		if err != nil {
-			return err
-		}
-		conn.GetShard().BroadcastGlobal(outgoing)
 		return nil
-	}))
-}
-
-func handlerConfig(timeout time.Duration, maxPayloadBytes int, handler core.ContextJobHandler) core.HandlerConfig {
-	return core.HandlerConfig{Timeout: timeout, MaxPayloadBytes: maxPayloadBytes, Handler: handler}
+	})
+	return registry
 }
 
 func decodePayload(data []byte, destination any) error {
@@ -438,17 +440,6 @@ func (a *application) authenticate(userID, tenantID, accountID, sessionID, autho
 func validBearerToken(authorization, expected string) bool {
 	scheme, token, ok := strings.Cut(authorization, " ")
 	return ok && strings.EqualFold(scheme, "Bearer") && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
-}
-
-func authenticateDemo(userID, authorization string) (string, error) {
-	expected := os.Getenv("WS_DEMO_TOKEN")
-	if expected == "" || !validBearerToken(authorization, expected) {
-		return "", errors.New("invalid demo token")
-	}
-	if userID == "" {
-		return "", errors.New("user_id is required")
-	}
-	return userID, nil
 }
 
 func (a *application) adminAuthorized(authorization string) bool {
@@ -612,17 +603,28 @@ func (a *application) shutdown(shutdownHTTP func(context.Context) error) error {
 	return errors.Join(httpErr, a.manager.Shutdown(managerCtx))
 }
 
-func (a *application) close() {
-	if a.manager != nil && a.manager.State() != core.StateStopped {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = a.manager.Shutdown(ctx)
-		cancel()
-	}
-	if a.redisClient != nil {
-		_ = a.redisClient.Close()
-	}
-	if a.natsClient != nil {
-		_ = a.natsClient.Close()
-	}
-	logger.Close()
+// close is idempotent. Order matters: drain sockets first, then close the
+// gateway (which releases leases), then the broker connections.
+func (a *application) close() error {
+	a.closeOnce.Do(func() {
+		step := func(close func(context.Context) error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			a.closeErr = errors.Join(a.closeErr, close(ctx))
+		}
+		if a.manager != nil && a.manager.State() != core.StateStopped {
+			step(a.manager.Shutdown)
+		}
+		if a.gateway != nil {
+			step(a.gateway.Close)
+		}
+		if a.nats != nil {
+			a.nats.Close()
+		}
+		if a.redis != nil {
+			a.closeErr = errors.Join(a.closeErr, a.redis.Close())
+		}
+		logger.Close()
+	})
+	return a.closeErr
 }
