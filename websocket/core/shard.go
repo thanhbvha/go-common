@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gorilla/websocket"
 	"github.com/thanhbvha/go-common/v2/logger"
 	panicrecovery "github.com/thanhbvha/go-common/v2/recovery"
 	"github.com/thanhbvha/go-common/v2/websocket/internal/wsrecovery"
@@ -131,7 +132,7 @@ func (s *Shard) authorizer() Authorizer {
 	if configured, ok := s.coordinator.(interface{ GetAuthorizer() Authorizer }); ok {
 		return configured.GetAuthorizer()
 	}
-	return currentAuthorizer()
+	return allowAuthorizer{}
 }
 
 func (s *Shard) observer() Observer { return s.config.Observer }
@@ -378,7 +379,7 @@ func (s *Shard) Register(conn *Connection) bool {
 	}
 	select {
 	case <-s.ctx.Done():
-		conn.Close("Shard stopped")
+		conn.reject(websocket.CloseGoingAway, "Shard stopped")
 		return false
 	default:
 	}
@@ -492,7 +493,7 @@ func (s *Shard) handleRegister(conn *Connection) bool {
 	select {
 	case <-s.ctx.Done():
 		s.mu.Unlock()
-		conn.Close("Shard stopped")
+		conn.reject(websocket.CloseGoingAway, "Shard stopped")
 		return false
 	default:
 	}
@@ -500,7 +501,7 @@ func (s *Shard) handleRegister(conn *Connection) bool {
 		count := s.GetConnectionCount()
 		s.mu.Unlock()
 		logger.ErrorAsync("Shard at max capacity, rejecting connection", "shard", s.name, "count", count)
-		conn.Close("Shard at max capacity")
+		conn.reject(websocket.CloseTryAgainLater, "Shard at max capacity")
 		return false
 	}
 	s.activeConns[conn] = struct{}{}

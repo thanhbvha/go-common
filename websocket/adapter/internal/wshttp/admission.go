@@ -64,3 +64,15 @@ func (g Gate) Admit(key string) *Denial {
 	}
 	return nil
 }
+
+// AdmitIdentity runs the post-authentication pre-check (per-user/account/tenant
+// quota, shard capacity) so the rejection is an HTTP 503 instead of a socket
+// that opens and is closed without a reason. It is advisory; the manager still
+// enforces the limits atomically after the upgrade.
+func (g Gate) AdmitIdentity(identity core.Identity) *Denial {
+	err := g.Manager.CheckAdmission(identity, g.Manager.GetShardID(identity.UserID))
+	if err == nil {
+		return nil
+	}
+	return &Denial{Status: 503, Message: err.Error(), RetryAfter: 5 * time.Second}
+}

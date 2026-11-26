@@ -54,7 +54,6 @@ func (*routingPubSub) NotifyUserJoin(string, string, string) error              
 func (*routingPubSub) NotifyUserLeave(string, string) error                              { return nil }
 func (*routingPubSub) NotifyShardCreate(string) error                                    { return nil }
 func (*routingPubSub) NotifyShardDestroy(string) error                                   { return nil }
-func (*routingPubSub) SendNodeStatus(map[string]interface{}) error                       { return nil }
 func (*routingPubSub) GetNodeID() string                                                 { return "routing-node" }
 func (*routingPubSub) GetStats() map[string]interface{}                                  { return nil }
 func (p *routingPubSub) Shutdown() error {

@@ -35,7 +35,4 @@ func TestProbesSeparateLivenessFromReadiness(t *testing.T) {
 	if ready := probe(handler.HandleReady); ready != http.StatusServiceUnavailable {
 		t.Fatalf("a stopped node must not be ready, got %d", ready)
 	}
-	if got := probe(handler.HandleHealthCheck); got != http.StatusServiceUnavailable {
-		t.Fatalf("legacy health route = %d, want readiness semantics (503)", got)
-	}
 }

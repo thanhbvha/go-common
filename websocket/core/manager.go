@@ -14,6 +14,7 @@ import (
 
 	"errors"
 	"github.com/cespare/xxhash/v2"
+	"github.com/gorilla/websocket"
 	"github.com/thanhbvha/go-common/v2/logger"
 	"github.com/thanhbvha/go-common/v2/websocket/pool"
 	"github.com/thanhbvha/go-common/v2/websocket/pubsub"
@@ -64,25 +65,10 @@ const (
 	StateStopped
 )
 
-var (
-	globalManager *Manager
-	managerOnce   sync.Once
-)
-
-// GetGlobalManager returns the singleton Manager instance, bootstrapping it if necessary.
-func GetGlobalManager() *Manager {
-	managerOnce.Do(func() {
-		globalManager = NewManager()
-	})
-	return globalManager
-}
-
 // NewManager instantiates a new connection Manager and spins up standard pubsub hooks and default shard.
 func NewManager() *Manager {
 	config := DefaultManagerConfig()
-	config.PubSub = pubsub.GetGlobalManager()
 	config.EventRegistry = defaultEventRegistry
-	config.Authorizer = currentAuthorizer()
 	config.Observer = defaultObserver
 	return NewManagerWithConfig(config)
 }
@@ -123,7 +109,6 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 	go defaultShard.Run()
 	m.recordSubscriptionError(m.pubsubManager.Subscribe("system", "shard:"+defaultShardName))
 
-	m.sendNodeStatus()
 	m.state.Store(int32(StateRunning))
 	go m.Run()
 
@@ -205,11 +190,7 @@ func (m *Manager) setupPubSubHandlers() {
 	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeShardDestroy, func(msg *pubsub.CrossNodeMessage) {
 		logger.InfoAsync("Shard destroyed on peer cluster node", "shardID", msg.ShardID, "nodeID", msg.NodeID)
 	}))
-
-	m.pubsubRegistrations = append(m.pubsubRegistrations, m.pubsubManager.RegisterHandler(pubsub.MessageTypeNodeStatus, func(msg *pubsub.CrossNodeMessage) {
-		logger.InfoAsync("Cluster node status update", "nodeID", msg.NodeID, "data", msg.Data)
-	}))
-}
+}
 
 func crossNodePayload(msg *pubsub.CrossNodeMessage) []byte {
 	if msg == nil {
@@ -217,20 +198,6 @@ func crossNodePayload(msg *pubsub.CrossNodeMessage) []byte {
 	}
 	payload, _ := msg.Payload()
 	return payload
-}
-
-// sendNodeStatus publishes current node metrics to the clustered coordination system.
-func (m *Manager) sendNodeStatus() {
-	stats := m.GetStats()
-	data := map[string]interface{}{
-		"total_connections": stats["totalConnections"],
-		"total_shards":      stats["totalShards"],
-		"timestamp":         time.Now(),
-	}
-
-	if err := m.pubsubManager.SendNodeStatus(data); err != nil {
-		logger.ErrorAsync("Failed to publish node metrics", "error", err, "nodeID", m.nodeID)
-	}
 }
 
 // Run executes the manager loop, managing cleanup of empty shards periodically.
@@ -293,6 +260,20 @@ func (m *Manager) reserveIdentityConnection(identity Identity) *connectionReserv
 	if atomic.LoadInt64(&m.totalConnections)+m.reservedConnections >= m.GetConfig().MaxConnections {
 		return nil
 	}
+	keys, ok := m.quotaKeysLocked(identity)
+	if !ok {
+		return nil
+	}
+	m.reservedConnections++
+	for _, key := range keys {
+		m.identityUsage[key]++
+	}
+	return &connectionReservation{keys: keys}
+}
+
+// quotaKeysLocked returns the quota keys identity would occupy, or false when a
+// per-user/account/tenant limit is already reached. accountingMutex must be held.
+func (m *Manager) quotaKeysLocked(identity Identity) ([]quotaKey, bool) {
 	config := m.GetConfig()
 	checks := []struct {
 		key   quotaKey
@@ -308,16 +289,38 @@ func (m *Manager) reserveIdentityConnection(identity Identity) *connectionReserv
 			continue
 		}
 		if m.identityUsage[check.key] >= check.limit {
-			return nil
+			return nil, false
 		}
 		keys = append(keys, check.key)
 	}
-	m.reservedConnections++
-	for _, key := range keys {
-		m.identityUsage[key]++
-	}
-	return &connectionReservation{keys: keys}
+	return keys, true
 }
+
+// CheckAdmission is a non-reserving pre-check run after authentication and
+// before the WebSocket upgrade, so a quota or shard-capacity rejection can be
+// an HTTP status instead of an opened-then-closed socket. It is advisory:
+// HandleIdentityConnection still enforces limits atomically.
+func (m *Manager) CheckAdmission(identity Identity, shardID string) error {
+	if !m.IsAcceptingConnections() {
+		return ErrAdmissionDraining
+	}
+	m.accountingMutex.Lock()
+	_, ok := m.quotaKeysLocked(identity)
+	m.accountingMutex.Unlock()
+	if !ok {
+		return ErrAdmissionQuota
+	}
+	if shard, exists := m.GetShard(shardID); exists && !shard.CanAcceptConnection() {
+		return ErrAdmissionShardFull
+	}
+	return nil
+}
+
+var (
+	ErrAdmissionDraining  = errors.New("manager is not accepting connections")
+	ErrAdmissionQuota     = errors.New("connection quota reached")
+	ErrAdmissionShardFull = errors.New("shard at max capacity")
+)
 
 func (m *Manager) registerReservedConnection(shard *Shard, connection *Connection) bool {
 	m.accountingMutex.Lock()
@@ -526,7 +529,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	reservation := m.reserveIdentityConnection(identity)
 	if reservation == nil {
 		logger.WarnAsync("Manager connection ceiling reached, rejecting connection", "total", m.GetTotalConnections())
-		_ = conn.Close()
+		m.closeRaw(conn, websocket.CloseTryAgainLater, "server capacity reached")
 		return fmt.Errorf("server capacity reached")
 	}
 	reserved := true
@@ -542,7 +545,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 
 	shard := m.acquireShard(shardID)
 	if shard == nil {
-		_ = conn.Close()
+		m.closeRaw(conn, websocket.CloseTryAgainLater, "manager stopped or shard capacity reached")
 		return fmt.Errorf("manager stopped or shard capacity reached")
 	}
 	defer shard.admitting.Add(-1)
@@ -550,7 +553,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	shardID = shard.name
 	connection := NewConnection(conn, shard, userID, shardID, clientIP, m.nodeID, requestID)
 	if connection == nil {
-		_ = conn.Close()
+		m.closeRaw(conn, websocket.CloseInternalServerErr, "internal error")
 		return fmt.Errorf("failed to allocate connection wrapper")
 	}
 	if (m.config.Distributed != nil || m.config.CommandPublisher != nil) && identity.SessionID == "" {
@@ -559,7 +562,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	connection.setIdentity(identity)
 	connection.quotaKeys = reservation.keys
 	if !identity.ExpiresAt.IsZero() {
-		timer := time.AfterFunc(time.Until(identity.ExpiresAt), func() { connection.Close("Authentication expired") })
+		timer := time.AfterFunc(time.Until(identity.ExpiresAt), func() { connection.requestClose(websocket.ClosePolicyViolation, "Authentication expired") })
 		defer timer.Stop()
 	}
 
@@ -575,10 +578,10 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 				return routing.ErrClosed
 			}
 			return err
-		}, func() { connection.Close("Session superseded") })
+		}, func() { connection.requestClose(CloseSessionSuperseded, "Session superseded") })
 		cancel()
 		if err != nil {
-			connection.Close("Session registration failed")
+			connection.rejectAndWait(websocket.CloseTryAgainLater, "Session registration failed")
 			return err
 		}
 		connection.location = &location
@@ -594,7 +597,7 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	}
 	if !m.registerReservedConnection(shard, connection) {
 		reserved = false
-		connection.Close("registration rejected")
+		connection.reject(websocket.CloseTryAgainLater, "registration rejected")
 		return fmt.Errorf("failed to register connection")
 	}
 	m.config.Observer.ConnectionOpened()
@@ -608,6 +611,13 @@ func (m *Manager) HandleIdentityConnection(conn Conn, shardID string, identity I
 	connection.Run()
 
 	return nil
+}
+
+// closeRaw refuses a socket that has no Connection wrapper yet: close frame
+// first so the client sees a reason, then close.
+func (m *Manager) closeRaw(conn Conn, code int, reason string) {
+	writeCloseFrame(conn, m.GetConfig().WriteWait, code, reason)
+	_ = conn.Close()
 }
 
 // DisconnectIdentity closes active sessions matching the supplied predicate.
@@ -631,7 +641,7 @@ func (m *Manager) DisconnectIdentity(match func(Identity) bool, reason string) i
 		shard.mu.RUnlock()
 		for _, conn := range connections {
 			if match(conn.identity) {
-				conn.Close(reason)
+				conn.requestClose(websocket.ClosePolicyViolation, reason)
 				disconnected++
 			}
 		}

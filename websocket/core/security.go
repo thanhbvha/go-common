@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -33,28 +32,6 @@ type allowAuthorizer struct{}
 
 func (allowAuthorizer) CanSubscribe(context.Context, Identity, string) error { return nil }
 func (allowAuthorizer) CanPublish(context.Context, Identity, string) error   { return nil }
-
-var (
-	authorizerMu sync.RWMutex
-	authorizer   Authorizer = allowAuthorizer{}
-)
-
-// SetAuthorizer installs the process-wide core authorization policy.
-func SetAuthorizer(value Authorizer) {
-	if value == nil {
-		value = allowAuthorizer{}
-	}
-	authorizerMu.Lock()
-	authorizer = value
-	authorizerMu.Unlock()
-}
-
-func currentAuthorizer() Authorizer {
-	authorizerMu.RLock()
-	value := authorizer
-	authorizerMu.RUnlock()
-	return value
-}
 
 // DispatchPolicy selects local callbacks or a durable business command publisher.
 type DispatchPolicy int

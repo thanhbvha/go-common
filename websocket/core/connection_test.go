@@ -111,6 +111,14 @@ func (m *mockConn) Close() error {
 type lifecycleCoordinator struct {
 	decrements atomic.Int32
 	executor   *pool.PartitionedExecutor
+	authz      Authorizer
+}
+
+func (c *lifecycleCoordinator) GetAuthorizer() Authorizer {
+	if c.authz == nil {
+		return allowAuthorizer{}
+	}
+	return c.authz
 }
 
 func (*lifecycleCoordinator) GetShardID(string) string { return "test-shard" }

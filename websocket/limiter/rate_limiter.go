@@ -133,16 +133,3 @@ func (cl *ConnectionLimiter) GetStats() map[string]interface{} {
 		"maxPerKey":        cl.maxPerKey,
 	}
 }
-
-var (
-	globalConnectionLimiter *ConnectionLimiter
-	connectionLimiterOnce   sync.Once
-)
-
-// GetGlobalConnectionLimiter returns the default singleton ConnectionLimiter (max 100 connections per key).
-func GetGlobalConnectionLimiter() *ConnectionLimiter {
-	connectionLimiterOnce.Do(func() {
-		globalConnectionLimiter = NewConnectionLimiter(100)
-	})
-	return globalConnectionLimiter
-}

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,81 @@ func (m *mockConn) closeCode() int {
 			}
 		default:
 			return -1
+		}
+	}
+}
+
+func TestDisconnectIdentitySendsPolicyFrame(t *testing.T) {
+	transport := newMockConn()
+	connection, shard, _ := newRunningTestConnection(t, transport)
+	connection.setIdentity(Identity{UserID: "u"})
+	manager := &Manager{shards: map[string]*Shard{shard.name: shard}}
+	if n := manager.DisconnectIdentity(func(Identity) bool { return true }, "revoked"); n != 1 {
+		t.Fatalf("disconnected = %d, want 1", n)
+	}
+	waitConnection(t, connection)
+	if got := transport.closeCode(); got != websocket.ClosePolicyViolation {
+		t.Fatalf("close code = %d, want %d", got, websocket.ClosePolicyViolation)
+	}
+}
+
+func TestRejectBeforePumpsSendsCloseFrame(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{DisableLifecycleLogging: true})
+	t.Cleanup(func() { _ = manager.Shutdown(t.Context()) })
+	shard := manager.GetOrCreateShard(defaultShardName)
+	transport := newMockConn()
+	connection := NewConnection(transport, shard, "u", shard.name, "", manager.nodeID, "")
+	connection.rejectAndWait(websocket.CloseTryAgainLater, "full")
+	if got := transport.closeCode(); got != websocket.CloseTryAgainLater {
+		t.Fatalf("close code = %d, want %d", got, websocket.CloseTryAgainLater)
+	}
+	if transport.closeCount.Load() != 1 {
+		t.Fatalf("socket closed %d times, want 1", transport.closeCount.Load())
+	}
+}
+
+func TestShardAtCapacityRejectsWithTryAgainLater(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{DisableLifecycleLogging: true, MaxShardConnections: 1})
+	t.Cleanup(func() { _ = manager.Shutdown(t.Context()) })
+	shard := manager.GetOrCreateShard(defaultShardName)
+	first := NewConnection(newMockConn(), shard, "a", shard.name, "", manager.nodeID, "")
+	if !shard.Register(first) {
+		t.Fatal("first register failed")
+	}
+	transport := newMockConn()
+	second := NewConnection(transport, shard, "b", shard.name, "", manager.nodeID, "")
+	if shard.Register(second) {
+		t.Fatal("second register must fail")
+	}
+	<-second.closedDone
+	if got := transport.closeCode(); got != websocket.CloseTryAgainLater {
+		t.Fatalf("close code = %d, want %d", got, websocket.CloseTryAgainLater)
+	}
+}
+
+func TestViolationSendsRateLimitedErrorEnvelope(t *testing.T) {
+	transport := newMockConn()
+	connection, _, _ := newRunningTestConnection(t, transport)
+	bad := &EventMessage{Conn: connection, Raw: []byte("not json"), queuedAt: time.Now()}
+	for range 5 {
+		HandleEvent(bad)
+	}
+	deadline := time.After(time.Second)
+	envelopes := 0
+	for envelopes == 0 {
+		select {
+		case f := <-transport.writes:
+			if f.messageType == websocket.TextMessage && strings.Contains(string(f.data), `"code":"malformed"`) {
+				envelopes++
+			}
+		case <-deadline:
+			t.Fatal("no error envelope sent")
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	for len(transport.writes) > 0 {
+		if f := <-transport.writes; strings.Contains(string(f.data), `"type":"error"`) {
+			t.Fatal("more than one envelope within a second")
 		}
 	}
 }

@@ -45,7 +45,7 @@ examples/websocket/
 - Protected `/admin/stats` and `/admin/shard` endpoints.
 - HTTP shutdown before WebSocket manager shutdown.
 
-The example does not call `core.GetGlobalManager`, `core.RegisterHandler`, or `pubsub.SetGlobalManager`.
+The example builds its manager explicitly and does not use `core.RegisterHandler`.
 
 ## Requirements
 

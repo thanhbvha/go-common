@@ -72,56 +72,6 @@ func WithMaxMessageBytes(n int) Option {
 	}
 }
 
-var (
-	globalManager *Manager
-	managerOnce   sync.Once
-)
-
-// GetGlobalManager returns the default singleton Manager initialized with the default NATS client.
-//
-// Deprecated: process-global state couples unrelated services and tests. Build
-// a Manager with NewManagerWithClient and pass it via core.ManagerConfig.PubSub.
-func GetGlobalManager() *Manager {
-	managerOnce.Do(func() {
-		globalManager = NewManager()
-	})
-	return globalManager
-}
-
-// NewManager instantiates a Manager on the default NATS client. When no default
-// client is registered the manager stays unready and rejects publishes rather
-// than silently running as a single node; use
-// NewManagerWithClientAndPolicy(nil, pubsub.AllowStandalone) to opt in to
-// in-process loopback for development.
-//
-// Deprecated: depends on a process-global client. Prefer NewManagerWithClient.
-func NewManager() *Manager {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	client, _ := nats.LookupDefault()
-
-	if client == nil {
-		logger.WarnAsync("NATS default client not set. WebSocket PubSub will stay unready until one is configured.")
-	}
-
-	manager := &Manager{
-		maxMessageBytes: pubsub.DefaultMaxMessageBytes,
-		natsClient:      client,
-		nodeID:          pubsub.GenerateNodeID(),
-		subscribers:     make(map[string]*gonats.Subscription),
-		desired:         make(map[string]struct{}),
-		handlers:        make(map[string]map[pubsub.HandlerRegistration]func(*pubsub.CrossNodeMessage)),
-		registrations:   make(map[pubsub.HandlerRegistration]string),
-		ctx:             ctx,
-		cancel:          cancel,
-		failurePolicy:   pubsub.StayUnready,
-	}
-	manager.startExecutor()
-	manager.supervisorWG.Add(1)
-	go manager.superviseSubscriptions()
-	return manager
-}
-
 // NewManagerWithClient instantiates a Manager on a user-provided NATS client.
 // It stays unready while the client is nil or disconnected. A nil client is a
 // misconfiguration in a cluster, so it is not silently treated as standalone;
@@ -484,16 +434,6 @@ func (psm *Manager) NotifyShardDestroy(shardID string) error {
 	message := &pubsub.CrossNodeMessage{
 		Type:    pubsub.MessageTypeShardDestroy,
 		ShardID: shardID,
-	}
-
-	return psm.Publish("system", message)
-}
-
-// SendNodeStatus publishes node status metrics to the system control topic.
-func (psm *Manager) SendNodeStatus(data map[string]interface{}) error {
-	message := &pubsub.CrossNodeMessage{
-		Type: pubsub.MessageTypeNodeStatus,
-		Data: data,
 	}
 
 	return psm.Publish("system", message)

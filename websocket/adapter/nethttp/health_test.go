@@ -32,12 +32,3 @@ func TestProbesSeparateLivenessFromReadiness(t *testing.T) {
 		t.Fatalf("a stopped node must not be ready, got %d", ready)
 	}
 }
-
-func TestHandleHealthCheckStaysAnAliasOfReady(t *testing.T) {
-	manager := core.NewManagerWithConfig(core.DefaultManagerConfig())
-	handler := NewHandler(Config{Manager: manager})
-	_ = manager.Shutdown(context.Background())
-	if got := probe(handler.HandleHealthCheck); got != http.StatusServiceUnavailable {
-		t.Fatalf("legacy health route = %d, want readiness semantics (503)", got)
-	}
-}

@@ -27,7 +27,6 @@ var (
 var knownTypes = map[string]struct{}{
 	MessageTypeChat: {}, MessageTypeChatRoom: {}, MessageTypeNotification: {}, MessageTypeBroadcast: {},
 	MessageTypeUserJoin: {}, MessageTypeUserLeave: {}, MessageTypeShardCreate: {}, MessageTypeShardDestroy: {},
-	MessageTypeNodeStatus: {},
 }
 
 // DecodeCrossNodeMessage treats payload as untrusted. The size limit is applied

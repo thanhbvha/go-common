@@ -15,10 +15,9 @@ func (denyAuthorizer) CanSubscribe(context.Context, Identity, string) error { re
 func (denyAuthorizer) CanPublish(context.Context, Identity, string) error   { return ErrUnauthorized }
 
 func TestSecurityRejectsUnauthorizedRoomAndEvent(t *testing.T) {
-	SetAuthorizer(denyAuthorizer{})
-	t.Cleanup(func() { SetAuthorizer(nil) })
 	transport := newMockConn()
-	connection, shard, _ := newRunningTestConnection(t, transport)
+	connection, shard, coordinator := newRunningTestConnection(t, transport)
+	coordinator.authz = denyAuthorizer{}
 	if err := shard.JoinRoom(context.Background(), "room", connection); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("JoinRoom error = %v", err)
 	}

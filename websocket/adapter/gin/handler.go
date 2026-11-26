@@ -67,14 +67,14 @@ func NewHandler(customConfig ...Config) *Handler {
 		}
 	}
 	if config.ConnectionLimiter == nil {
-		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
+		config.ConnectionLimiter = limiter.NewConnectionLimiter(100)
 	}
 	if config.ConnectionKey == nil {
 		config.ConnectionKey = func(c *gin.Context, _ string) string { return httpkit.ClientIP(c.Request) }
 	}
 
 	if config.Manager == nil {
-		config.Manager = core.GetGlobalManager()
+		config.Manager = core.NewManager()
 	}
 	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
 }
@@ -104,6 +104,12 @@ func (h *Handler) HandleUpgrade(c *gin.Context) {
 		return
 	}
 	userID := identity.UserID
+
+	if denial := h.gate.AdmitIdentity(identity); denial != nil {
+		c.Header("Retry-After", denial.RetryAfterHeader())
+		c.JSON(denial.Status, gin.H{"error": denial.Message})
+		return
+	}
 
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
@@ -200,12 +206,4 @@ func (h *Handler) HandleLive(c *gin.Context) {
 func (h *Handler) HandleReady(c *gin.Context) {
 	status, body := wshttp.ReadyStatus(h.manager.Readiness())
 	c.JSON(status, body)
-}
-
-// HandleHealthCheck is HandleReady.
-//
-// Deprecated: a single health endpoint conflates liveness with readiness. Use
-// HandleLive for the liveness probe and HandleReady for readiness.
-func (h *Handler) HandleHealthCheck(c *gin.Context) {
-	h.HandleReady(c)
 }

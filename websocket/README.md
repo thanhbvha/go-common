@@ -399,6 +399,9 @@ compatibility reads during mixed-version rollout; disable indexed reads before
 rolling writers back. The index adds writes and metadata; follow the
 [detailed rollout guide](routing/README.md#room-lookup-and-node-index-rollout).
 
+Client-facing HTTP statuses, close codes, the `error` envelope and reconnect
+rules are in [CLIENT_PROTOCOL.md](CLIENT_PROTOCOL.md).
+
 ## Shutdown and drain
 
 Manager lifecycle is `Starting → Running → Draining → Stopped`. Shutdown rejects

@@ -65,14 +65,14 @@ func NewHandler(customConfig ...Config) *Handler {
 		}
 	}
 	if config.ConnectionLimiter == nil {
-		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
+		config.ConnectionLimiter = limiter.NewConnectionLimiter(100)
 	}
 	if config.ConnectionKey == nil {
 		config.ConnectionKey = func(r *http.Request, _ string) string { return httpkit.ClientIP(r) }
 	}
 
 	if config.Manager == nil {
-		config.Manager = core.GetGlobalManager()
+		config.Manager = core.NewManager()
 	}
 	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
 }
@@ -103,6 +103,12 @@ func (h *Handler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := identity.UserID
+
+	if denial := h.gate.AdmitIdentity(identity); denial != nil {
+		w.Header().Set("Retry-After", denial.RetryAfterHeader())
+		writeJSON(w, denial.Status, map[string]string{"error": denial.Message})
+		return
+	}
 
 	clientIP := h.config.ConnectionKey(r, userID)
 	if !h.config.ConnectionLimiter.CanConnect(clientIP) {
@@ -189,14 +195,6 @@ func (h *Handler) HandleLive(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) HandleReady(w http.ResponseWriter, _ *http.Request) {
 	status, body := wshttp.ReadyStatus(h.manager.Readiness())
 	writeJSON(w, status, body)
-}
-
-// HandleHealthCheck is HandleReady.
-//
-// Deprecated: a single health endpoint conflates liveness with readiness. Use
-// HandleLive for the liveness probe and HandleReady for readiness.
-func (h *Handler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	h.HandleReady(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

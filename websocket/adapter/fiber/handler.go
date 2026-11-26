@@ -54,7 +54,7 @@ func NewHandler(config Config) *Handler {
 		}
 	}
 	if config.ConnectionLimiter == nil {
-		config.ConnectionLimiter = limiter.GetGlobalConnectionLimiter()
+		config.ConnectionLimiter = limiter.NewConnectionLimiter(100)
 	}
 	if config.ConnectionKey == nil {
 		config.ConnectionKey = func(c *fiber.Ctx, _ string) string { return c.IP() }
@@ -66,7 +66,7 @@ func NewHandler(config Config) *Handler {
 	}
 
 	if config.Manager == nil {
-		config.Manager = core.GetGlobalManager()
+		config.Manager = core.NewManager()
 	}
 	return &Handler{config: config, manager: config.Manager, gate: wshttp.NewGate(config.Manager, config.IPRateLimiter)}
 }
@@ -110,6 +110,11 @@ func (h *Handler) HandleUpgrade(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 	userID := identity.UserID
+
+	if denial := h.gate.AdmitIdentity(identity); denial != nil {
+		c.Set(fiber.HeaderRetryAfter, denial.RetryAfterHeader())
+		return c.Status(denial.Status).JSON(fiber.Map{"error": denial.Message})
+	}
 
 	clientIP := h.config.ConnectionKey(c, userID)
 	requestID := getRequestID(c)
@@ -200,12 +205,4 @@ func (h *Handler) HandleLive(c *fiber.Ctx) error {
 func (h *Handler) HandleReady(c *fiber.Ctx) error {
 	status, body := wshttp.ReadyStatus(h.manager.Readiness())
 	return c.Status(status).JSON(body)
-}
-
-// HandleHealthCheck is HandleReady.
-//
-// Deprecated: a single health endpoint conflates liveness with readiness. Use
-// HandleLive for the liveness probe and HandleReady for readiness.
-func (h *Handler) HandleHealthCheck(c *fiber.Ctx) error {
-	return h.HandleReady(c)
 }

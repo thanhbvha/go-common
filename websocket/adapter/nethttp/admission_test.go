@@ -3,9 +3,13 @@ package nethttp
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/thanhbvha/go-common/v2/websocket/core"
 	"github.com/thanhbvha/go-common/v2/websocket/limiter"
 )
 
@@ -74,5 +78,36 @@ func TestForwardedHeaderCannotEvadeUpgradeRateLimit(t *testing.T) {
 	}
 	if codes[1] != http.StatusTooManyRequests || codes[2] != http.StatusTooManyRequests {
 		t.Fatalf("spoofed X-Forwarded-For evaded the limit: %v", codes)
+	}
+}
+
+func TestQuotaRejectionIsHTTP503BeforeUpgrade(t *testing.T) {
+	manager := core.NewManagerWithConfig(core.ManagerConfig{MaxConnectionsPerUser: 1, DisableLifecycleLogging: true})
+	t.Cleanup(func() { _ = manager.Shutdown(t.Context()) })
+	handler := NewHandler(Config{
+		Manager:           manager,
+		Authenticate:      func(*http.Request) (string, error) { return "user", nil },
+		ConnectionLimiter: limiter.NewConnectionLimiter(10),
+	})
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleUpgrade))
+	defer server.Close()
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	first, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for manager.GetTotalConnections() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, response, err := websocket.DefaultDialer.Dial(url, nil)
+	if err == nil || response == nil {
+		t.Fatalf("second dial must be rejected before upgrade, err = %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") == "" {
+		t.Fatalf("status = %d, Retry-After = %q", response.StatusCode, response.Header.Get("Retry-After"))
 	}
 }

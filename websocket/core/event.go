@@ -127,13 +127,13 @@ func HandleEvent(ev *EventMessage) {
 	if !utf8.Valid(ev.Raw) || !stdjson.Valid(ev.Raw) {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
-		ev.Conn.violation()
+		ev.Conn.violation("malformed")
 		return
 	}
 	if err := json.Unmarshal(ev.Raw, &inc); err != nil || inc.Type == "" {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
-		ev.Conn.violation()
+		ev.Conn.violation("malformed")
 		return
 	}
 
@@ -146,13 +146,13 @@ func HandleEvent(ev *EventMessage) {
 	if registration.maxPayloadBytes > 0 && len(inc.Data) > registration.maxPayloadBytes {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
-		ev.Conn.violation()
+		ev.Conn.violation("payload_too_large")
 		return
 	}
 	if registration.validate != nil && registration.validate(inc.Data) != nil {
 		observer.EventMalformed()
 		ev.Conn.malformedMessages.Add(1)
-		ev.Conn.violation()
+		ev.Conn.violation("invalid_payload")
 		return
 	}
 	if err := ev.Conn.shard.authorizer().CanPublish(ev.Conn.ctx, ev.Conn.identity, inc.Type); err != nil {

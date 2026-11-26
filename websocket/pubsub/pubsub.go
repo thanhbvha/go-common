@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -33,7 +32,6 @@ const (
 	MessageTypeUserLeave    = "user_leave"
 	MessageTypeShardCreate  = "shard_create"
 	MessageTypeShardDestroy = "shard_destroy"
-	MessageTypeNodeStatus   = "node_status"
 )
 
 // CrossNodeMessage represents the payload wrapper sent between different cluster nodes.
@@ -99,40 +97,9 @@ type Manager interface {
 	NotifyShardCreate(shardID string) error
 	NotifyShardDestroy(shardID string) error
 
-	SendNodeStatus(data map[string]interface{}) error
 	GetNodeID() string
 	GetStats() map[string]interface{}
 	Shutdown() error
-}
-
-var (
-	globalMu      sync.Mutex
-	globalManager Manager
-)
-
-// SetGlobalManager replaces the process-wide pub/sub manager used by
-// core.NewManager. It is safe for concurrent use and takes effect for managers
-// created afterwards.
-//
-// Deprecated: process-global state couples unrelated services and tests. Pass
-// the manager explicitly through core.ManagerConfig.PubSub.
-func SetGlobalManager(m Manager) {
-	globalMu.Lock()
-	globalManager = m
-	globalMu.Unlock()
-}
-
-// GetGlobalManager returns the process-wide pub/sub manager, creating a
-// NoopManager (single-node, no external dependencies) when none was set.
-//
-// Deprecated: pass the manager explicitly through core.ManagerConfig.PubSub.
-func GetGlobalManager() Manager {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	if globalManager == nil {
-		globalManager = NewNoopManager()
-	}
-	return globalManager
 }
 
 // NoopManager is a default implementation of Manager that does nothing.
@@ -167,7 +134,6 @@ func (m *NoopManager) NotifyUserJoin(shardID, userID, clientIP string) error { r
 func (m *NoopManager) NotifyUserLeave(shardID, userID string) error          { return nil }
 func (m *NoopManager) NotifyShardCreate(shardID string) error                { return nil }
 func (m *NoopManager) NotifyShardDestroy(shardID string) error               { return nil }
-func (m *NoopManager) SendNodeStatus(data map[string]interface{}) error      { return nil }
 func (m *NoopManager) GetNodeID() string                                     { return m.nodeID }
 func (m *NoopManager) GetStats() map[string]interface{}                      { return nil }
 func (m *NoopManager) Shutdown() error                                       { return nil }

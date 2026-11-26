@@ -92,6 +92,7 @@ type Connection struct {
 	consecutiveDrops      atomic.Int32
 	closeFrame            atomic.Pointer[[]byte] // set by requestClose, sent by the writer
 	consecutiveViolations atomic.Int32
+	lastErrorEnvelope     atomic.Int64 // unix nanos of the last error notice sent
 	started               atomic.Bool
 	identity              Identity
 	roomOperationMu       sync.Mutex // serializes room I/O for this connection, never shard state
@@ -163,6 +164,10 @@ func (c *Connection) removeRoom(roomID string) {
 	c.roomsMu.Unlock()
 }
 
+// CloseSessionSuperseded is the application close code sent to a session that
+// was replaced by a newer one for the same identity (4000-4999 is private use).
+const CloseSessionSuperseded = 4000
+
 // Close signals connection shutdown. It is idempotent and deliberately does
 // not wait for the read/write pumps, so it is safe to call from either pump.
 func (c *Connection) Close(reason string) {
@@ -215,9 +220,68 @@ func (c *Connection) requestClose(code int, reason string) {
 
 // violation records a client protocol/rate violation and disconnects a client
 // that keeps violating without sending anything valid in between.
-func (c *Connection) violation() {
-	if c.consecutiveViolations.Add(1) >= c.config.MaxViolations {
+func (c *Connection) violation(code string) {
+	n := c.consecutiveViolations.Add(1)
+	if n >= c.config.MaxViolations {
 		c.requestClose(websocket.ClosePolicyViolation, "Too many protocol violations")
+		return
+	}
+	// At most one envelope per second so a flood cannot turn into an echo flood.
+	now := time.Now().UnixNano()
+	last := c.lastErrorEnvelope.Load()
+	if now-last >= int64(time.Second) && c.lastErrorEnvelope.CompareAndSwap(last, now) {
+		c.sendQuiet([]byte(`{"type":"error","data":{"code":"` + code + `"}}`))
+	}
+}
+
+// sendQuiet queues a server notice without slow-consumer accounting: a full
+// queue drops the notice instead of counting against the client.
+func (c *Connection) sendQuiet(message []byte) {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	if c.draining.Load() || c.ctx.Err() != nil {
+		return
+	}
+	c.outboundPending.Add(1)
+	select {
+	case c.send <- message:
+	default:
+		c.outboundPending.Add(-1)
+	}
+}
+
+// reject refuses a connection that is being admitted. If the pumps were never
+// started there is no writer, so this claims the right to write: the close frame
+// is sent from a short-lived goroutine (callers may hold accounting locks) and
+// the socket is closed after. If the pumps already run, the writer sends it.
+func (c *Connection) reject(code int, reason string) {
+	claimed := false
+	c.runOnce.Do(func() { claimed = true })
+	if !claimed {
+		c.requestClose(code, reason)
+		return
+	}
+	c.lifecycleMu.Lock()
+	c.cancel()
+	c.lifecycleMu.Unlock()
+	go func() {
+		writeCloseFrame(c.conn, c.config.WriteWait, code, reason)
+		c.Close(reason)
+	}()
+}
+
+// rejectAndWait is reject for callers that hold no locks and need the socket
+// closed on return. Bounded by WriteWait plus the close itself.
+func (c *Connection) rejectAndWait(code int, reason string) {
+	c.reject(code, reason)
+	<-c.closedDone
+}
+
+// writeCloseFrame best-effort sends a close frame on a connection that has no
+// writer goroutine.
+func writeCloseFrame(conn Conn, wait time.Duration, code int, reason string) {
+	if conn != nil && conn.SetWriteDeadline(time.Now().Add(wait)) == nil {
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
 	}
 }
 
@@ -369,7 +433,7 @@ func (c *Connection) readPump() {
 			}
 			if !c.messageLimiter.Allow() || !c.byteLimiter.AllowN(int64(len(message))) {
 				c.inboundDrops.Add(1)
-				c.violation()
+				c.violation("rate_limited")
 				continue
 			}
 			ev := &EventMessage{Conn: c, Raw: bytes.Clone(message), queuedAt: time.Now()}

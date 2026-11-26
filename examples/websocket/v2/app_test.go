@@ -330,6 +330,7 @@ func TestV2RejectsClientSelectedIdentityFields(t *testing.T) {
 	a, server := startExample(t, s)
 	conn := dialExample(t, server, s.credentials[0])
 	sendEvent(t, conn, "notify.user", map[string]string{"text": "forged target", "tenant_id": "other", "user_id": "bob"})
+	readEvent(t, conn, "error") // the server now tells the client what it did wrong
 	request(t, conn, "system.ping", "system.pong", map[string]any{})
 	stats := a.manager.GetStats()["events"].(core.EventStats)
 	if stats.Malformed != 1 || a.gateway.Stats().Enqueued != 0 {
